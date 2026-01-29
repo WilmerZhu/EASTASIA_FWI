@@ -1,0 +1,54 @@
+# EASTASIA-FWI Python Dependencies
+# 东亚全波形反演项目依赖包
+#
+# 安装方式: pip install -r requirements.txt
+# 注意: 推荐使用 conda env create -f environment.yml 安装完整环境
+
+# ============ 核心地震学包 ============
+obspy>=1.4.0  # 地震学数据处理核心（FDSN, UTCDateTime, Inventory）
+pyasdf  # ASDF 格式支持
+
+# ============ 数据处理 ============
+numpy>=1.24
+scipy>=1.11  # stats, ndimage, interpolate（广泛使用）
+pandas>=2.0
+xarray  # 多维数组（NetCDF 速度模型读写）
+netcdf4  # NetCDF 文件支持
+h5py  # HDF5 文件支持
+
+# ============ 机器学习 ============
+scikit-learn>=1.3  # DictionaryLearning, Ridge, GaussianMixture, KMeans, OMP
+scikit-image  # SSIM 相似性分析 (structural_similarity)
+
+# ============ 可视化 ============
+matplotlib>=3.7  # 核心绘图（包含 gridspec, patches, colors）
+seaborn  # 统计可视化（热力图、聚类图）
+pygmt>=0.11  # GMT 地图绘制（首选，用于地震学地图）
+cartopy>=0.22  # 地理投影/海岸线（切片图）
+cmcrameri  # 科学配色方案（地球物理常用）
+colorcet  # 额外配色方案
+
+# ============ 并行计算 ============
+mpi4py  # MPI 并行（SPECFEM3D 集成）
+joblib  # 本地并行计算
+tqdm  # 进度条
+
+# ============ 实用工具 ============
+pyyaml  # YAML 配置文件
+requests  # HTTP 请求（FDSN 查询）
+beautifulsoup4  # HTML 解析
+lxml  # XML 处理
+openpyxl  # Excel 文件读写
+pillow  # 图像处理
+
+# ============ 开发工具（可选）============
+# ipython
+# jupyter
+# jupyterlab
+# black  # 代码格式化
+# pytest  # 单元测试
+# mypy  # 类型检查
+
+# ============ pip 专用包 ============
+contextily  # 底图瓦片
+adjustText  # 标签自动调整（避免重叠）

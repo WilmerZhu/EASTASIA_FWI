@@ -1,0 +1,20 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: "EASTASIA-FWI: East Asia Full Waveform Inversion Framework"
+version: 1.0.0-alpha
+date-released: 2025-01-29
+doi: 10.5281/zenodo.XXXXXXX
+authors:
+  - given-names: EASTASIA-FWI
+    family-names: Team
+    affiliation: "East Asia Seismology Research Group"
+keywords:
+  - full waveform inversion
+  - seismic tomography
+  - East Asia
+  - SPECFEM3D
+  - model clustering
+  - similarity analysis
+license: MIT
+repository-code: "https://github.com/yourusername/EASTASIA_FWI"
+abstract: "EASTASIA-FWI is a comprehensive framework for full waveform inversion in East Asia, integrating model space analysis (clustering and similarity analysis) and data space waveform evaluation to establish 3D Earth structure initial models for the East Asia region."

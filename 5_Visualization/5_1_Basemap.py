@@ -1,4 +1,5 @@
 """
+5_1_Basemap.py: 
 东亚地区基础地图绘制模块
 基于PyGMT绘制东亚地区基础地形图
 包含地形、海底年龄、火山、断层和板块边界
@@ -17,7 +18,6 @@ import pandas as pd
 import numpy as np
 from pathlib import Path
 import sys
-import re
 from typing import Dict, Optional
 
 # 添加项目根目录到路径
@@ -26,6 +26,10 @@ sys.path.insert(0, str(project_root))
 
 # 导入基础配置
 from config.base_config import BaseConfig
+
+# 导入可视化模块工具函数（从模块内 utils 目录导入）
+sys.path.insert(0, str(Path(__file__).parent))
+from utils.file_utils import extract_module_prefix, generate_filename
 
 
 class BasemapConfig:
@@ -187,7 +191,7 @@ class EastAsiaBasemap:
         self._setup_pygmt_config()
         
         # 自动提取模块号（从文件名如 5_1_Basemap.py 提取 5-1）
-        self.module_prefix = self._extract_module_prefix()
+        self.module_prefix = extract_module_prefix(Path(__file__), default="5-1")
         
         self.logger.info("🗺️ 东亚基础地图绘制器初始化完成")
         self._print_config_summary()
@@ -258,47 +262,6 @@ class EastAsiaBasemap:
             MAP_LABEL_OFFSET=pygmt_config['map_label_offset'],
         )
     
-    def _extract_module_prefix(self) -> str:
-        """
-        从文件名自动提取模块前缀
-        
-        从文件名如 '5_1_Basemap.py' 提取 '5-1'
-        
-        Returns:
-            模块前缀字符串，如 '5-1'
-        """
-        try:
-            # 获取当前文件路径
-            current_file = Path(__file__)
-            # 提取文件名（不含扩展名）
-            filename = current_file.stem  # 例如: '5_1_Basemap'
-            
-            # 使用正则表达式提取模块号（格式：数字_数字）
-            match = re.match(r'^(\d+)_(\d+)_', filename)
-            if match:
-                module_num = match.group(1)
-                sub_num = match.group(2)
-                return f"{module_num}-{sub_num}"
-            else:
-                # 如果无法匹配，返回默认值
-                self.logger.warning(f"无法从文件名 {filename} 提取模块号，使用默认值 '5-1'")
-                return "5-1"
-        except Exception as e:
-            self.logger.warning(f"提取模块前缀失败: {e}，使用默认值 '5-1'")
-            return "5-1"
-    
-    def _generate_filename(self, description: str, extension: str = "jpg") -> str:
-        """
-        自动生成符合规范的图片文件名
-        
-        Args:
-            description: 图片描述（如 'comprehensive_basemap'）
-            extension: 文件扩展名（默认 'jpg'）
-            
-        Returns:
-            符合规范的完整文件名，如 '5-1_comprehensive_basemap.jpg'
-        """
-        return f"{self.module_prefix}_{description}.{extension}"
 
     def prepare_elevation_data(self) -> str:
         """准备地形数据"""
@@ -675,7 +638,7 @@ class EastAsiaBasemap:
         
         # 如果没有指定文件名，自动生成
         if save_file is None:
-            save_file = self._generate_filename("comprehensive_basemap")
+            save_file = generate_filename(self.module_prefix, "comprehensive_basemap")
         
         # 合并默认图层配置和用户选项
         layers = self.config.layers.copy()
@@ -742,7 +705,7 @@ class EastAsiaBasemap:
         
         # 如果没有指定文件名，自动生成
         if save_file is None:
-            save_file = self._generate_filename("simple_basemap")
+            save_file = generate_filename(self.module_prefix, "simple_basemap")
         
         try:
             # 创建基础底图
