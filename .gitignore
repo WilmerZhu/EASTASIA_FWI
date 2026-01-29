@@ -1,0 +1,112 @@
+# ============================================================
+# EASTASIA-FWI .gitignore
+# ============================================================
+
+# ============ Python ============
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# ============ cursor ============
+.cursor/
+
+# ============ 虚拟环境 ============
+.env
+.venv
+env/
+venv/
+ENV/
+
+# ============ IDE ============
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# ============ macOS ============
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# ============ 大型数据目录 ============
+# 目录数据太大，不上传到 GitHub
+data/
+results/
+figures/
+backup/
+logs/
+temp/
+
+# ============ SPECFEM3D Globe ============
+# SPECFEM 需要单独下载/编译
+specfem3d_globe/
+
+# ============ 地理数据 (5_Visualization) ============
+# 这些数据文件需要单独下载
+5_Visualization/data_EastAsia/
+
+# ============ 大型数据文件 ============
+*.nc
+*.sac
+*.mseed
+*.MSEED
+*.h5
+*.hdf5
+*.vtk
+*.vtu
+*.grd
+*.tif
+*.tiff
+
+# ============ 压缩文件 ============
+*.zip
+*.tar
+*.tar.gz
+*.tar.bz2
+*.7z
+*.rar
+
+# ============ Jupyter ============
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# ============ 敏感信息 ============
+*.env
+.env.*
+credentials.*
+secrets.*
+*.pem
+*.key
+
+# ============ 临时文件 ============
+*.tmp
+*.temp
+*.bak
+*.backup
+*.orig
+
+# ============ 保留目录结构的占位文件 ============
+# 使用 .gitkeep 保留空目录
+!data/.gitkeep
+!results/.gitkeep
+!figures/.gitkeep
+!logs/.gitkeep
