@@ -1,0 +1,109 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1436.6 832" width="1436.6" height="832" style="--bg:#ffffff;--fg:#1f2328;--line:#d1d9e0;--accent:#0969da;--muted:#59636e;background:var(--bg)">
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;display=swap');
+  text { font-family: 'Inter', system-ui, sans-serif; }
+  svg {
+    /* Derived from --bg and --fg (overridable via --line, --accent, etc.) */
+    --_text:          var(--fg);
+    --_text-sec:      var(--muted, color-mix(in srgb, var(--fg) 60%, var(--bg)));
+    --_text-muted:    var(--muted, color-mix(in srgb, var(--fg) 40%, var(--bg)));
+    --_text-faint:    color-mix(in srgb, var(--fg) 25%, var(--bg));
+    --_line:          var(--line, color-mix(in srgb, var(--fg) 30%, var(--bg)));
+    --_arrow:         var(--accent, color-mix(in srgb, var(--fg) 50%, var(--bg)));
+    --_node-fill:     var(--surface, color-mix(in srgb, var(--fg) 3%, var(--bg)));
+    --_node-stroke:   var(--border, color-mix(in srgb, var(--fg) 20%, var(--bg)));
+    --_group-fill:    var(--bg);
+    --_group-hdr:     color-mix(in srgb, var(--fg) 5%, var(--bg));
+    --_inner-stroke:  color-mix(in srgb, var(--fg) 12%, var(--bg));
+    --_key-badge:     color-mix(in srgb, var(--fg) 10%, var(--bg));
+  }
+</style>
+<defs>
+  <marker id="arrowhead" markerWidth="8" markerHeight="4.8" refX="8" refY="2.4" orient="auto">
+    <polygon points="0 0, 8 2.4, 0 4.8" fill="var(--_arrow)" />
+  </marker>
+  <marker id="arrowhead-start" markerWidth="8" markerHeight="4.8" refX="0" refY="2.4" orient="auto-start-reverse">
+    <polygon points="8 0, 0 2.4, 8 4.8" fill="var(--_arrow)" />
+  </marker>
+</defs>
+<rect x="40" y="140" width="895.4000000000001" height="96" rx="0" ry="0" fill="var(--_group-fill)" stroke="var(--_node-stroke)" stroke-width="1" />
+<rect x="40" y="140" width="895.4000000000001" height="28" rx="0" ry="0" fill="var(--_group-hdr)" stroke="var(--_node-stroke)" stroke-width="1" />
+<text x="52" y="154" dy="0.35em" font-size="12" font-weight="600" fill="var(--_text-sec)">&quot;Module 1: Data Preparation&quot;</text>
+<rect x="482.69999999999993" y="240" width="479.7" height="96" rx="0" ry="0" fill="var(--_group-fill)" stroke="var(--_node-stroke)" stroke-width="1" />
+<rect x="482.69999999999993" y="240" width="479.7" height="28" rx="0" ry="0" fill="var(--_group-hdr)" stroke="var(--_node-stroke)" stroke-width="1" />
+<text x="494.69999999999993" y="254" dy="0.35em" font-size="12" font-weight="600" fill="var(--_text-sec)">&quot;Module 2: Model Space Analysis&quot;</text>
+<rect x="502.55000000000007" y="340" width="701.8499999999999" height="96" rx="0" ry="0" fill="var(--_group-fill)" stroke="var(--_node-stroke)" stroke-width="1" />
+<rect x="502.55000000000007" y="340" width="701.8499999999999" height="28" rx="0" ry="0" fill="var(--_group-hdr)" stroke="var(--_node-stroke)" stroke-width="1" />
+<text x="514.5500000000001" y="354" dy="0.35em" font-size="12" font-weight="600" fill="var(--_text-sec)">&quot;Module 3: Data Space Simulation&quot;</text>
+<rect x="972.1875" y="440" width="135.5" height="276" rx="0" ry="0" fill="var(--_group-fill)" stroke="var(--_node-stroke)" stroke-width="1" />
+<rect x="972.1875" y="440" width="135.5" height="28" rx="0" ry="0" fill="var(--_group-hdr)" stroke="var(--_node-stroke)" stroke-width="1" />
+<text x="984.1875" y="454" dy="0.35em" font-size="12" font-weight="600" fill="var(--_text-sec)">&quot;Module 4: Model Fusion&quot;</text>
+<rect x="780.05" y="40" width="616.5500000000001" height="96" rx="0" ry="0" fill="var(--_group-fill)" stroke="var(--_node-stroke)" stroke-width="1" />
+<rect x="780.05" y="40" width="616.5500000000001" height="28" rx="0" ry="0" fill="var(--_group-hdr)" stroke="var(--_node-stroke)" stroke-width="1" />
+<text x="792.05" y="54" dy="0.35em" font-size="12" font-weight="600" fill="var(--_text-sec)">&quot;Module 5: Visualization&quot;</text>
+<polyline points="487.70000000000005,236 487.70000000000005,306 482.69999999999993,306" fill="none" stroke="var(--_line)" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="722.55,336 722.55,406 502.55000000000007,406" fill="none" stroke="var(--_line)" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="853.475,436 853.475,596 972.1875,596" fill="none" stroke="var(--_line)" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="1039.9375,716 1039.9375,756" fill="none" stroke="var(--_line)" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="1088.325,136 1088.325,156 487.70000000000005,156 487.70000000000005,176" fill="none" stroke="var(--_line)" stroke-width="0.75" stroke-dasharray="4 4" marker-end="url(#arrowhead)" />
+<polyline points="1088.325,136 1088.325,156 957.4000000000001,156 957.4000000000001,306 962.4,306" fill="none" stroke="var(--_line)" stroke-width="0.75" stroke-dasharray="4 4" marker-end="url(#arrowhead)" />
+<polyline points="1088.325,136 1088.325,156 1098.325,156 1098.325,406 1204.4,406" fill="none" stroke="var(--_line)" stroke-width="0.75" stroke-dasharray="4 4" marker-end="url(#arrowhead)" />
+<polyline points="1088.325,136 1088.325,156 1294.7875,156 1294.7875,596 1107.6875,596" fill="none" stroke="var(--_line)" stroke-width="0.75" stroke-dasharray="4 4" marker-end="url(#arrowhead)" />
+<polyline points="180.95,206 220.95,206" fill="none" stroke="var(--_line)" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="338.75,206 378.75,206" fill="none" stroke="var(--_line)" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="532.3,206 572.3,206" fill="none" stroke="var(--_line)" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="697.25,206 737.25,206" fill="none" stroke="var(--_line)" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="623.6499999999999,306 663.6499999999999,306" fill="none" stroke="var(--_line)" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="767.1499999999999,306 807.1499999999999,306" fill="none" stroke="var(--_line)" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="643.5,406 683.5,406" fill="none" stroke="var(--_line)" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="822.75,406 862.7500000000001,406" fill="none" stroke="var(--_line)" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="980.5500000000001,406 1020.5500000000001,406" fill="none" stroke="var(--_line)" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="878.0999999999999,106 918.0999999999999,106" fill="none" stroke="var(--_line)" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="978.7,106 1018.6999999999999,106" fill="none" stroke="var(--_line)" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="1107.9,106 1147.9,106" fill="none" stroke="var(--_line)" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="1251.4,106 1291.4,106" fill="none" stroke="var(--_line)" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<rect x="1002.4875" y="756" width="74.9" height="36" rx="0" ry="0" fill="#ffeb3b" stroke="#f57f17" stroke-width="0.75" />
+<rect x="55.99999999999999" y="188" width="124.95" height="36" rx="18" ry="18" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+<rect x="220.95" y="188" width="117.80000000000001" height="36" rx="18" ry="18" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+<rect x="378.75" y="188" width="153.55" height="36" rx="18" ry="18" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+<rect x="572.3" y="188" width="124.95" height="36" rx="18" ry="18" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+<rect x="737.25" y="188" width="182.15" height="36" rx="18" ry="18" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+<rect x="498.69999999999993" y="288" width="124.95" height="36" rx="18" ry="18" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+<rect x="663.6499999999999" y="288" width="103.5" height="36" rx="18" ry="18" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+<rect x="807.1499999999999" y="288" width="139.25" height="36" rx="18" ry="18" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+<rect x="518.5500000000001" y="388" width="124.95" height="36" rx="18" ry="18" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+<rect x="683.5" y="388" width="139.25" height="36" rx="18" ry="18" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+<rect x="862.7500000000001" y="388" width="117.80000000000001" height="36" rx="18" ry="18" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+<rect x="1020.5500000000001" y="388" width="167.85000000000002" height="36" rx="18" ry="18" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+<rect x="988.1875" y="488" width="103.5" height="36" rx="18" ry="18" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+<rect x="1009.9375" y="548" width="60" height="36" rx="18" ry="18" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+<rect x="988.1875" y="608" width="103.5" height="36" rx="18" ry="18" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+<rect x="988.1875" y="668" width="103.5" height="36" rx="18" ry="18" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+<rect x="796.05" y="88" width="82.05000000000001" height="36" rx="18" ry="18" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+<rect x="918.0999999999999" y="88" width="60.6" height="36" rx="18" ry="18" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+<rect x="1018.6999999999999" y="88" width="89.2" height="36" rx="18" ry="18" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+<rect x="1147.9" y="88" width="103.5" height="36" rx="18" ry="18" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+<rect x="1291.4" y="88" width="89.2" height="36" rx="18" ry="18" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+<text x="1039.9375" y="774" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="var(--_text)">Output</text>
+<text x="118.475" y="206" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="var(--_text)">Station Query</text>
+<text x="279.85" y="206" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="var(--_text)">GCMT Process</text>
+<text x="455.525" y="206" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="var(--_text)">Waveform Download</text>
+<text x="634.775" y="206" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="var(--_text)">Preprocessing</text>
+<text x="828.325" y="206" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="var(--_text)">Model Standardization</text>
+<text x="561.175" y="306" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="var(--_text)">Model Compare</text>
+<text x="715.3999999999999" y="306" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="var(--_text)">Clustering</text>
+<text x="876.7749999999999" y="306" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="var(--_text)">SSIM Similarity</text>
+<text x="581.0250000000001" y="406" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="var(--_text)">SPECFEM Setup</text>
+<text x="753.125" y="406" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="var(--_text)">Model Converter</text>
+<text x="921.6500000000001" y="406" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="var(--_text)">HPC Workflow</text>
+<text x="1104.4750000000001" y="406" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="var(--_text)">Waveform Assessment</text>
+<text x="1039.9375" y="506" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="var(--_text)">Voting Map</text>
+<text x="1039.9375" y="566" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="var(--_text)">BMA</text>
+<text x="1039.9375" y="626" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="var(--_text)">SDL Fusion</text>
+<text x="1039.9375" y="686" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="var(--_text)">PGM Fusion</text>
+<text x="837.0749999999999" y="106" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="var(--_text)">Basemap</text>
+<text x="948.3999999999999" y="106" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="var(--_text)">GCMT</text>
+<text x="1063.3" y="106" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="var(--_text)">Stations</text>
+<text x="1199.65" y="106" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="var(--_text)">Clustering</text>
+<text x="1336" y="106" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="var(--_text)">Velocity</text>
+</svg>

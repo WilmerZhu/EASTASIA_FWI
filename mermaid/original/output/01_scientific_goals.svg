@@ -1,0 +1,73 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1225.775 1158" width="1225.775" height="1158" style="--bg:#ffffff;--fg:#1f2328;--line:#d1d9e0;--accent:#0969da;--muted:#59636e;background:var(--bg)">
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;display=swap');
+  text { font-family: 'Inter', system-ui, sans-serif; }
+  svg {
+    /* Derived from --bg and --fg (overridable via --line, --accent, etc.) */
+    --_text:          var(--fg);
+    --_text-sec:      var(--muted, color-mix(in srgb, var(--fg) 60%, var(--bg)));
+    --_text-muted:    var(--muted, color-mix(in srgb, var(--fg) 40%, var(--bg)));
+    --_text-faint:    color-mix(in srgb, var(--fg) 25%, var(--bg));
+    --_line:          var(--line, color-mix(in srgb, var(--fg) 30%, var(--bg)));
+    --_arrow:         var(--accent, color-mix(in srgb, var(--fg) 50%, var(--bg)));
+    --_node-fill:     var(--surface, color-mix(in srgb, var(--fg) 3%, var(--bg)));
+    --_node-stroke:   var(--border, color-mix(in srgb, var(--fg) 20%, var(--bg)));
+    --_group-fill:    var(--bg);
+    --_group-hdr:     color-mix(in srgb, var(--fg) 5%, var(--bg));
+    --_inner-stroke:  color-mix(in srgb, var(--fg) 12%, var(--bg));
+    --_key-badge:     color-mix(in srgb, var(--fg) 10%, var(--bg));
+  }
+</style>
+<defs>
+  <marker id="arrowhead" markerWidth="8" markerHeight="4.8" refX="8" refY="2.4" orient="auto">
+    <polygon points="0 0, 8 2.4, 0 4.8" fill="var(--_arrow)" />
+  </marker>
+  <marker id="arrowhead-start" markerWidth="8" markerHeight="4.8" refX="0" refY="2.4" orient="auto-start-reverse">
+    <polygon points="8 0, 0 2.4, 8 4.8" fill="var(--_arrow)" />
+  </marker>
+</defs>
+<rect x="105.25" y="382" width="423.95000000000005" height="112" rx="0" ry="0" fill="var(--_group-fill)" stroke="var(--_node-stroke)" stroke-width="1" />
+<rect x="105.25" y="382" width="423.95000000000005" height="28" rx="0" ry="0" fill="var(--_group-hdr)" stroke="var(--_node-stroke)" stroke-width="1" />
+<text x="117.25" y="396" dy="0.35em" font-size="12" font-weight="600" fill="var(--_text-sec)">&quot;Model Space Analysis&quot;</text>
+<rect x="345.95000000000005" y="538" width="588.4000000000001" height="112" rx="0" ry="0" fill="var(--_group-fill)" stroke="var(--_node-stroke)" stroke-width="1" />
+<rect x="345.95000000000005" y="538" width="588.4000000000001" height="28" rx="0" ry="0" fill="var(--_group-hdr)" stroke="var(--_node-stroke)" stroke-width="1" />
+<text x="357.95000000000005" y="552" dy="0.35em" font-size="12" font-weight="600" fill="var(--_text-sec)">&quot;Data Space Assessment&quot;</text>
+<rect x="740.375" y="694" width="438.25" height="112" rx="0" ry="0" fill="var(--_group-fill)" stroke="var(--_node-stroke)" stroke-width="1" />
+<rect x="740.375" y="694" width="438.25" height="28" rx="0" ry="0" fill="var(--_group-hdr)" stroke="var(--_node-stroke)" stroke-width="1" />
+<text x="752.375" y="708" dy="0.35em" font-size="12" font-weight="600" fill="var(--_text-sec)">&quot;Model Fusion&quot;</text>
+<rect x="988.225" y="850" width="197.54999999999995" height="112" rx="0" ry="0" fill="var(--_group-fill)" stroke="var(--_node-stroke)" stroke-width="1" />
+<rect x="988.225" y="850" width="197.54999999999995" height="28" rx="0" ry="0" fill="var(--_group-hdr)" stroke="var(--_node-stroke)" stroke-width="1" />
+<text x="1000.225" y="864" dy="0.35em" font-size="12" font-weight="600" fill="var(--_text-sec)">&quot;Full Waveform Inversion&quot;</text>
+<rect x="1020.4000000000001" y="1006" width="133.19999999999982" height="112" rx="0" ry="0" fill="var(--_group-fill)" stroke="var(--_node-stroke)" stroke-width="1" />
+<rect x="1020.4000000000001" y="1006" width="133.19999999999982" height="28" rx="0" ry="0" fill="var(--_group-hdr)" stroke="var(--_node-stroke)" stroke-width="1" />
+<text x="1032.4" y="1020" dy="0.35em" font-size="12" font-weight="600" fill="var(--_text-sec)">&quot;Final Goal&quot;</text>
+<polyline points="179,318 179,438" fill="none" stroke="var(--_line)" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="444.725,474 444.725,594" fill="none" stroke="var(--_line)" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="814.125,630 814.125,750" fill="none" stroke="var(--_line)" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="1087,786 1087,906" fill="none" stroke="var(--_line)" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="1087,942 1087,1062" fill="none" stroke="var(--_line)" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<circle cx="179" cy="179" r="139" fill="#fff9c4" stroke="#f57f17" stroke-width="0.75" />
+<rect x="127.25" y="438" width="103.5" height="36" rx="18" ry="18" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+<rect x="254.75" y="438" width="103.5" height="36" rx="18" ry="18" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+<rect x="382.25" y="438" width="124.95" height="36" rx="18" ry="18" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+<rect x="367.95000000000005" y="594" width="153.55" height="36" rx="18" ry="18" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+<rect x="545.5" y="594" width="146.4" height="36" rx="18" ry="18" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+<rect x="715.9" y="594" width="196.45000000000002" height="36" rx="18" ry="18" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+<rect x="762.375" y="750" width="103.5" height="36" rx="18" ry="18" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+<rect x="889.875" y="750" width="103.5" height="36" rx="18" ry="18" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+<rect x="1017.375" y="750" width="139.25" height="36" rx="18" ry="18" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+<rect x="1010.225" y="906" width="153.55" height="36" rx="18" ry="18" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+<rect x="1042.4" y="1062" width="89.2" height="36" rx="18" ry="18" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+<text x="179" y="179" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="var(--_text)">EASTASIA-FWI&lt;br/&gt;Scientific Goals</text>
+<text x="179" y="456" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="var(--_text)">Clustering</text>
+<text x="306.5" y="456" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="var(--_text)">Similarity</text>
+<text x="444.725" y="456" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="var(--_text)">ML Algorithms</text>
+<text x="444.725" y="612" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="var(--_text)">SPECFEM3D Forward</text>
+<text x="618.7" y="612" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="var(--_text)">Waveform Fitting</text>
+<text x="814.125" y="612" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="var(--_text)">Multi-factor Validation</text>
+<text x="814.125" y="768" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="var(--_text)">SDL Fusion</text>
+<text x="941.625" y="768" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="var(--_text)">PGM Fusion</text>
+<text x="1087" y="768" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="var(--_text)">BMA Integration</text>
+<text x="1087" y="924" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="var(--_text)">Adjoint-state FWI</text>
+<text x="1087" y="1080" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="var(--_text)">SEAM 1.0</text>
+</svg>
