@@ -800,8 +800,17 @@ class WaveformDownloader:
                 
         except KeyboardInterrupt:
             raise
+        except ConnectionResetError as e:
+            # 处理连接重置错误
+            error_msg = f"ConnectionResetError: {str(e)}"
+            self.logger.error(f"      ❌ 下载异常: {error_msg}")
+            return False
         except Exception as e:
-            error_msg = str(e)
+            # 确保错误消息是字符串格式
+            try:
+                error_msg = str(e) if e else "Unknown error"
+            except Exception:
+                error_msg = f"{type(e).__name__}: {repr(e)}"
             self.logger.error(f"      ❌ 下载异常: {error_msg}")
             return False
 
