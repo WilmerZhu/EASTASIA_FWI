@@ -1,14 +1,100 @@
 """
 5_3_All_Stations.py: 
 东亚地区台站网络分布和统计可视化模块
-基于PyGMT绘制台站网络分布图和统计分析
+================================================================
 
-功能特性：
-- 台站网络分布地图（公开台站 + SUSTECH台站）
-- 按网络分色显示
-- 台站网络统计分析
-- 时间序列台站部署分析
-- 多维度统计图表
+功能描述:
+----------
+基于PyGMT绘制东亚地区地震台站网络分布图和统计分析图。
+支持公开台站和SUSTECH台站数据的合并可视化，提供台站网络分布、统计分析和部署时间线等多维度可视化，
+为全波形反演台站选择和数据质量评估提供直观的分析工具。
+
+核心功能:
+----------
+1. ✅ 台站网络分布地图
+   - 公开台站和SUSTECH台站合并显示
+   - 按网络自动分色（支持40种颜色）
+   - 不同台站类型使用不同标记（三角形/方形）
+   - 自动生成网络图例
+
+2. ✅ 台站网络统计分析
+   - 网络台站数量统计
+   - 网络分布饼图
+   - 台站密度分析
+   - Provider分布统计
+   - 多维度统计图表组合
+
+3. ✅ 台站部署时间线分析
+   - 台站部署时间序列
+   - 网络部署历史
+   - 时间演化趋势
+   - 部署密度变化
+
+4. ✅ 数据合并和处理
+   - 自动合并公开台站和SUSTECH台站数据
+   - 数据格式标准化
+   - 坐标系统一
+   - 重复台站处理
+
+5. ✅ 专业可视化
+   - 300 DPI高质量输出
+   - JPG和PDF双格式
+   - 统一配色方案（tab20 + tab20b）
+   - 专业图例和标注
+
+6. ✅ 灵活的数据源支持
+   - 支持CSV格式台站数据
+   - 支持Excel格式SUSTECH数据
+   - 自动查找数据文件
+   - 数据验证和错误处理
+
+使用方法:
+----------
+```python
+from 5_Visualization.5_3_All_Stations import StationNetworkPlotter
+
+# 初始化台站网络绘图器
+station_plotter = StationNetworkPlotter()
+
+# 生成完整分析图集
+results = station_plotter.plot_all_station_analysis(
+    public_station_file='path/to/stations.csv'
+)
+
+# 单独绘制台站网络分布图
+network_map = station_plotter.plot_combined_station_network_map(
+    combined_data, color_map, legend_file
+)
+```
+
+配置说明:
+----------
+通过 StationPlottingConfig 类配置可视化参数:
+- visualization: 可视化配置 (DPI、格式、投影)
+- map: 地图配置 (分辨率、颜色、边框)
+- markers: 台站标记配置 (符号、颜色、大小)
+- statistics: 统计图配置 (尺寸、配色方案)
+- logging: 日志配置
+
+输出文件:
+----------
+- 5-3_combined_network_distribution.jpg/pdf: 合并台站网络分布图
+- 5-3_comprehensive_statistics.jpg/pdf: 台站统计分析图
+- 5-3_deployment_timeline.jpg/pdf: 台站部署时间线图
+- 所有图片保存在 figures/ 目录
+
+科学原理:
+----------
+- 台站网络分布: 反映地震观测网络的覆盖范围和密度，影响数据质量和反演分辨率
+- 网络多样性: 不同网络的数据质量和覆盖特征不同，多样化网络提高数据可靠性
+- 时间演化: 台站部署历史反映观测能力的发展，影响数据的时间覆盖范围
+- 空间分布: 台站的空间分布直接影响地震数据的方位角覆盖和射线路径多样性
+- 数据合并: 整合不同来源的台站数据，最大化观测网络覆盖，提高反演数据质量
+- 统计分析: 量化台站网络特征，为数据质量评估和反演策略制定提供依据
+
+作者: EASTASIA-FWI Team
+日期: 2025-02-01
+版本: v1.0
 """
 import pygmt
 import pandas as pd

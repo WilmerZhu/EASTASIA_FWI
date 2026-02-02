@@ -1,7 +1,86 @@
 """
 1_1_Query_stations.py: 
 台站查询与筛选模块
-基于FDSN查询东亚地区地震台站信息
+================================================================
+
+功能描述:
+----------
+基于FDSN (Federation of Digital Seismograph Networks) 协议查询东亚地区地震台站信息，
+支持多Provider并行查询、数据质量筛选、标准化输出和详细统计报告。
+
+核心功能:
+----------
+1. ✅ 多Provider台站查询
+   - 支持11个主要FDSN Provider (AUSPASS, ETH, GEOFON, GEONET, GFZ, IPGP, IRIS, RESIF, SCEDC, USP)
+   - 自动重试机制和错误处理
+   - 进度条显示查询进度
+
+2. ✅ 区域和时间筛选
+   - 基于项目基础配置的东亚研究区域 (纬度: -15.0° ~ 60.0°, 经度: 60.0° ~ 170.0°)
+   - 可配置的时间范围查询 (默认: 1980-01-01 ~ 2026-01-01)
+   - 支持区域缓冲区设置
+
+3. ✅ 数据质量筛选
+   - 台网优先级和排除列表
+   - 海拔范围筛选 (默认: -2000 ~ 9000 m)
+   - 坐标完整性验证
+
+4. ✅ 标准化数据输出
+   - CSV格式: 包含台站基本信息 (Network, Station, Latitude, Longitude, Elevation等)
+   - XML格式: ObsPy Inventory标准格式
+   - SPECFEM3D格式: STATIONS文件，用于正演模拟
+
+5. ✅ 统计报告生成
+   - 台站数量统计
+   - 台网和Provider分布
+   - 坐标范围统计
+   - 海拔统计信息
+
+使用方法:
+----------
+```python
+from 1_Data_preparation.1_1_Query_stations import StationQuery
+
+# 初始化查询器
+query = StationQuery()
+
+# 查询所有配置的Provider
+df_stations = query.query_all_providers()
+
+# 查询单个Provider
+stations_list, inventory = query.query_single_provider('IRIS')
+
+# 获取统计信息
+stats = query.get_summary_statistics(df_stations)
+```
+
+配置说明:
+----------
+通过 StationQueryConfig 类配置查询参数:
+- fdsn: FDSN服务配置 (providers, timeout, retry等)
+- time_range: 查询时间范围
+- query_bounds: 区域查询边界
+- quality_filters: 台站质量筛选条件
+- output: 输出格式和选项
+
+输出文件:
+----------
+- {region}_stations.csv: 合并后的台站CSV文件
+- {region}_stations.xml: ObsPy Inventory XML文件
+- STATIONS: SPECFEM3D格式台站文件
+- station_query_report.txt: 详细查询报告
+- query_metadata.json: 查询元数据
+
+科学原理:
+----------
+- FDSN协议: 国际标准的地震数据交换协议，确保数据格式统一
+- 多Provider查询: 提高数据覆盖率和完整性
+- 质量筛选: 确保台站数据的可靠性和可用性
+- 标准化输出: 便于后续数据处理和正演模拟
+
+作者: EASTASIA-FWI Team
+日期: 2026-02-02
+版本: v2.0
 """
 import pandas as pd
 from pathlib import Path

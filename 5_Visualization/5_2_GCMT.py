@@ -1,17 +1,107 @@
 """
 5_2_GCMT.py: 
 东亚地区GCMT震源分布和统计可视化模块
-基于PyGMT绘制GCMT地震事件分布图和统计分析
-参考GCMT_EastAsia.py的绘图风格
-配置参数已集成在模块内部
+================================================================
 
-功能特性：
-- GCMT震源机制解分布
-- 震级-深度-时间统计分析
-- 多维度直方图统计
-- 高质量地震学可视化
-- 独立的筛选参数控制
-- 数据去重处理（修复2021年后重复问题）
+功能描述:
+----------
+基于PyGMT绘制GCMT (Global Centroid Moment Tensor) 地震事件的震源机制解分布图和统计分析图。
+提供多维度地震事件可视化，包括震源机制解、震级-深度-时间统计、空间分布等，
+为全波形反演事件选择提供直观的数据分析工具。
+
+核心功能:
+----------
+1. ✅ 震源机制解可视化
+   - Beachball图显示震源机制
+   - 按震级自动缩放机制解大小
+   - 支持自定义震级阈值
+   - 颜色编码表示震级或深度
+
+2. ✅ 多维度统计分析
+   - 震级分布直方图
+   - 深度分布直方图
+   - 时间序列分析
+   - 震级-深度联合分布
+   - 空间分布统计
+
+3. ✅ 综合分析图
+   - 地图+统计图组合显示
+   - 多子图布局
+   - 统一配色方案
+   - 专业图例和标注
+
+4. ✅ 数据筛选和去重
+   - 震级范围筛选
+   - 深度范围筛选
+   - 时间范围筛选
+   - 地理区域筛选
+   - 自动数据去重（修复2021年后重复问题）
+
+5. ✅ 高质量可视化
+   - 300 DPI输出
+   - JPG和PDF双格式
+   - 专业地震学绘图风格
+   - 可配置的图表元素
+
+6. ✅ 灵活的参数控制
+   - 独立的筛选参数
+   - 可配置的震源机制显示阈值
+   - 自定义色标和标记样式
+
+使用方法:
+----------
+```python
+from 5_Visualization.5_2_GCMT import GCMTPlotter
+
+# 初始化GCMT绘图器
+gcmt_plotter = GCMTPlotter()
+
+# 生成完整分析图集
+results = gcmt_plotter.plot_all_gcmt_analysis(
+    gcmt_file='path/to/gcmt_data.csv',
+    magnitude_range=(5.5, 7.0),
+    depth_range=(0, 1000),
+    time_range=("2000-01-01", "2024-12-31"),
+    min_magnitude_for_meca=6.0,
+    perform_deduplication=True
+)
+
+# 单独绘制震源机制解分布图
+focal_map = gcmt_plotter.plot_focal_mechanisms_map(
+    gcmt_data, 
+    min_magnitude=6.0
+)
+```
+
+配置说明:
+----------
+通过 GCMTPlottingConfig 类配置可视化参数:
+- pygmt: PyGMT地图框架配置
+- projection: 地图投影配置
+- default_filters: 默认筛选参数 (震级、深度、时间范围)
+- deduplication: 数据去重配置 (容差、保留策略)
+- focal_mechanism: 震源机制解绘制配置 (缩放、样式)
+- colors: 色彩配置 (地形、标记、统计图)
+- statistics: 统计图配置 (尺寸、样式)
+
+输出文件:
+----------
+- 5-2_focal_mechanisms_map.jpg/pdf: 震源机制解分布图
+- 5-2_comprehensive_statistics.jpg/pdf: 综合分析图（地图+统计）
+- 所有图片保存在 figures/ 目录
+
+科学原理:
+----------
+- GCMT目录: 全球统一的矩心矩张量解，提供高精度的震源机制参数
+- 震源机制解: Beachball图显示地震的断层面解，反映区域应力场和构造特征
+- 震级-深度分布: 揭示地震活动的深度特征，区分浅源、中源和深源地震
+- 时间序列分析: 显示地震活动的时间演化，识别地震活动期和静默期
+- 空间分布: 揭示地震活动的空间聚集特征，与构造边界和俯冲带相关
+- 数据去重: 确保数据质量，避免重复事件影响统计分析结果
+
+作者: EASTASIA-FWI Team
+日期: 2025-02-01
+版本: v1.0
 """
 import pygmt
 import pandas as pd

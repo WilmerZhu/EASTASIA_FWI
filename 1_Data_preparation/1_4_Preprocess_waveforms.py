@@ -1,14 +1,99 @@
 """
 1_4_Preprocess_waveforms.py: 
 EASTASIA-FWI 波形数据预处理模块
+================================================================
 
-功能：
-- 地震波形数据的标准化预处理
-- 仪器响应去除和单位转换
-- 多分量数据处理和质量控制
-- SAC文件头信息更新
-- 完整的处理统计和报告生成
+功能描述:
+----------
+地震波形数据的标准化预处理模块，将原始观测数据转换为适合全波形反演的格式。
+包括仪器响应去除、单位转换、多分量处理、质量控制和SAC格式输出，确保数据质量和格式统一。
 
+核心功能:
+----------
+1. ✅ 仪器响应去除
+   - 自动去除仪器响应，转换为速度或位移
+   - 支持多种响应类型（FIR、PAZ、PolesZeros）
+   - 预滤波处理，避免频率域边缘效应
+   - 自动处理缺失响应文件的情况
+
+2. ✅ 多分量数据处理
+   - 自动旋转1-2分量到N-E分量
+   - 支持BH1/BH2到BHN/BHE的转换
+   - 分量映射和标准化
+   - 多分量数据一致性检查
+
+3. ✅ 数据质量控制
+   - 采样率验证（0.5-100 Hz）
+   - 数据长度比例检查（最小80%）
+   - 尖峰检测和去除
+   - 数据间隙容忍度检查
+
+4. ✅ SAC格式输出
+   - 标准SAC格式输出
+   - 自动更新SAC文件头信息
+   - 添加事件和台站信息
+   - 抑制SAC警告输出
+
+5. ✅ 批量处理和断点续传
+   - 支持多进程并行处理
+   - 自动检测已处理文件
+   - 进度保存和恢复
+   - 详细的处理统计报告
+
+6. ✅ 性能优化
+   - Inventory缓存机制
+   - 内存管理优化
+   - 警告抑制（提高处理速度）
+   - 自动垃圾回收
+
+使用方法:
+----------
+```python
+from 1_Data_preparation.1_4_Preprocess_waveforms import WaveformPreprocessor
+
+# 初始化预处理器
+preprocessor = WaveformPreprocessor()
+
+# 查找事件目录文件
+catalog_files = preprocessor.find_catalog_files()
+
+# 批量处理波形数据
+results = preprocessor.batch_process(catalog_files[0], max_events=None)
+
+# 处理单个波形文件
+station_id, success_msg, error_msg = preprocessor.process_single_waveform(
+    waveform_file, response_file, event_info
+)
+```
+
+配置说明:
+----------
+通过 PreprocessingConfig 类配置预处理参数:
+- response_removal: 响应去除参数 (输出类型、预滤波、水线等)
+- channel_processing: 通道处理配置 (自动旋转、分量映射)
+- quality_control: 质量控制参数 (采样率、长度比例、尖峰检测)
+- output_format: 输出格式配置 (SAC格式、文件头更新)
+- resume: 断点续传配置
+- performance: 性能优化配置
+
+输出文件:
+----------
+- events/vel_data/{event_name}/: 每个事件的预处理后波形数据
+- preprocessing/preprocessing_report.txt: 详细处理报告
+- preprocessing/preprocessing_stats.json: 处理统计信息
+- preprocessing_progress.json: 处理进度文件
+
+科学原理:
+----------
+- 仪器响应去除: 将观测数据从计数转换为物理量（速度/位移），消除仪器频率响应影响
+- 预滤波: 在响应去除前应用预滤波，避免频率域边缘的数值不稳定
+- 分量旋转: 将仪器坐标系转换为地理坐标系（N-E），便于后续处理和分析
+- 质量控制: 确保数据质量满足全波形反演的要求，避免低质量数据影响反演结果
+- SAC格式: 地震学标准数据格式，兼容性强，便于后续分析和可视化
+
+作者: EASTASIA-FWI Team
+日期: 2025-02-01
+版本: v2.6
 """
 
 import os

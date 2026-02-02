@@ -1,20 +1,120 @@
 """
 1_5_Process_velocity_models.py: 
-速度模型预处理模块 (双区域输出)
+速度模型预处理模块
 ================================================================
 
-核心改进:
-1. ✅ 同时保存两个版本：
-   - 共同覆盖区域版本 (*_standardized.nc, *_standardized.csv)
-   - 原始模型区域版本 (*_original.nc, *_original.csv)
-2. ✅ 保留所有已有的功能和数据质量保证
-3. ✅ 生成两个版本的完整元数据和报告
-4. ✅ SinoScope1.0 深度平移：20-2820 km → 0-2800 km
-5. ✅ CSV 排序：depth(慢) → latitude → longitude(快)
+功能描述:
+----------
+速度模型预处理和标准化模块，将多种格式的地震速度模型转换为统一的NetCDF和CSV格式。
+支持HDF5、NetCDF、GeoCSV、TXT、Excel等多种输入格式，同时输出共同覆盖区域和原始模型区域两个版本，
+为模型空间分析和全波形反演提供标准化的速度模型数据。
 
-科学原理：
-- 共同覆盖区域：用于聚类分析和模型对比（100%有效覆盖）
-- 原始模型区域：保留完整的模型信息，用于独立分析
+核心功能:
+----------
+1. ✅ 多格式模型读取
+   - HDF5格式 (SinoScope1.0)
+   - NetCDF格式 (EARA2024, FWEA23)
+   - GeoCSV格式 (CSEM_Japan, FWEA18, TP2019等)
+   - 文本格式 (USTClitho2.0, SWChinaCVM等)
+   - Excel格式 (Cao_SETibet)
+   - 多深度文件格式 (Chen_SChinaSea, Wu_NETibet等)
+
+2. ✅ 双区域输出
+   - 共同覆盖区域版本 (*_standardized.nc/csv): 用于聚类分析和模型对比
+   - 原始模型区域版本 (*_original.nc/csv): 保留完整模型信息
+   - 100%有效数据覆盖的共同区域计算
+   - 自动裁剪到共同有效区域
+
+3. ✅ 参数标准化
+   - 统一参数命名 (vpv, vph, vsv, vsh, rho, vs, vp)
+   - 单位标准化 (速度: km/s, 密度: kg/m³)
+   - 坐标系统统一 (WGS84, latitude/longitude/depth)
+   - 深度单位自动转换和验证
+
+4. ✅ 深度平移支持
+   - 支持模型深度平移（如SinoScope1.0: 20-2820 km → 0-2800 km）
+   - 自动应用配置的深度偏移
+   - 深度范围验证和调整
+
+5. ✅ 数据质量控制
+   - 坐标范围验证
+   - 数据完整性检查
+   - 参数值范围验证
+   - 缺失值处理
+
+6. ✅ 元数据和报告生成
+   - 完整的模型元数据 (ModelMetadata)
+   - 参数值范围统计
+   - 处理报告和统计信息
+   - JSON格式元数据输出
+
+使用方法:
+----------
+通过修改 config.runtime 参数来控制处理行为：
+
+1. 处理所有模型:
+   ```python
+   config = VelocityModelConfig()
+   config.runtime['model_names'] = None
+   config.runtime['compute_common_region'] = False
+   processor = VelocityModelProcessor(config)
+   processor.process_all_models()
+   ```
+
+2. 处理指定模型列表:
+   ```python
+   config = VelocityModelConfig()
+   config.runtime['model_names'] = ['2022_SinoScope1.0', '2024_EARA2024']
+   config.runtime['compute_common_region'] = True
+   processor = VelocityModelProcessor(config)
+   processor.process_all_models()
+   ```
+
+3. 处理单个模型:
+   ```python
+   config = VelocityModelConfig()
+   config.runtime['single_model'] = '2022_SinoScope1.0'
+   processor = VelocityModelProcessor(config)
+   processor.process_all_models()
+   ```
+
+4. 列出所有可用模型:
+   ```python
+   config = VelocityModelConfig()
+   config.runtime['list_models'] = True
+   processor = VelocityModelProcessor(config)
+   # 运行 main() 会自动列出模型
+   ```
+
+配置说明:
+----------
+通过 VelocityModelConfig 类配置处理参数:
+- models: 模型清单和格式配置
+- standard_parameters: 标准化参数列表
+- standard_units: 标准单位定义
+- qc: 数据质量控制参数
+- processing: 处理选项 (保存格式、压缩等)
+- runtime: 运行时参数 (模型选择、共同区域计算)
+
+输出文件:
+----------
+- {model_name}_original.nc: 原始模型区域的NetCDF文件
+- {model_name}_original.csv: 原始模型区域的CSV文件
+- {model_name}_standardized.nc: 共同覆盖区域的NetCDF文件
+- {model_name}_standardized.csv: 共同覆盖区域的CSV文件
+- {model_name}_metadata.json: 模型元数据
+- processing_summary.json: 批量处理总结
+
+科学原理:
+----------
+- 速度模型标准化: 统一不同来源模型的格式和单位，便于模型对比和分析
+- 共同覆盖区域: 计算所有模型的交集区域，确保模型对比的公平性和有效性
+- 参数映射: 将不同模型的参数名称映射到标准参数集，支持各向异性和各向同性模型
+- 深度校正: 处理不同模型的深度定义差异（如海平面vs地表），确保深度一致性
+- 数据插值: 在需要时进行网格插值，统一模型分辨率，便于后续分析
+
+作者: EASTASIA-FWI Team
+版本: v2.0 (使用config参数)
 """
 
 import numpy as np
@@ -383,6 +483,41 @@ class VelocityModelConfig:
         
         # ============ 共同区域缓存 ============
         self.valid_standardized_region: Optional[Dict[str, Tuple[float, float]]] = None
+        
+        # ============ 运行时参数配置 ============
+        # 这些参数可以通过修改config来设置，替代命令行参数
+        # 详细使用说明请参考文件头部文档
+        # 
+        # 也可以使用 set_runtime_params() 辅助方法来设置参数
+        self.runtime = {
+            'model_names': None,  # None表示处理所有模型，或指定模型名称列表，如 ['2022_SinoScope1.0', '2024_EARA2024']
+            'compute_common_region': False,  # 是否计算共同覆盖区域（需要多个模型）
+            'list_models': False,  # 是否只列出模型列表（不执行处理）
+            'single_model': None  # 处理单个模型（优先级高于model_names），如 '2022_SinoScope1.0'
+        }
+    
+    def set_runtime_params(self, model_names: Optional[List[str]] = None,
+                          single_model: Optional[str] = None,
+                          compute_common_region: bool = False,
+                          list_models: bool = False) -> None:
+        """
+        设置运行时参数的辅助方法
+        
+        Args:
+            model_names: 要处理的模型名称列表，None表示处理所有模型
+            single_model: 处理单个模型（优先级高于model_names）
+            compute_common_region: 是否计算共同覆盖区域
+            list_models: 是否只列出模型列表
+        """
+        if single_model is not None:
+            self.runtime['single_model'] = single_model
+            self.runtime['model_names'] = None  # 清除model_names，因为single_model优先级更高
+        elif model_names is not None:
+            self.runtime['model_names'] = model_names
+            self.runtime['single_model'] = None
+        
+        self.runtime['compute_common_region'] = compute_common_region
+        self.runtime['list_models'] = list_models
 
 
 class VelocityModelProcessor:
@@ -2278,55 +2413,38 @@ class VelocityModelProcessor:
 
 
 def main():
-    """主函数 - 支持命令行参数选择要处理的模型"""
-    import argparse
+    """主函数 - 从config读取参数选择要处理的模型"""
     
     print("="*80)
     print("EASTASIA-FWI 速度模型预处理")
     print("支持多种格式：H5, NetCDF, GeoCSV, TXT, Excel, 多深度文件等")
     print("="*80)
     
-    # 命令行参数解析
-    parser = argparse.ArgumentParser(
-        description='EASTASIA-FWI 速度模型预处理工具',
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-示例:
-  python 1_5_Process_velocity_models.py                    # 处理所有模型
-  python 1_5_Process_velocity_models.py --list             # 列出所有可用模型
-  python 1_5_Process_velocity_models.py --models 2022_SinoScope1.0 2024_EARA2024
-  python 1_5_Process_velocity_models.py --models 2018_CSEM_Japan --common-region
-        """
-    )
-    parser.add_argument('--models', nargs='+', help='要处理的模型名称列表')
-    parser.add_argument('--list', action='store_true', help='列出所有可用模型')
-    parser.add_argument('--common-region', action='store_true', 
-                       help='计算共同覆盖区域（需要多个模型）')
-    parser.add_argument('--single', type=str, help='处理单个模型')
+    # 初始化配置和处理器
+    config = VelocityModelConfig()
+    processor = VelocityModelProcessor(config)
     
-    args = parser.parse_args()
-    
-    # 初始化处理器
-    processor = VelocityModelProcessor()
+    # 从config读取运行时参数
+    runtime_config = config.runtime
     
     # 列出所有模型
-    if args.list:
+    if runtime_config['list_models']:
         print("\n📋 可用模型列表:")
         print("-"*60)
-        for i, (name, info) in enumerate(processor.config.models.items(), 1):
+        for i, (name, info) in enumerate(config.models.items(), 1):
             print(f"  {i:2d}. {name}")
             print(f"      格式: {info['format']}")
             print(f"      区域: {info.get('region', 'Unknown')}")
             print(f"      参数: {', '.join(info.get('params', []))}")
             print()
-        print(f"共 {len(processor.config.models)} 个模型")
+        print(f"共 {len(config.models)} 个模型")
         return
     
-    # 确定要处理的模型
-    if args.single:
-        model_names = [args.single]
-    elif args.models:
-        model_names = args.models
+    # 确定要处理的模型（优先级：single_model > model_names > None）
+    if runtime_config['single_model']:
+        model_names = [runtime_config['single_model']]
+    elif runtime_config['model_names']:
+        model_names = runtime_config['model_names']
     else:
         model_names = None  # 处理所有模型
     
@@ -2334,7 +2452,7 @@ def main():
     if model_names:
         valid_models = []
         for name in model_names:
-            if name in processor.config.models:
+            if name in config.models:
                 valid_models.append(name)
             else:
                 print(f"⚠️ 未知模型: {name}")
@@ -2352,22 +2470,22 @@ def main():
         for name in model_names:
             print(f"  • {name}")
     else:
-        print(f"\n将处理所有 {len(processor.config.models)} 个模型")
+        print(f"\n将处理所有 {len(config.models)} 个模型")
     
     print()
     
     # 执行处理
     results = processor.process_all_models(
         model_names=model_names,
-        compute_common_region=args.common_region
+        compute_common_region=runtime_config['compute_common_region']
     )
     
     # 打印处理结果
     print("\n" + "="*80)
     print("✨ 处理完成！")
     print("="*80)
-    print(f"\n📁 输出目录: {processor.config.paths['output_dir']}")
-    print(f"📊 结果目录: {processor.config.paths['results_dir']}")
+    print(f"\n📁 输出目录: {config.paths['output_dir']}")
+    print(f"📊 结果目录: {config.paths['results_dir']}")
     
     print("\n📊 处理结果:")
     success_models = [k for k, v in results.items() if v.get('status') == 'success']
@@ -2391,7 +2509,7 @@ def main():
     print("  • *_original.nc (NetCDF 3D) - 原始模型区域")
     print("  • *_original.csv (CSV 1D) - 原始模型区域")
     print("  • *_original_metadata.json - 元数据")
-    if args.common_region:
+    if runtime_config['compute_common_region']:
         print("  • *_standardized.nc/csv - 共同覆盖区域")
     
     print("="*80 + "\n")

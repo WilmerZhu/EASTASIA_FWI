@@ -1,9 +1,94 @@
 """
 1_3_Download_waveforms.py: 
 地震波形数据批量下载模块
-基于FDSN服务批量下载东亚地区地震事件的波形数据
-配置参数已集成在模块内部
-新增功能：支持下载指定永久台站的波形数据
+================================================================
+
+功能描述:
+----------
+基于FDSN (Federation of Digital Seismograph Networks) 协议批量下载东亚地区地震事件的波形数据。
+支持多Provider智能轮询、永久台站筛选、断点续传和数据质量控制，为全波形反演提供高质量的观测数据。
+
+核心功能:
+----------
+1. ✅ 批量波形数据下载
+   - 从GCMT事件目录自动生成下载任务
+   - 支持11个主要FDSN Provider (AUSPASS, ETH, GEOFON, GEONET, GFZ, IPGP, IRIS, RESIF, SCEDC, USP)
+   - 智能Provider轮询机制，提高下载成功率
+   - 自动重试机制（每轮尝试所有Provider）
+
+2. ✅ 永久台站筛选（新增）
+   - 支持仅下载永久台站的波形数据
+   - 基于永久台站列表文件筛选
+   - 可指定网络和台站列表
+   - 提高数据质量和一致性
+
+3. ✅ 时间窗口配置
+   - 可配置事件前后时间窗口（默认: 事件后60分钟）
+   - 最小数据长度比例要求
+   - 自动处理数据间隙
+
+4. ✅ 通道优先级
+   - 优先下载宽频带数据 (BH*, HH*)
+   - 位置代码优先级 (空, 00, 10, 20)
+   - 自动选择最佳数据质量
+
+5. ✅ 断点续传功能
+   - 自动检测已下载的数据
+   - 跳过已完成的事件
+   - 支持中断后继续下载
+
+6. ✅ 数据质量控制
+   - 最小文件数量验证
+   - 数据完整性检查
+   - 详细的下载统计报告
+
+使用方法:
+----------
+```python
+from 1_Data_preparation.1_3_Download_waveforms import WaveformDownloader
+
+# 初始化下载器
+downloader = WaveformDownloader()
+
+# 选择事件目录文件
+catalog_file = downloader.select_catalog_source()
+
+# 批量下载波形数据
+results = downloader.batch_download(catalog_file)
+
+# 使用永久台站模式
+downloader.config.permanent_stations['use_permanent_only'] = True
+results = downloader.batch_download(catalog_file)
+```
+
+配置说明:
+----------
+通过 DownloadConfig 类配置下载参数:
+- fdsn: FDSN服务配置 (providers, timeout, channel优先级等)
+- time_window: 时间窗口配置 (事件前后时间)
+- event_selection: 事件选择条件 (震级范围、时间范围、最大事件数)
+- permanent_stations: 永久台站配置 (台站文件、网络列表等)
+- retry: 重试机制配置
+- quality_control: 数据质量控制阈值
+
+输出文件:
+----------
+- events/waveforms/{event_dir}/: 每个事件的波形数据目录
+- events/responses/{event_dir}/: 每个事件的仪器响应文件目录
+- download_summary.json: 下载统计摘要
+- download_report.txt: 详细下载报告
+
+科学原理:
+----------
+- FDSN协议: 国际标准的地震数据交换协议，确保数据格式统一和互操作性
+- 多Provider下载: 提高数据覆盖率和可用性，减少单点故障影响
+- 永久台站: 长期运行的台站数据质量更稳定，适合全波形反演
+- 时间窗口: 确保包含完整的P波、S波和面波信号，满足全波形反演需求
+- 通道优先级: 宽频带数据提供更宽的频率范围，提高反演分辨率
+
+作者: EASTASIA-FWI Team
+日期: 2026-02-02
+版本: v2.0 (支持永久台站)
 """
 import pandas as pd
 import numpy as np

@@ -1,8 +1,93 @@
 """
 1_2_Process_GCMT_catalogs.py: 
 GCMT地震事件处理模块
-基于GCMT目录的地震事件筛选和格式转换
-包含自动下载和整合功能，配置参数已集成在模块内部
+================================================================
+
+功能描述:
+----------
+基于GCMT (Global Centroid Moment Tensor) 目录的地震事件筛选、格式转换和数据管理模块。
+支持自动下载、数据整合、多条件筛选和多种格式输出，为全波形反演提供高质量的地震事件目录。
+
+核心功能:
+----------
+1. ✅ GCMT数据自动下载和更新
+   - 支持从GCMT 网站自动下载最新GCMT数据
+   - 多URL备份机制，确保数据获取可靠性
+   - 自动合并多年份数据文件
+   - 文件格式验证和错误处理
+
+2. ✅ NDK格式文件解析
+   - 解析标准NDK格式的GCMT目录文件
+   - 提取事件基本信息（时间、位置、震级等）
+   - 提取震源机制参数（矩张量、双力偶解等）
+   - 支持多种震级类型（Mw, mb, Ms）
+
+3. ✅ 多条件事件筛选
+   - 地理区域筛选：基于项目研究区域自动筛选
+   - 震级范围筛选：可配置震级范围（默认: 5.0-7.5）
+   - 深度范围筛选：可配置深度范围（默认: 0-700 km）
+   - 时间范围筛选：支持指定年份范围
+   - 远震事件筛选：支持包含远震事件（30-180度）
+
+4. ✅ 数据整合和合并
+   - 自动合并多个NDK文件
+   - 去除重复事件
+   - 按时间排序
+   - 数据格式验证
+
+5. ✅ 多种格式输出
+   - CSV格式：便于数据分析和可视化
+   - CMT格式：SPECFEM3D兼容格式
+   - 统计报告：详细的筛选和处理统计
+
+使用方法:
+----------
+```python
+from 1_Data_preparation.1_2_Process_GCMT_catalogs import GCMTProcessor
+
+# 初始化处理器
+processor = GCMTProcessor()
+
+# 下载并更新数据（2021-2024）
+success = processor.download_and_update(2021, 2024)
+
+# 解析NDK文件
+catalogs_df = processor.parse_ndk_file()
+
+# 筛选事件
+filtered_catalogs = processor.filter_catalogs(catalogs_df)
+
+# 保存结果
+saved_files = processor.save_processed_catalogs(filtered_catalogs)
+```
+
+配置说明:
+----------
+通过 EventProcessConfig 类配置处理参数:
+- gcmt: GCMT数据源配置 (下载URL、重试机制等)
+- event_filters: 事件筛选条件 (震级、深度范围)
+- time_filters: 时间筛选配置
+- geographic_filters: 地理筛选配置
+- download_management: 下载管理选项
+- file_merging: 文件合并策略
+
+输出文件:
+----------
+- {region}_gcmt_catalogs.csv: 筛选后的事件CSV文件
+- {region}_gcmt_catalogs.cmt: SPECFEM3D格式CMT文件
+- gcmt_processing_report.txt: 详细处理报告
+- query_metadata.json: 处理元数据
+
+科学原理:
+----------
+- GCMT目录: 全球统一的矩心矩张量解目录，提供高精度的震源机制参数
+- 矩张量解: 描述地震震源的完整物理参数，包括双力偶分量和补偿线性向量偶极子
+- 事件筛选: 基于震级、深度、位置等多维度条件，确保选择适合全波形反演的事件
+- 远震事件: 利用远震波形可以约束深部结构，补充区域地震数据的不足
+
+作者: EASTASIA-FWI Team
+日期: 2026-02-02
+版本: v2.0
 """
 import pandas as pd
 from pathlib import Path
