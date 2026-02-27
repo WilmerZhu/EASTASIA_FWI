@@ -52,6 +52,8 @@ ENV/
 data/
 results/
 figures/
+article/
+docs/
 backup/
 logs/
 temp/
@@ -110,3 +112,5 @@ secrets.*
 !results/.gitkeep
 !figures/.gitkeep
 !logs/.gitkeep
+!article/.gitkeep
+!docs/.gitkeep

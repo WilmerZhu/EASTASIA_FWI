@@ -1,57 +1,87 @@
 """
-EASTASIA-FWI 速度模型对比分析模块 (v2.6 - 增强差异对比版本)
-===========================================================
+2_1_Model_compare.py:
+速度模型对比分析模块（双区域1D对比）
+================================================================
 
-核心改进：
-1. ✅ 直接读取标准化NetCDF文件（快速高效）
-2. ✅ 修正1D剖面图：速度对比 + 各向异性对比
-3. ✅ 新增单个模型详细图（每个模型的完整剖面）
-4. ✅ 新增水平切片对比可视化（不同深度）+ dlnV速度扰动图（百分比显示）
-5. ✅ 新增垂直剖面对比可视化（经度/纬度切片）+ dlnV速度扰动图（百分比显示）
-6. ✅ 详细的统计分析报告
-7. ✅ 优化颜色方案：红蓝金三色
-8. ✅ VS/VP一维剖面使用实线，各向异性使用不同线型
-9. ✅ 使用地震学标准dlnV表示速度扰动（百分比显示）
-10. ✅ 水平切片添加海岸线数据
-11. ✅ 添加切片位置示意图
-12. ✅ 切片色标使用 seismic
-13. ✅ 灵活绘图模式：可选择只画绝对速度、只画扰动、或两者都画
-14. ✅ 水平切片colorbar放置在右侧（垂直方向）
-15. 🆕 独立绝对速度对比图（单独方法）
-16. 🆕 两两模型差异对比图（Model_A - Model_B）
+功能描述:
+----------
+基于标准化NetCDF数据的多维度速度模型对比分析。对齐 1_5 双区域输出，
+共同区域（standardized）用于多模型公平对比，原始区域（original）用于
+单模型完整可视化。
 
-科学原理：
-- 基于标准化NetCDF数据的快速对比分析
-- 多维度可视化：1D剖面、2D切片、2D剖面
-- 各向异性特征对比分析
-- dlnV速度扰动: dlnV = ln(V/V_ref) × 100%，相对于一维参考模型
-- 模型间绝对差异: ΔV = V_A - V_B (km/s)
-- 适用于全波形反演初始模型选择
+核心功能:
+----------
+1. ✅ 双区域数据源（对齐 1_5 设计）
+   - 共同区域对比：*_standardized.nc（多模型交集区域）
+   - 单独模型可视化：*_original.nc（完整模型覆盖）
+2. ✅ 1D速度剖面对比（VS + VP，各向异性 VSV/VSH、VPV/VPH）
+3. ✅ 水平切片对比（绝对速度 / dlnV扰动 / 两者）
+4. ✅ 垂直剖面对比（经度/纬度方向，灵活绘图模式）
+5. ✅ 两两模型差异图（ΔV = V_A - V_B）
+6. ✅ 切片位置示意图（Cartopy地理参考）
 
-dlnV定义：
-- dlnV = [ln(V) - ln(V_ref)] × 100% = ln(V/V_ref) × 100%
-- 小扰动近似: dlnV ≈ (V - V_ref)/V_ref × 100% = dV/V × 100%
-- 正值表示高速异常，负值表示低速异常
+使用方法:
+----------
+```python
+from 2_Model_space_analysis.2_1_Model_compare import ModelComparator
 
-作者：EASTASIA-FWI Team
-日期：2025-10-21
-版本：v2.6
+comparator = ModelComparator()
+comparator.load_models()
+comparator.save_results()
+```
+
+配置说明:
+----------
+通过 ModelCompareConfig 类配置参数:
+- target_models: 目标模型列表（含 standardized/original 文件路径）
+- profile_params: 1D剖面参数（深度范围、空间平均）
+- plot_mode: 绘图模式（absolute / perturbation / both）
+- slice_params: 切片可视化参数（深度列表、色标、海岸线）
+
+输出文件:
+----------
+- 2-1_velocity_comparison.png: VS+VP 综合对比
+- 2-1_s_wave_anisotropy.png: S波各向异性（VSV vs VSH）
+- 2-1_p_wave_anisotropy.png: P波各向异性（VPV vs VPH）
+- 2-1_profile_{model}.png: 单模型完整剖面（original区域）
+- 2-1_horizontal_slice_vs_{depth}km.png: 水平切片
+- 2-1_vertical_profile_{n}.png: 垂直剖面
+- 2-1_absolute_vs_{depth}km.png: 绝对速度并排对比
+- 2-1_difference_vs_{depth}km.png: 两两模型差异
+- 2-1_slice_locations.png: 切片位置示意图
+- 2-1_comparison_report.json / _summary.txt: 统计报告
+
+科学原理:
+----------
+- dlnV = ln(V/V_ref) × 100%（对数速度扰动，百分比）
+  小扰动近似: dlnV ≈ (V - V_ref)/V_ref × 100%
+  正值 → 高速异常，负值 → 低速异常
+- ΔV = V_A - V_B (km/s)（模型间绝对差异）
+- 各向异性: 径向各向异性由 VSV/VSH、VPV/VPH 差异体现
+
+作者: EASTASIA-FWI Team
+日期: 2026-02-27
+版本: v2.7
 """
 
-import numpy as np
-import matplotlib.pyplot as plt
-import xarray as xr
-from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Any
-import warnings
-from dataclasses import dataclass
+import copy
 import json
 import sys
+import warnings
+from dataclasses import dataclass
 from datetime import datetime
+from itertools import combinations
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple, Any
+
 import cartopy.crs as ccrs
 import cartopy.feature as cfeature
+from cartopy.mpl.geoaxes import GeoAxes
+import matplotlib.pyplot as plt
+from matplotlib.figure import Figure
+import numpy as np
+import xarray as xr
 from matplotlib.patches import Rectangle
-from itertools import combinations
 
 # 添加项目根目录到路径
 project_root = Path(__file__).parent.parent
@@ -84,16 +114,28 @@ class ModelMetadata:
 
 
 class ModelCompareConfig:
-    """模型对比分析配置类（v2.6 - 增强差异对比版本）"""
+    """模型对比分析配置类（v2.7 - 双区域1D对比）"""
     
     def __init__(self):
         """初始化配置参数"""
         
         # ============ 目标模型配置（优化颜色方案）============
+        # ============ v2.7 双区域数据源（对齐1_5）============
+        # 共同区域对比: standardized.nc（模型交集的公平对比）
+        # 单独模型可视化: original.nc（每个模型的完整覆盖范围）
+        self.region_data_source = {
+            'comparison': 'standardized',   # 多模型1D对比、水平切片、垂直剖面
+            'individual': 'original',      # 单个模型1D完整剖面
+        }
+        
+        # 模型数据根目录（对齐 1_5 输出，可覆盖）
+        self.models_processed_base: Optional[Path] = None  # None = base_config.dirs['models']/processed
+        
         self.target_models = {
             '2022_SinoScope1.0': {
                 'netcdf_file': '2022_SinoScope1.0_standardized.nc',
-                'processed_dir': 'processed/2022_SinoScope1.0',
+                'netcdf_file_original': '2022_SinoScope1.0_original.nc',
+                'processed_subdir': '2022_SinoScope1.0',
                 'metadata': ModelMetadata(
                     name="SinoScope1.0",
                     full_name="SinoScope 1.0",
@@ -108,7 +150,8 @@ class ModelCompareConfig:
             },
             '2024_EARA2024': {
                 'netcdf_file': '2024_EARA2024_standardized.nc',
-                'processed_dir': 'processed/2024_EARA2024',
+                'netcdf_file_original': '2024_EARA2024_original.nc',
+                'processed_subdir': '2024_EARA2024',
                 'metadata': ModelMetadata(
                     name="EARA2024",
                     full_name="EARA2024",
@@ -123,7 +166,8 @@ class ModelCompareConfig:
             },
             '2024_FWEA23': {
                 'netcdf_file': '2024_FWEA23_standardized.nc',
-                'processed_dir': 'processed/2024_FWEA23',
+                'netcdf_file_original': '2024_FWEA23_original.nc',
+                'processed_subdir': '2024_FWEA23',
                 'metadata': ModelMetadata(
                     name="FWEA23",
                     full_name="FWEA23",
@@ -236,7 +280,7 @@ class ModelCompareConfig:
 
 
 class VelocityModelNetCDF:
-    """基于NetCDF的速度模型数据类（v2.6）"""
+    """基于NetCDF的速度模型数据类"""
     
     def __init__(self, netcdf_path: Path, metadata: ModelMetadata, logger):
         """
@@ -250,19 +294,21 @@ class VelocityModelNetCDF:
         self.path = netcdf_path
         self.metadata = metadata
         self.logger = logger
-        self.ds: Optional[xr.Dataset] = None
         
-        # 坐标缓存
-        self._lon = None
-        self._lat = None
-        self._depth = None
+        # 坐标数组（load_netcdf 中赋值）
+        self._lon: np.ndarray = np.array([])
+        self._lat: np.ndarray = np.array([])
+        self._depth: np.ndarray = np.array([])
+        
+        # Dataset 引用
+        self.ds: xr.Dataset = xr.Dataset()
         
         # 一维参考模型缓存
-        self._reference_1d_profile = None
+        self._reference_1d_profile: Optional[Dict[str, Dict[str, np.ndarray]]] = None
         
-        self.load_netcdf()
+        self._load_netcdf()
     
-    def load_netcdf(self):
+    def _load_netcdf(self) -> None:
         """加载NetCDF数据"""
         try:
             self.logger.info(f"📦 加载NetCDF: {self.metadata.name}")
@@ -270,7 +316,6 @@ class VelocityModelNetCDF:
             
             self.ds = xr.open_dataset(self.path)
             
-            # 读取坐标
             self._lon = self.ds['longitude'].values
             self._lat = self.ds['latitude'].values
             self._depth = self.ds['depth'].values
@@ -297,7 +342,7 @@ class VelocityModelNetCDF:
             self.logger.info(f"  深度: {self._depth.min():.1f} ~ {self._depth.max():.1f} km")
             self.logger.info(f"  分辨率: {self.metadata.actual_resolution}")
             
-            available_params = [v for v in self.ds.data_vars if v not in ['longitude', 'latitude', 'depth']]
+            available_params = [str(v) for v in self.ds.data_vars if v not in ['longitude', 'latitude', 'depth']]
             self.logger.info(f"  可用参数: {', '.join(available_params)}")
             
         except Exception as e:
@@ -578,17 +623,16 @@ class VelocityModelNetCDF:
     
     def close(self):
         """关闭NetCDF文件"""
-        if self.ds is not None:
-            self.ds.close()
+        self.ds.close()
     
     def __del__(self):
         """析构函数"""
         self.close()
 
-# ==================== 模型对比分析器类（v2.6）====================
+# ==================== 模型对比分析器类 ====================
 
 class ModelComparator:
-    """速度模型对比分析器（v2.6 - 增强差异对比版本）"""
+    """速度模型对比分析器（v2.7 - 双区域1D对比）"""
     
     def __init__(self):
         """初始化对比分析器"""
@@ -605,7 +649,8 @@ class ModelComparator:
         )
         
         # 初始化模型存储
-        self.models: Dict[str, VelocityModelNetCDF] = {}
+        self.models: Dict[str, VelocityModelNetCDF] = {}  # 共同区域对比（standardized）
+        self.models_individual: Dict[str, VelocityModelNetCDF] = {}  # 单独模型（original，按需加载）
         
         # 设置绘图样式
         self._setup_plotting_style()
@@ -615,15 +660,18 @@ class ModelComparator:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         
         self.logger.info("="*80)
-        self.logger.info("🚀 速度模型对比分析器初始化 (v2.6 - 增强差异对比版本)")
+        self.logger.info("🚀 速度模型对比分析器初始化 (v2.7 - 双区域1D对比)")
         self.logger.info("="*80)
         self._print_config_summary()
     
     def _print_config_summary(self):
         """打印配置摘要"""
-        print("\n📋 模型对比分析配置 (v2.6 - 增强差异对比版本)")
+        print("\n📋 模型对比分析配置 (v2.7 - 双区域1D对比)")
         print("-" * 60)
         print(f"目标模型数量: {len(self.config.target_models)}")
+        print(f"\n🗺️  双区域数据源（对齐1_5）:")
+        print(f"  共同区域对比: {self.config.region_data_source['comparison']}.nc")
+        print(f"  单独模型可视化: {self.config.region_data_source['individual']}.nc")
         for key, info in self.config.target_models.items():
             meta = info['metadata']
             print(f"  - {meta.full_name} ({meta.year}) - 颜色: {meta.color}")
@@ -657,7 +705,7 @@ class ModelComparator:
         plt.rcParams['font.sans-serif'] = self.config.plot_params['font_family']
         plt.rcParams['axes.unicode_minus'] = False
         plt.rcParams.update({
-            'font.family': self.config.plot_params['font_family'],
+            'font.family': 'sans-serif',
             'font.size': self.config.plot_params['font_sizes']['tick'],
             'axes.titlesize': self.config.plot_params['font_sizes']['title'],
             'axes.labelsize': self.config.plot_params['font_sizes']['xlabel'],
@@ -665,16 +713,47 @@ class ModelComparator:
             'figure.dpi': self.config.plot_params['dpi']
         })
     
+    def _get_model_path(self, model_key: str, region_type: str = 'standardized') -> Path:
+        """
+        获取模型NetCDF文件路径（对齐1_5输出结构）
+        
+        Args:
+            model_key: 模型键名
+            region_type: 'standardized'（共同区域）或 'original'（原始模型区域）
+            
+        Returns:
+            NetCDF文件完整路径
+        """
+        if model_key not in self.config.target_models:
+            raise KeyError(f"未知模型: {model_key}")
+        
+        model_info = self.config.target_models[model_key]
+        subdir = model_info.get('processed_subdir', model_key)
+        
+        if region_type == 'standardized':
+            nc_file = model_info.get('netcdf_file', f'{model_key}_standardized.nc')
+        else:
+            nc_file = model_info.get('netcdf_file_original', f'{model_key}_original.nc')
+        
+        # 路径对齐 1_5：data/models/processed/{model_name}/（可配置 models_processed_base 覆盖）
+        base = self.config.models_processed_base
+        models_dir = (Path(base) if base is not None else 
+                     self.base_config.dirs['models'] / 'processed')
+        return models_dir / subdir / nc_file
+    
     def load_models(self):
-        """加载所有NetCDF模型"""
+        """
+        加载共同区域NetCDF模型（standardized），用于多模型对比。
+        单独模型（original）由 _load_model_individual() 按需加载。
+        """
+        region_type = self.config.region_data_source.get('comparison', 'standardized')
+        
         self.logger.info("\n" + "="*80)
-        self.logger.info("📦 加载NetCDF模型文件")
+        self.logger.info(f"📦 加载NetCDF模型（共同区域对比: {region_type}）")
         self.logger.info("="*80)
         
-        models_dir = self.base_config.dirs['data'] / 'fwi-models'
-        
         for model_key, model_info in self.config.target_models.items():
-            netcdf_path = models_dir / model_info['processed_dir'] / model_info['netcdf_file']
+            netcdf_path = self._get_model_path(model_key, region_type)
             
             if not netcdf_path.exists():
                 self.logger.warning(f"⚠️  NetCDF文件不存在: {netcdf_path}")
@@ -691,21 +770,56 @@ class ModelComparator:
             except Exception as e:
                 self.logger.error(f"❌ 加载失败 {model_key}: {e}")
         
-        self.logger.info(f"\n✅ 成功加载 {len(self.models)} 个NetCDF模型")
+        self.logger.info(f"\n✅ 成功加载 {len(self.models)} 个NetCDF模型（共同区域）")
         
         if len(self.models) == 0:
             raise RuntimeError("未能加载任何模型")
     
+    def _load_model_individual(self, model_key: str) -> Optional[VelocityModelNetCDF]:
+        """
+        按需加载单个模型的原始区域数据（用于单独模型1D可视化）
+        
+        Args:
+            model_key: 模型键名
+            
+        Returns:
+            VelocityModelNetCDF 或 None
+        """
+        if model_key in self.models_individual:
+            return self.models_individual[model_key]
+        
+        netcdf_path = self._get_model_path(model_key, 'original')
+        
+        if not netcdf_path.exists():
+            self.logger.warning(f"⚠️  单独模型NetCDF不存在（将回退到共同区域）: {netcdf_path}")
+            return self.models.get(model_key)
+        
+        try:
+            model_info = self.config.target_models[model_key]
+            metadata_copy = copy.deepcopy(model_info['metadata'])
+            model = VelocityModelNetCDF(
+                netcdf_path,
+                metadata_copy,
+                self.logger
+            )
+            self.models_individual[model_key] = model
+            return model
+        except Exception as e:
+            self.logger.error(f"❌ 加载单独模型失败 {model_key}: {e}")
+            return self.models.get(model_key)
+    
     # ==================== 1D速度剖面对比 ====================
     
-    def plot_1d_velocity_comparison(self) -> plt.Figure:
+    def plot_1d_velocity_comparison(self) -> Figure:
         """
-        绘制1D速度剖面对比图（所有模型的VS和VP，都用实线，仅颜色区分）
+        绘制1D速度剖面对比图（共同区域，使用 standardized 数据）
+        
+        多模型在共同覆盖区域的公平对比，VS和VP用实线、仅颜色区分。
         
         Returns:
             综合速度剖面对比图
         """
-        self.logger.info("🎨 绘制综合速度剖面对比图（VS + VP，实线）...")
+        self.logger.info("🎨 绘制共同区域1D剖面对比图（standardized，VS + VP）...")
         
         fig, ax = plt.subplots(figsize=self.config.plot_params['figsize_1d'])
         
@@ -827,8 +941,8 @@ class ModelComparator:
             if depth <= depth_range[1]:
                 ax.axhline(y=depth, color='gray', linestyle='--', 
                           linewidth=1.5, alpha=0.5)
-                ax.text(1.2, depth-10, f'{depth} km', 
-                       fontsize=9, color='gray', va='top')
+                # ax.text(1.2, depth-10, f'{depth} km', 
+                #        fontsize=9, color='gray', va='top')
         
         ax.legend(
             loc='upper right',
@@ -845,7 +959,7 @@ class ModelComparator:
     
     # ==================== S波各向异性对比图 ====================
     
-    def plot_s_wave_anisotropy_comparison(self) -> Optional[plt.Figure]:
+    def plot_s_wave_anisotropy_comparison(self) -> Optional[Figure]:
         """绘制S波各向异性对比图（VSV实线，VSH虚线）"""
         self.logger.info("🎨 绘制S波各向异性对比图...")
         
@@ -927,7 +1041,7 @@ class ModelComparator:
     
     # ==================== P波各向异性对比图 ====================
     
-    def plot_p_wave_anisotropy_comparison(self) -> Optional[plt.Figure]:
+    def plot_p_wave_anisotropy_comparison(self) -> Optional[Figure]:
         """绘制P波各向异性对比图（VPV实线，VPH虚线）"""
         self.logger.info("🎨 绘制P波各向异性对比图...")
         
@@ -1007,14 +1121,17 @@ class ModelComparator:
         
         return fig
     
-    # ==================== 单个模型详细剖面 ====================
+    # ==================== 单个模型详细剖面（v2.7 使用 original 数据）====================
     
-    def plot_individual_model_profile(self, model_key: str) -> Optional[plt.Figure]:
+    def plot_individual_model_profile(self, model_key: str, 
+                                      use_original_region: bool = True) -> Optional[Figure]:
         """
-        绘制单个模型的完整速度剖面
+        绘制单个模型的完整速度剖面（v2.7 对齐1_5：单独模型可视化使用 original 区域）
         
         Args:
             model_key: 模型键名
+            use_original_region: 若 True，使用 *_original.nc（完整模型区域）；
+                               若 False，使用 standardized（共同区域，兼容旧逻辑）
             
         Returns:
             单个模型的完整剖面图
@@ -1023,8 +1140,18 @@ class ModelComparator:
             self.logger.warning(f"模型 {model_key} 不存在")
             return None
         
-        model = self.models[model_key]
-        self.logger.info(f"🎨 绘制单个模型剖面: {model.metadata.full_name}")
+        # v2.7: 单独模型默认使用 original 数据（完整覆盖范围）
+        if use_original_region and self.config.region_data_source.get('individual') == 'original':
+            model = self._load_model_individual(model_key)
+            region_label = "Original Region"
+        else:
+            model = self.models[model_key]
+            region_label = "Common Region"
+        
+        if model is None:
+            return None
+        
+        self.logger.info(f"🎨 绘制单个模型剖面: {model.metadata.full_name} ({region_label})")
         
         fig, ax = plt.subplots(figsize=self.config.plot_params['figsize_1d_individual'])
         depth_range = self.config.profile_params['depth_range']
@@ -1066,15 +1193,16 @@ class ModelComparator:
             ax.set_ylim(depth_range[1], 0)
             ax.set_xlabel("Velocity (km/s)", fontsize=14)
             ax.set_ylabel("Depth (km)", fontsize=14)
-            ax.set_title(f"{model.metadata.full_name}\nComplete Velocity Profile", 
+            region_title = "Original Region" if use_original_region and self.config.region_data_source.get('individual') == 'original' else "Common Region"
+            ax.set_title(f"{model.metadata.full_name}\n1D Velocity Profile ({region_title})", 
                         fontsize=16, pad=20, fontweight='bold')
             
             for depth in [60, 410, 660]:
                 if depth <= depth_range[1]:
                     ax.axhline(y=depth, color='gray', linestyle='--', 
                               linewidth=1.5, alpha=0.5)
-                    ax.text(1.2, depth-10, f'{depth} km', 
-                           fontsize=10, color='gray', va='top')
+                    # ax.text(1.2, depth-10, f'{depth} km', 
+                    #        fontsize=10, color='gray', va='top')
             
             handles, labels = ax.get_legend_handles_labels()
             
@@ -1117,7 +1245,7 @@ class ModelComparator:
     
     # ==================== 切片位置示意图 ====================
     
-    def plot_slice_location_map(self) -> plt.Figure:
+    def plot_slice_location_map(self) -> Figure:
         """
         绘制所有切片位置的示意图
         
@@ -1135,13 +1263,14 @@ class ModelComparator:
         # 获取任意一个模型的空间范围
         first_model = next(iter(self.models.values()))
         spatial_range = first_model.metadata.actual_spatial_range
+        if spatial_range is None:
+            raise ValueError(f"模型 {first_model.metadata.name} 缺少空间范围信息")
         
         lon_min, lon_max = spatial_range['lon']
         lat_min, lat_max = spatial_range['lat']
         
-        # 创建地图
         fig = plt.figure(figsize=self.config.plot_params['figsize_location_map'])
-        ax = fig.add_subplot(1, 1, 1, projection=ccrs.PlateCarree())
+        ax: GeoAxes = fig.add_subplot(1, 1, 1, projection=ccrs.PlateCarree())  # type: ignore[assignment]
         
         # 设置地图范围
         ax.set_extent([lon_min-2, lon_max+2, lat_min-2, lat_max+2], crs=ccrs.PlateCarree())
@@ -1214,7 +1343,7 @@ class ModelComparator:
 
     # ==================== 🆕 独立的绝对速度对比图 ====================
     
-    def plot_horizontal_slices_absolute_only(self, param: str = 'vs') -> List[plt.Figure]:
+    def plot_horizontal_slices_absolute_only(self, param: str = 'vs') -> List[Figure]:
         """
         🆕 绘制独立的绝对速度对比图（所有模型在同一深度）
         
@@ -1253,7 +1382,7 @@ class ModelComparator:
                     try:
                         _, _, data_slice = model.get_horizontal_slice(param, depth)
                         all_data.append(data_slice[~np.isnan(data_slice)])
-                    except:
+                    except Exception:
                         pass
             
             if len(all_data) == 0:
@@ -1273,15 +1402,12 @@ class ModelComparator:
                 try:
                     lon_grid, lat_grid, data_slice = model.get_horizontal_slice(param, depth)
                     
-                    # 创建Cartopy地图
-                    ax = fig.add_subplot(1, n_models, idx, projection=ccrs.PlateCarree())
+                    ax: GeoAxes = fig.add_subplot(1, n_models, idx, projection=ccrs.PlateCarree())  # type: ignore[assignment]
                     
-                    # 设置地图范围
                     ax.set_extent([lon_grid.min(), lon_grid.max(), 
                                   lat_grid.min(), lat_grid.max()], 
                                  crs=ccrs.PlateCarree())
                     
-                    # 添加海岸线
                     if self.config.slice_params['add_coastlines']:
                         ax.add_feature(cfeature.COASTLINE, 
                                       linewidth=self.config.slice_params['coastline_linewidth'],
@@ -1291,7 +1417,6 @@ class ModelComparator:
                                       linewidth=0.3, linestyle=':', 
                                       edgecolor='gray', alpha=0.5, zorder=4)
                     
-                    # 绘制速度数据
                     im = ax.pcolormesh(
                         lon_grid, lat_grid, data_slice,
                         cmap=cmap,
@@ -1302,13 +1427,11 @@ class ModelComparator:
                         zorder=1
                     )
                     
-                    # 添加网格线
                     gl = ax.gridlines(draw_labels=True, linewidth=0.5, 
                                      color='gray', alpha=0.3, linestyle='--')
                     gl.top_labels = False
                     gl.right_labels = False
                     
-                    # Colorbar（右侧垂直放置）
                     cbar = plt.colorbar(
                         im, 
                         ax=ax, 
@@ -1319,7 +1442,6 @@ class ModelComparator:
                     cbar.set_label(f'{param.upper()} (km/s)', 
                                   fontsize=self.config.plot_params['font_sizes']['colorbar'])
                     
-                    # 标题
                     ax.set_title(f"{model.metadata.full_name}",
                                 fontsize=self.config.plot_params['font_sizes']['title'],
                                 color=model.metadata.color,
@@ -1334,7 +1456,7 @@ class ModelComparator:
                         y=0.98,
                         fontweight='bold')
             
-            plt.tight_layout(rect=[0, 0, 1, 0.96])
+            plt.tight_layout(rect=(0, 0, 1, 0.96))
             figures.append(fig)
         
         self.logger.info(f"✅ 成功生成 {len(figures)} 个独立绝对速度对比图")
@@ -1342,7 +1464,7 @@ class ModelComparator:
     
     # ==================== 🆕 两两模型差异对比图 ====================
     
-    def plot_horizontal_slices_model_differences(self, param: str = 'vs') -> List[plt.Figure]:
+    def plot_horizontal_slices_model_differences(self, param: str = 'vs') -> List[Figure]:
         """
         🆕 绘制两两模型间的速度差异对比图（Model_A - Model_B）
         
@@ -1403,7 +1525,7 @@ class ModelComparator:
                     # 计算差异: Model_A - Model_B
                     diff = data_a - data_b
                     all_diffs.append(diff[~np.isnan(diff)])
-                except:
+                except Exception:
                     pass
             
             if len(all_diffs) == 0:
@@ -1437,15 +1559,12 @@ class ModelComparator:
                     # 计算差异: Model_A - Model_B
                     diff = data_a - data_b
                     
-                    # 创建Cartopy地图
-                    ax = fig.add_subplot(nrows, ncols, idx, projection=ccrs.PlateCarree())
+                    ax: GeoAxes = fig.add_subplot(nrows, ncols, idx, projection=ccrs.PlateCarree())  # type: ignore[assignment]
                     
-                    # 设置地图范围
                     ax.set_extent([lon_grid_a.min(), lon_grid_a.max(), 
                                   lat_grid_a.min(), lat_grid_a.max()], 
                                  crs=ccrs.PlateCarree())
                     
-                    # 添加海岸线
                     if self.config.slice_params['add_coastlines']:
                         ax.add_feature(cfeature.COASTLINE, 
                                       linewidth=self.config.slice_params['coastline_linewidth'],
@@ -1455,7 +1574,6 @@ class ModelComparator:
                                       linewidth=0.3, linestyle=':', 
                                       edgecolor='gray', alpha=0.5, zorder=4)
                     
-                    # 绘制差异数据
                     im = ax.pcolormesh(
                         lon_grid_a, lat_grid_a, diff,
                         cmap=cmap_diff,
@@ -1508,7 +1626,7 @@ class ModelComparator:
                         y=0.98,
                         fontweight='bold')
             
-            plt.tight_layout(rect=[0, 0, 1, 0.96])
+            plt.tight_layout(rect=(0, 0, 1, 0.96))
             figures.append(fig)
         
         self.logger.info(f"✅ 成功生成 {len(figures)} 个两两模型差异对比图")
@@ -1516,7 +1634,7 @@ class ModelComparator:
     
     # ==================== 水平切片对比（灵活绘图模式）====================
     
-    def plot_horizontal_slices_comparison(self, param: str = 'vs') -> List[plt.Figure]:
+    def plot_horizontal_slices_comparison(self, param: str = 'vs') -> List[Figure]:
         """
         绘制水平切片对比图（灵活绘图模式：绝对速度/扰动/两者）
         
@@ -1573,7 +1691,7 @@ class ModelComparator:
                         if mode in ['perturbation', 'both']:
                             _, _, dlnv_slice = model.get_horizontal_slice_dlnv(param, depth)
                             all_data_dlnv.append(dlnv_slice[~np.isnan(dlnv_slice)])
-                    except:
+                    except Exception:
                         pass
             
             # 检查是否有有效数据
@@ -1614,8 +1732,7 @@ class ModelComparator:
                     if mode in ['absolute', 'both']:
                         lon_grid, lat_grid, data_slice = model.get_horizontal_slice(param, depth)
                         
-                        row_idx = 1 if mode == 'both' else 1
-                        ax_abs = fig.add_subplot(nrows, ncols, idx, projection=ccrs.PlateCarree())
+                        ax_abs: GeoAxes = fig.add_subplot(nrows, ncols, idx, projection=ccrs.PlateCarree())  # type: ignore[assignment]
                         
                         ax_abs.set_extent([lon_grid.min(), lon_grid.max(), 
                                           lat_grid.min(), lat_grid.max()], 
@@ -1672,7 +1789,7 @@ class ModelComparator:
                         else:
                             subplot_idx = idx
                         
-                        ax_dlnv = fig.add_subplot(nrows, ncols, subplot_idx, projection=ccrs.PlateCarree())
+                        ax_dlnv: GeoAxes = fig.add_subplot(nrows, ncols, subplot_idx, projection=ccrs.PlateCarree())  # type: ignore[assignment]
                         
                         ax_dlnv.set_extent([lon_grid.min(), lon_grid.max(), 
                                            lat_grid.min(), lat_grid.max()], 
@@ -1738,7 +1855,7 @@ class ModelComparator:
                         y=0.98,
                         fontweight='bold')
             
-            plt.tight_layout(rect=[0, 0, 1, 0.96])
+            plt.tight_layout(rect=(0, 0, 1, 0.96))
             
             figures.append(fig)
         
@@ -1747,7 +1864,7 @@ class ModelComparator:
     
     # ==================== 垂直剖面对比（保持原有实现）====================
     
-    def plot_vertical_profiles_comparison(self, param: str = 'vs') -> List[plt.Figure]:
+    def plot_vertical_profiles_comparison(self, param: str = 'vs') -> List[Figure]:
         """
         绘制垂直剖面对比图（灵活绘图模式：绝对速度/扰动/两者）
         
@@ -1788,7 +1905,7 @@ class ModelComparator:
     
     def _plot_single_vertical_profile_flexible(
         self, param: str, direction: str, position: float, mode: str
-    ) -> Optional[plt.Figure]:
+    ) -> Optional[Figure]:
         """
         绘制单个垂直剖面对比（灵活绘图模式）
         
@@ -1828,7 +1945,7 @@ class ModelComparator:
                     if mode in ['perturbation', 'both']:
                         _, _, dlnv_profile = model.get_vertical_profile_dlnv(param, direction, position)
                         all_data_dlnv.append(dlnv_profile[~np.isnan(dlnv_profile)])
-                except:
+                except Exception:
                     pass
         
         # 检查是否有有效数据
@@ -1974,7 +2091,7 @@ class ModelComparator:
                     y=0.98,
                     fontweight='bold')
         
-        plt.tight_layout(rect=[0, 0, 1, 0.96])
+        plt.tight_layout(rect=(0, 0, 1, 0.96))
         
         return fig
     
@@ -2009,8 +2126,8 @@ class ModelComparator:
                 self._save_figure(fig3, self.output_dir / f"{prefix}p_wave_anisotropy")
                 plt.close(fig3)
             
-            # 4. 单个模型详细剖面
-            self.logger.info("\n📊 4. 单个模型详细剖面...")
+            # 4. 单个模型详细剖面（v2.7 使用 original 数据，展示完整模型区域）
+            self.logger.info("\n📊 4. 单个模型详细剖面（original 区域）...")
             for model_key, model in self.models.items():
                 fig = self.plot_individual_model_profile(model_key)
                 if fig:
@@ -2089,9 +2206,9 @@ class ModelComparator:
         report = {
             'metadata': {
                 'generation_time': datetime.now().isoformat(),
-                'analysis_version': 'v2.6-EnhancedDifference',
+                'analysis_version': 'v2.7-DualRegion',
                 'n_models': len(self.models),
-                'data_source': 'Standardized NetCDF files',
+                'data_source': 'Standardized (comparison) + Original (individual) NetCDF files',
                 'perturbation_definition': 'dlnV = ln(V/V_ref) × 100%',
                 'difference_definition': 'ΔV = V_A - V_B (km/s)',
                 'features': [
@@ -2151,7 +2268,7 @@ class ModelComparator:
         
         return report
     
-    def _save_figure(self, fig: plt.Figure, filepath: Path):
+    def _save_figure(self, fig: Figure, filepath: Path):
         """保存图表"""
         for fmt in self.config.output_params['save_formats']:
             output_file = filepath.with_suffix(f'.{fmt}')
@@ -2166,7 +2283,7 @@ class ModelComparator:
         """保存文本格式报告"""
         with open(filepath, 'w', encoding='utf-8') as f:
             f.write("="*80 + "\n")
-            f.write("EASTASIA-FWI 速度模型对比分析报告 (v2.6 - Enhanced Difference)\n")
+            f.write("EASTASIA-FWI 速度模型对比分析报告 (v2.7 - 双区域1D对比)\n")
             f.write("="*80 + "\n\n")
             
             f.write(f"生成时间: {report['metadata']['generation_time']}\n")
@@ -2230,7 +2347,7 @@ class ModelComparator:
 def main():
     """主函数"""
     print("\n" + "="*80)
-    print("🚀 EASTASIA-FWI 速度模型对比分析 (v2.6 - Enhanced Difference)")
+    print("🚀 EASTASIA-FWI 速度模型对比分析 (v2.7 - 双区域1D对比)")
     print("="*80)
     print("\n🎨 核心功能:")
     print("  1. 综合对比图（所有模型）")

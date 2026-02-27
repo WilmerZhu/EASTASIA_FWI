@@ -13,8 +13,8 @@ EASTASIA-FWI 东亚地区全波形成像项目，通过模型空间的智能分�
 EASTASIA-FWI/
 ├── 1_Data_preparation/             # 数据准备模块
 │   ├── 1_1_Query_stations.py           # 台站查询与筛选 ⭐
-│   ├── 1_2_Process_gcmt.py             # GCMT事件处理 ⭐
-│   ├── 1_3_Download_data.py            # 数据下载管理 ⭐
+│   ├── 1_2_Process_GCMT_catlogs.py     # GCMT事件处理 ⭐
+│   ├── 1_3_Download_wa.py            # 数据下载管理 ⭐
 │   ├── 1_4_Preprocessing.py            # 波形预处理 ⭐
 │   ├── 1_5_Process_models.py           # 速度模型处理 ⭐
 │   ├── 1_6_Quality_control.py          # 数据质量控制

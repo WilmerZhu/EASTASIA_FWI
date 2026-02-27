@@ -490,8 +490,10 @@ class VelocityModelConfig:
         # 
         # 也可以使用 set_runtime_params() 辅助方法来设置参数
         self.runtime = {
-            'model_names': None,  # None表示处理所有模型，或指定模型名称列表，如 ['2022_SinoScope1.0', '2024_EARA2024']
-            'compute_common_region': False,  # 是否计算共同覆盖区域（需要多个模型）
+            # 'model_names': None,  # None表示处理所有模型，或指定模型名称列表，如 ['2022_SinoScope1.0', '2024_EARA2024']
+            # 'compute_common_region': False,  # 是否计算共同覆盖区域（需要多个模型）
+            'model_names': ['2022_SinoScope1.0', '2024_EARA2024', '2024_FWEA23'],  # 处理3个模型
+            'compute_common_region': True,  # 计算共同覆盖区域（需要多个模型）
             'list_models': False,  # 是否只列出模型列表（不执行处理）
             'single_model': None  # 处理单个模型（优先级高于model_names），如 '2022_SinoScope1.0'
         }
@@ -705,12 +707,16 @@ class VelocityModelProcessor:
         self.logger.info(f"  经度: {standardized_res['lon']:.4f}°")
         self.logger.info(f"  深度: {standardized_res['depth']:.2f} km")
         
-        # 构建共同区域信息
+        # 构建共同区域信息（确保所有数值都是Python原生类型，以便JSON序列化）
         valid_standardized_region = {
-            'lat': (lat_min, lat_max),
-            'lon': (lon_min, lon_max),
-            'depth': (depth_min, depth_max),
-            'resolution': standardized_res,
+            'lat': (float(lat_min), float(lat_max)),
+            'lon': (float(lon_min), float(lon_max)),
+            'depth': (float(depth_min), float(depth_max)),
+            'resolution': {
+                'lat': float(standardized_res['lat']),
+                'lon': float(standardized_res['lon']),
+                'depth': float(standardized_res['depth'])
+            },
             'grid_points': {
                 'lat': int((lat_max - lat_min) / standardized_res['lat']) + 1,
                 'lon': int((lon_max - lon_min) / standardized_res['lon']) + 1,
@@ -2053,7 +2059,24 @@ class VelocityModelProcessor:
             ds.attrs['depth_shift_applied'] = f"{depth_shift:+.1f} km"
         
         if suffix == 'standardized' and self.config.valid_standardized_region is not None:
-            ds.attrs['valid_standardized_region'] = json.dumps(self.config.valid_standardized_region)
+            # 确保所有numpy类型转换为Python原生类型以便JSON序列化
+            def convert_numpy_types(obj):
+                """递归转换numpy类型为Python原生类型"""
+                if isinstance(obj, np.integer):
+                    return int(obj)
+                elif isinstance(obj, np.floating):
+                    return float(obj)
+                elif isinstance(obj, np.ndarray):
+                    return obj.tolist()
+                elif isinstance(obj, dict):
+                    return {key: convert_numpy_types(value) for key, value in obj.items()}
+                elif isinstance(obj, (list, tuple)):
+                    return type(obj)(convert_numpy_types(item) for item in obj)
+                else:
+                    return obj
+            
+            region_dict = convert_numpy_types(self.config.valid_standardized_region)
+            ds.attrs['valid_standardized_region'] = json.dumps(region_dict)
         
         encoding = {}
         if self.config.processing['compress_netcdf']:
