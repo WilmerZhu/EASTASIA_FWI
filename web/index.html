@@ -1,0 +1,553 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>EASTASIA-FWI | 东亚全波形成像</title>
+  <style>
+    :root {
+      --primary: #1a5276;
+      --primary-light: #2980b9;
+      --bg: #f8f9fa;
+      --card-bg: #fff;
+      --text: #2c3e50;
+      --text-muted: #7f8c8d;
+      --border: #e0e0e0;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.6;
+    }
+
+    .header {
+      background: linear-gradient(135deg, var(--primary) 0%, var(--primary-light) 100%);
+      color: #fff;
+      padding: 1.5rem 2rem;
+    }
+
+    .header h1 {
+      font-size: 1.5rem;
+      font-weight: 600;
+    }
+
+    .header p {
+      opacity: 0.9;
+      font-size: 0.9rem;
+      margin-top: 0.25rem;
+    }
+
+    .nav {
+      display: flex;
+      gap: 0;
+      background: var(--card-bg);
+      border-bottom: 1px solid var(--border);
+      padding: 0 2rem;
+      overflow-x: auto;
+    }
+
+    .nav a {
+      padding: 1rem 1.25rem;
+      text-decoration: none;
+      color: var(--text);
+      font-weight: 500;
+      border-bottom: 3px solid transparent;
+      white-space: nowrap;
+    }
+
+    .nav a:hover {
+      color: var(--primary);
+    }
+
+    .nav a.active {
+      color: var(--primary);
+      border-bottom-color: var(--primary);
+    }
+
+    .main {
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 2rem;
+    }
+
+    .section {
+      display: none;
+    }
+
+    .section.active {
+      display: block;
+    }
+
+    .section h2 {
+      color: var(--primary);
+      margin-bottom: 1rem;
+      font-size: 1.25rem;
+    }
+
+    .section h3 {
+      margin: 1.5rem 0 0.75rem;
+      font-size: 1.1rem;
+    }
+
+    .section p {
+      margin-bottom: 1rem;
+    }
+
+    .metrics {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+      gap: 1rem;
+      margin: 1.5rem 0;
+    }
+
+    .metric {
+      background: var(--card-bg);
+      padding: 1rem;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      text-align: center;
+    }
+
+    .metric .value {
+      font-size: 1.1rem;
+      font-weight: 600;
+      color: var(--primary);
+    }
+
+    .metric .label {
+      font-size: 0.8rem;
+      color: var(--text-muted);
+      margin-top: 0.25rem;
+    }
+
+    .figure img {
+      max-width: 100%;
+      height: auto;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      margin: 1rem 0;
+    }
+
+    .figure figcaption {
+      font-size: 0.85rem;
+      color: var(--text-muted);
+      margin-top: 0.5rem;
+    }
+
+    .tabs {
+      display: flex;
+      gap: 0;
+      margin-bottom: 1rem;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .tab-btn {
+      padding: 0.75rem 1rem;
+      border: none;
+      background: none;
+      cursor: pointer;
+      font-size: 0.9rem;
+      color: var(--text-muted);
+      margin-bottom: -1px;
+    }
+
+    .tab-btn:hover {
+      color: var(--primary);
+    }
+
+    .tab-btn.active {
+      color: var(--primary);
+      border-bottom: 2px solid var(--primary);
+      font-weight: 500;
+    }
+
+    .tab-panel {
+      display: none;
+    }
+
+    .tab-panel.active {
+      display: block;
+    }
+
+    .depth-selector {
+      margin: 1rem 0;
+    }
+
+    .depth-selector label {
+      margin-right: 0.5rem;
+    }
+
+    .depth-selector select {
+      padding: 0.5rem 1rem;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      font-size: 0.9rem;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 1rem 0;
+    }
+
+    th,
+    td {
+      padding: 0.75rem;
+      text-align: left;
+      border-bottom: 1px solid var(--border);
+    }
+
+    th {
+      background: var(--bg);
+      font-weight: 600;
+    }
+
+    ul {
+      margin: 0.5rem 0 1rem 1.5rem;
+    }
+
+    .footer {
+      text-align: center;
+      padding: 2rem;
+      color: var(--text-muted);
+      font-size: 0.85rem;
+    }
+
+    .gen-note {
+      font-size: 0.75rem;
+      color: var(--text-muted);
+      margin-top: 0.5rem;
+    }
+  </style>
+</head>
+
+<body>
+  <header class="header">
+    <h1>🌏 EASTASIA-FWI</h1>
+    <p>东亚地区全波形成像项目 · 模型空间智能分析 · 全波形反演</p>
+  </header>
+  <nav class="nav">
+    <a href="#" data-section="overview" class="active">项目概览</a>
+    <a href="#" data-section="basemap">基础地图与数据</a>
+    <a href="#" data-section="model-compare">速度模型对比</a>
+    <a href="#" data-section="similarity">模型相似性</a>
+  </nav>
+  <main class="main">
+    <section id="overview" class="section active">
+      <h2>项目概览</h2>
+      <p><strong>EASTASIA-FWI</strong>
+        通过模型空间的智能分析（聚类、相似性指数、机器学习）和数据空间的波形评估，建立东亚地区三维地球结构初始模型，结合大规模波形数据的高精度全波形反演，得到新一代标准东亚岩石圈模型 <strong>SEAM
+          1.0</strong>。</p>
+      <div class="metrics">
+        <div class="metric"><span class="value">-15° ~ 60°</span>
+          <div class="label">纬度</div>
+        </div>
+        <div class="metric"><span class="value">60° ~ 170°</span>
+          <div class="label">经度</div>
+        </div>
+        <div class="metric"><span class="value">0 ~ 1000 km</span>
+          <div class="label">深度</div>
+        </div>
+      </div>
+      <h3>核心技术栈</h3>
+      <ul>
+        <li><strong>SPECFEM3D Globe</strong>: 地震波正演/反演</li>
+        <li><strong>ObsPy/SAC</strong>: 地震学数据处理</li>
+        <li><strong>scikit-learn</strong>: 聚类与机器学习</li>
+        <li><strong>PyGMT/Cartopy</strong>: 地球物理可视化</li>
+      </ul>
+      <h3>项目模块</h3>
+      <table>
+        <tr>
+          <th>模块</th>
+          <th>功能</th>
+        </tr>
+        <tr>
+          <td>1_Data_preparation</td>
+          <td>台站查询、GCMT 处理、波形下载与预处理、速度模型标准化</td>
+        </tr>
+        <tr>
+          <td>2_Model_space_analysis</td>
+          <td>模型对比、相似性分析</td>
+        </tr>
+        <tr>
+          <td>3_Data_space_simulation</td>
+          <td>SPECFEM3D 正演设置</td>
+        </tr>
+        <tr>
+          <td>4_Fusion</td>
+          <td>Voting Map、BMA 模型融合</td>
+        </tr>
+        <tr>
+          <td>5_Visualization</td>
+          <td>地图、GCMT、台站分布可视化</td>
+        </tr>
+      </table>
+    </section>
+    <section id="basemap" class="section">
+      <h2>基础地图与数据分布</h2>
+      <div class="tabs">
+        <button class="tab-btn active" data-tab="basemap">综合底图</button>
+        <button class="tab-btn" data-tab="gcmt">GCMT 事件</button>
+        <button class="tab-btn" data-tab="station">台站网络</button>
+      </div>
+      <div id="basemap-panel" class="tab-panel active">
+        <h3>东亚研究区域</h3>
+        <figure class="figure"><img src="../figures/5-1_comprehensive_basemap.jpg" alt="5-1_comprehensive_basemap"
+            onerror="this.parentElement.style.display='none'">
+          <figcaption>5-1_comprehensive_basemap</figcaption>
+        </figure>
+        <figure class="figure"><img src="../figures/5-1_simple_basemap.jpg" alt="5-1_simple_basemap"
+            onerror="this.parentElement.style.display='none'">
+          <figcaption>5-1_simple_basemap</figcaption>
+        </figure>
+      </div>
+      <div id="gcmt-panel" class="tab-panel">
+        <h3>GCMT 震源机制与事件</h3>
+        <figure class="figure"><img src="../figures/5-2_GCMT_focal_mechanisms.jpg" alt="5-2_GCMT_focal_mechanisms">
+          <figcaption>5-2_GCMT_focal_mechanisms</figcaption>
+        </figure>
+        <figure class="figure"><img src="../figures/5-2_GCMT_comprehensive_analysis.jpg"
+            alt="5-2_GCMT_comprehensive_analysis">
+          <figcaption>5-2_GCMT_comprehensive_analysis</figcaption>
+        </figure>
+      </div>
+      <div id="station-panel" class="tab-panel">
+        <h3>台站网络分布</h3>
+        <figure class="figure"><img src="../figures/5-3_combined_station_network_distribution.jpg"
+            alt="5-3_combined_station_network_distribution">
+          <figcaption>5-3_combined_station_network_distribution</figcaption>
+        </figure>
+        <figure class="figure"><img src="../figures/5-3_station_comprehensive_statistics.jpg"
+            alt="5-3_station_comprehensive_statistics">
+          <figcaption>5-3_station_comprehensive_statistics</figcaption>
+        </figure>
+      </div>
+    </section>
+    <section id="model-compare" class="section">
+      <h2>速度模型对比</h2>
+      <div class="tabs">
+        <button class="tab-btn active" data-tab="mc-1d">1D 速度对比</button>
+        <button class="tab-btn" data-tab="mc-abs">水平切片 (Vs)</button>
+        <button class="tab-btn" data-tab="mc-diff">水平切片 (差异)</button>
+        <button class="tab-btn" data-tab="mc-profile">垂直剖面</button>
+        <button class="tab-btn" data-tab="mc-ani">各向异性</button>
+      </div>
+      <div id="mc-1d-panel" class="tab-panel active">
+        <figure class="figure"><img src="../figures/model_compare/2-1_velocity_comparison.png" alt="1D速度对比">
+          <figcaption>2-1 速度模型 1D 对比</figcaption>
+        </figure>
+      </div>
+      <div id="mc-abs-panel" class="tab-panel">
+        <div class="depth-selector"><label>深度 (km):</label><select id="depth-abs">
+            <option value="20">20</option>
+            <option value="40">40</option>
+            <option value="60">60</option>
+            <option value="80">80</option>
+            <option value="100" selected>100</option>
+            <option value="200">200</option>
+            <option value="300">300</option>
+            <option value="400">400</option>
+            <option value="500">500</option>
+            <option value="600">600</option>
+            <option value="700">700</option>
+            <option value="800">800</option>
+            <option value="900">900</option>
+          </select></div>
+        <figure class="figure"><img id="img-abs" src="../figures/model_compare/2-1_absolute_vs_100km.png" alt="Vs">
+          <figcaption>2-1 Vs 绝对速度水平切片</figcaption>
+        </figure>
+      </div>
+      <div id="mc-diff-panel" class="tab-panel">
+        <div class="depth-selector"><label>深度 (km):</label><select id="depth-diff">
+            <option value="20">20</option>
+            <option value="40">40</option>
+            <option value="60">60</option>
+            <option value="80">80</option>
+            <option value="100" selected>100</option>
+            <option value="200">200</option>
+            <option value="300">300</option>
+            <option value="400">400</option>
+            <option value="500">500</option>
+            <option value="600">600</option>
+            <option value="700">700</option>
+            <option value="800">800</option>
+            <option value="900">900</option>
+          </select></div>
+        <figure class="figure"><img id="img-diff" src="../figures/model_compare/2-1_difference_vs_100km.png" alt="Vs差异">
+          <figcaption>2-1 Vs 差异水平切片</figcaption>
+        </figure>
+      </div>
+      <div id="mc-profile-panel" class="tab-panel">
+        <h3>切片位置</h3>
+        <figure class="figure"><img src="figures/model_compare/2-1_slice_locations.png" alt="切片位置">
+          <figcaption>2-1 剖面切片位置</figcaption>
+        </figure>
+        <h3>单模型垂直剖面</h3>
+        <figure class="figure"><img src="../figures/model_compare/2-1_profile_EARA2024.png" alt="2-1_profile_EARA2024">
+          <figcaption>2-1_profile_EARA2024</figcaption>
+        </figure>
+        <figure class="figure"><img src="../figures/model_compare/2-1_profile_FWEA23.png" alt="2-1_profile_FWEA23">
+          <figcaption>2-1_profile_FWEA23</figcaption>
+        </figure>
+        <figure class="figure"><img src="../figures/model_compare/2-1_profile_SinoScope1_0.png"
+            alt="2-1_profile_SinoScope1_0">
+          <figcaption>2-1_profile_SinoScope1_0</figcaption>
+        </figure>
+        <h3>多模型垂直剖面</h3>
+        <div class="depth-selector"><label>剖面编号:</label><select id="profile-num">
+            <option value="1" selected>1</option>
+            <option value="2">2</option>
+            <option value="3">3</option>
+            <option value="4">4</option>
+            <option value="5">5</option>
+            <option value="6">6</option>
+            <option value="7">7</option>
+            <option value="8">8</option>
+            <option value="9">9</option>
+            <option value="10">10</option>
+            <option value="11">11</option>
+            <option value="12">12</option>
+          </select></div>
+        <figure class="figure"><img id="img-profile" src="../figures/model_compare/2-1_vertical_profile_1.png"
+            alt="垂直剖面">
+          <figcaption>2-1 垂直剖面</figcaption>
+        </figure>
+      </div>
+      <div id="mc-ani-panel" class="tab-panel">
+        <figure class="figure"><img src="../figures/model_compare/2-1_p_wave_anisotropy.png"
+            alt="2-1_p_wave_anisotropy">
+          <figcaption>2-1_p_wave_anisotropy</figcaption>
+        </figure>
+        <figure class="figure"><img src="../figures/model_compare/2-1_s_wave_anisotropy.png"
+            alt="2-1_s_wave_anisotropy">
+          <figcaption>2-1_s_wave_anisotropy</figcaption>
+        </figure>
+      </div>
+    </section>
+    <section id="similarity" class="section">
+      <h2>模型相似性分析 (CW-SSIM)</h2>
+      <div class="tabs">
+        <button class="tab-btn active" data-tab="sim-vs">Vs 相似性</button>
+        <button class="tab-btn" data-tab="sim-vp">Vp 相似性</button>
+      </div>
+      <div id="sim-vs-panel" class="tab-panel active">
+        <figure class="figure"><img src="../figures/model_similarity/2-2_cwssim_heatmap_vs.png"
+            alt="2-2_cwssim_heatmap_vs">
+          <figcaption>2-2_cwssim_heatmap_vs</figcaption>
+        </figure>
+        <figure class="figure"><img
+            src="../figures/model_similarity/2-2_cwssim_spatial_2022_SinoScope1.0_vs_2024_EARA2024_vp.png"
+            alt="2-2_cwssim_spatial_2022_SinoScope1.0_vs_2024_EARA2024_vp">
+          <figcaption>2-2_cwssim_spatial_2022_SinoScope1.0_vs_2024_EARA2024_vp</figcaption>
+        </figure>
+        <figure class="figure"><img
+            src="../figures/model_similarity/2-2_cwssim_spatial_2022_SinoScope1.0_vs_2024_EARA2024_vs.png"
+            alt="2-2_cwssim_spatial_2022_SinoScope1.0_vs_2024_EARA2024_vs">
+          <figcaption>2-2_cwssim_spatial_2022_SinoScope1.0_vs_2024_EARA2024_vs</figcaption>
+        </figure>
+        <figure class="figure"><img
+            src="../figures/model_similarity/2-2_cwssim_spatial_2022_SinoScope1.0_vs_2024_FWEA23_vp.png"
+            alt="2-2_cwssim_spatial_2022_SinoScope1.0_vs_2024_FWEA23_vp">
+          <figcaption>2-2_cwssim_spatial_2022_SinoScope1.0_vs_2024_FWEA23_vp</figcaption>
+        </figure>
+        <figure class="figure"><img
+            src="../figures/model_similarity/2-2_cwssim_spatial_2022_SinoScope1.0_vs_2024_FWEA23_vs.png"
+            alt="2-2_cwssim_spatial_2022_SinoScope1.0_vs_2024_FWEA23_vs">
+          <figcaption>2-2_cwssim_spatial_2022_SinoScope1.0_vs_2024_FWEA23_vs</figcaption>
+        </figure>
+        <figure class="figure"><img
+            src="../figures/model_similarity/2-2_cwssim_spatial_2024_EARA2024_vs_2024_FWEA23_vp.png"
+            alt="2-2_cwssim_spatial_2024_EARA2024_vs_2024_FWEA23_vp">
+          <figcaption>2-2_cwssim_spatial_2024_EARA2024_vs_2024_FWEA23_vp</figcaption>
+        </figure>
+        <figure class="figure"><img
+            src="../figures/model_similarity/2-2_cwssim_spatial_2024_EARA2024_vs_2024_FWEA23_vs.png"
+            alt="2-2_cwssim_spatial_2024_EARA2024_vs_2024_FWEA23_vs">
+          <figcaption>2-2_cwssim_spatial_2024_EARA2024_vs_2024_FWEA23_vs</figcaption>
+        </figure>
+        <figure class="figure"><img src="../figures/model_similarity/2-2_depth_cwssim_vs.png" alt="2-2_depth_cwssim_vs">
+          <figcaption>2-2_depth_cwssim_vs</figcaption>
+        </figure>
+        <figure class="figure"><img src="../figures/model_similarity/2-2_similarity_overview_vs.png"
+            alt="2-2_similarity_overview_vs">
+          <figcaption>2-2_similarity_overview_vs</figcaption>
+        </figure>
+      </div>
+      <div id="sim-vp-panel" class="tab-panel">
+        <figure class="figure"><img src="../figures/model_similarity/2-2_cwssim_heatmap_vp.png"
+            alt="2-2_cwssim_heatmap_vp">
+          <figcaption>2-2_cwssim_heatmap_vp</figcaption>
+        </figure>
+        <figure class="figure"><img
+            src="../figures/model_similarity/2-2_cwssim_spatial_2022_SinoScope1.0_vs_2024_EARA2024_vp.png"
+            alt="2-2_cwssim_spatial_2022_SinoScope1.0_vs_2024_EARA2024_vp">
+          <figcaption>2-2_cwssim_spatial_2022_SinoScope1.0_vs_2024_EARA2024_vp</figcaption>
+        </figure>
+        <figure class="figure"><img
+            src="../figures/model_similarity/2-2_cwssim_spatial_2022_SinoScope1.0_vs_2024_FWEA23_vp.png"
+            alt="2-2_cwssim_spatial_2022_SinoScope1.0_vs_2024_FWEA23_vp">
+          <figcaption>2-2_cwssim_spatial_2022_SinoScope1.0_vs_2024_FWEA23_vp</figcaption>
+        </figure>
+        <figure class="figure"><img
+            src="../figures/model_similarity/2-2_cwssim_spatial_2024_EARA2024_vs_2024_FWEA23_vp.png"
+            alt="2-2_cwssim_spatial_2024_EARA2024_vs_2024_FWEA23_vp">
+          <figcaption>2-2_cwssim_spatial_2024_EARA2024_vs_2024_FWEA23_vp</figcaption>
+        </figure>
+        <figure class="figure"><img src="../figures/model_similarity/2-2_depth_cwssim_vp.png" alt="2-2_depth_cwssim_vp">
+          <figcaption>2-2_depth_cwssim_vp</figcaption>
+        </figure>
+        <figure class="figure"><img src="../figures/model_similarity/2-2_similarity_overview_vp.png"
+            alt="2-2_similarity_overview_vp">
+          <figcaption>2-2_similarity_overview_vp</figcaption>
+        </figure>
+      </div>
+    </section>
+  </main>
+  <footer class="footer">
+    EASTASIA-FWI · 东亚全波形成像项目 · 由 <code>web/generate.py</code> 自动生成
+  </footer>
+  <script>
+    document.querySelectorAll('.nav a').forEach(a => {
+      a.addEventListener('click', e => {
+        e.preventDefault();
+        const id = a.dataset.section;
+        document.querySelectorAll('.nav a').forEach(x => x.classList.remove('active'));
+        document.querySelectorAll('.section').forEach(x => x.classList.remove('active'));
+        a.classList.add('active');
+        document.getElementById(id).classList.add('active');
+      });
+    });
+    function initTabs(container) {
+      container.querySelectorAll('.tab-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const tab = btn.dataset.tab;
+          const parent = btn.closest('.section');
+          parent.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+          parent.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+          btn.classList.add('active');
+          const panel = parent.querySelector('#' + tab + '-panel');
+          if (panel) panel.classList.add('active');
+        });
+      });
+    }
+    document.querySelectorAll('.section').forEach(s => initTabs(s));
+    const abs = document.getElementById('depth-abs');
+    const diff = document.getElementById('depth-diff');
+    const profile = document.getElementById('profile-num');
+    if (abs) abs.addEventListener('change', () => { document.getElementById('img-abs').src = '../figures/model_compare/2-1_absolute_vs_' + abs.value + 'km.png'; });
+    if (diff) diff.addEventListener('change', () => { document.getElementById('img-diff').src = '../figures/model_compare/2-1_difference_vs_' + diff.value + 'km.png'; });
+    if (profile) profile.addEventListener('change', () => { document.getElementById('img-profile').src = '../figures/model_compare/2-1_vertical_profile_' + profile.value + '.png'; });
+  </script>
+</body>
+
+</html>

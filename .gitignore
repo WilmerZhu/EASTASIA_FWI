@@ -100,6 +100,9 @@ secrets.*
 *.pem
 *.key
 
+# ============ 2_Model_space_analysis ============
+./2_Model_space_analysis/2_2_Huang2024_reproduction.py
+
 # ============ 临时文件 ============
 *.tmp
 *.temp
