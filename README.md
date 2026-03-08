@@ -82,12 +82,14 @@ EASTASIA-FWI/
 
 项目提供**纯静态**展示网站，无需任何依赖：
 
-```bash
-# 在项目根目录启动本地服务
-python -m http.server 8080
-```
+### 直接打开（推荐本地预览）
 
-浏览器访问 http://localhost:8080/web/index.html 可查看：项目概览、基础地图、GCMT/台站分布、速度模型对比、模型相似性分析等。详见 [web/README.md](web/README.md)。
+```bash
+# 在项目根目录，用浏览器打开
+open web/index.html
+# 或
+xdg-open web/index.html   # Linux
+```
 
 ## 📊 数据格式说明
 
