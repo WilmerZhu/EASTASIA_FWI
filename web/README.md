@@ -17,7 +17,6 @@ python web/generate.py
 - **项目概览**: 研究区域、技术栈、模块说明
 - **基础地图与数据**: 底图、GCMT 事件、台站分布
 - **速度模型对比**: 1D 对比、水平切片（可调深度）、垂直剖面、各向异性
-- **Huang2024 复现**: CWSSIM 空间分布、直方图、深度曲线
 - **模型相似性**: Vs/Vp 相似性热力图与空间分布
 
 ## 使用方式
@@ -33,16 +32,7 @@ xdg-open web/index.html   # Linux
 
 > 注意：直接打开时，部分浏览器可能因安全策略限制图片加载。若图片不显示，请用方式 2。
 
-### 方式 2：本地 HTTP 服务（推荐）
-
-```bash
-# 在项目根目录执行
-python -m http.server 8080
-```
-
-浏览器访问：**http://localhost:8080/web/index.html**
-
-### 方式 3：部署到 GitHub Pages
+### 方式 2：部署到 GitHub Pages
 
 将 `web/` 目录和 `figures/` 目录部署到 GitHub Pages，即可在线访问。
 
