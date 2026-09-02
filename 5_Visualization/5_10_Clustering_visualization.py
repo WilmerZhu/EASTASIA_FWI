@@ -1452,6 +1452,105 @@ class EnhancedClusteringVisualizer:
         self.logger.info("      ✅ 保存: 2-3-1_k_selection")
         return True
 
+    def plot_k_robustness(
+        self,
+        k_robustness: Dict[str, Any],
+        output_dir: Path,
+        model_name: str,
+    ) -> bool:
+        """
+        K 扫描稳健性图：证明结论不依赖 K 的具体取值。
+
+        左格为相邻 K 的 ARI——K 不同则粒度不同，该值必然小于 1，只用于定位
+        分区结构趋于稳定的区间，不应解读为"K 选得对不对"。右格为快/慢三分类
+        相对 K* 的一致度，跨模型投票只依赖这个三分类，故它才是结论稳健性的
+        直接证据；灰色参考线标在 0.9。
+
+        Args:
+            k_robustness: perform_depth_stratified_clustering 返回的 k_robustness
+            output_dir: 输出目录
+            model_name: 模型名
+
+        Returns:
+            True 表示已出图，False 表示无可用数据
+        """
+        bands = [(n, d) for n, d in (k_robustness or {}).items() if d.get('k_values')]
+        if not bands:
+            return False
+
+        apply_clustering_plot_style()
+        fig, axes = plt.subplots(1, 2, figsize=(12.5, 4.8))
+        palette = plt.get_cmap('tab10')
+
+        for i, (name, info) in enumerate(bands):
+            color = palette(i % 10)
+            label = name.replace('_', ' ').title()
+            k_sel = int(info['k_selected'])
+
+            # 左：相邻 K 的 ARI，横坐标取两个 K 的中点
+            pairs = info.get('ari_consecutive', {})
+            if pairs:
+                xs, ys = [], []
+                for key, val in pairs.items():
+                    a, b = key.split('->')
+                    xs.append((int(a) + int(b)) / 2.0)
+                    ys.append(val)
+                idx = np.argsort(xs)
+                axes[0].plot(
+                    np.asarray(xs)[idx], np.asarray(ys)[idx],
+                    'o-', color=color, label=label, lw=1.8, ms=4.5,
+                )
+
+            # 右：快/慢三分类相对 K* 的一致度
+            tri = info.get('trichotomy_agreement', {})
+            if tri:
+                ks = sorted(int(k) for k in tri)
+                vs = [tri[str(k)] for k in ks]
+                axes[1].plot(ks, vs, 'o-', color=color, label=label, lw=1.8, ms=4.5)
+                axes[1].plot(
+                    [k_sel], [tri[str(k_sel)]], marker='*', ms=15,
+                    color=color, mec='k', mew=0.7, ls='none', zorder=5,
+                )
+
+        axes[0].set_xlabel('K (midpoint of adjacent pair)')
+        axes[0].set_ylabel('ARI between adjacent K')
+        axes[0].set_title('Partition change with K', fontsize=11.5, fontweight='bold')
+        axes[0].set_ylim(0, 1.02)
+
+        axes[1].axhline(0.9, color='0.5', ls='--', lw=1.0, zorder=1)
+        axes[1].set_xlabel('Number of clusters K')
+        axes[1].set_ylabel('Fast / slow agreement with K*')
+        axes[1].set_title(
+            'Robustness of the fast–slow classification',
+            fontsize=11.5, fontweight='bold',
+        )
+        axes[1].set_ylim(0, 1.02)
+
+        for ax in axes:
+            ax.grid(alpha=0.3, ls=':')
+
+        handles, labels = axes[1].get_legend_handles_labels()
+        fig.legend(
+            handles, labels, loc='lower center',
+            ncol=min(len(labels), 4), frameon=False, fontsize=10,
+            bbox_to_anchor=(0.5, -0.02),
+        )
+        fig.suptitle(
+            f'{model_name} — Sensitivity of the results to K '
+            '(star = selected K)',
+            fontsize=13, fontweight='bold', y=0.99,
+        )
+        fig.tight_layout(rect=(0.0, 0.07, 1.0, 0.95))
+
+        for fmt in self.config.visualization.get('save_formats', ['jpg']):
+            fig.savefig(
+                output_dir / f'2-3-3_k_robustness.{fmt}',
+                dpi=self.config.visualization['dpi'],
+            )
+        plt.close(fig)
+        self.logger.info("      ✅ 保存: 2-3-3_k_robustness")
+        return True
+
     def plot_bic_analysis(
         self,
         bic_analysis: Dict[str, Any],

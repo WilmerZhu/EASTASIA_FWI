@@ -1,23 +1,25 @@
 """
 2_2_Model_similarity.py:
-速度模型 1D 结构相似性分析模块
+速度模型结构相似性分析模块（1D SSIM + 2D SSIM(z)）
 ================================================================
 
 功能描述:
 ----
-对齐 2_1_Model_compare 的 1D 剖面定义：在共同覆盖区内对原始 Vs / Vp
-做面积加权横向平均，得到 V(z)，再用 Wang et al. (2004) 的 1D SSIM
-比较两条绝对速度剖面。
+用 Wang et al. (2004) SSIM 从两个互补维度量化模型间结构相似性：
 
-主路径:
-----
+**1D SSIM** — 背景剖面一致性
 1. 共同地理范围（所有已加载模型覆盖的交集，与 2_1 standardized 对比一致）
-2. 原始绝对速度横向平均 → 1D 剖面 V(z)，插值到统一深度网格
-3. 深度曲线：1D 局部 SSIM(z)（沿深度的高斯窗口）
-4. 整体相似性：该 1D SSIM 图的均值（Wang 定义，不是二维切片再对深度平均）
+2. 原始绝对速度面积加权横向平均 → 1D 剖面 V(z)，插值到统一深度网格
+3. 沿深度的高斯窗口求局部 SSIM(z)，整体值 = 局部 SSIM 图的均值
+4. 反映 410/660 等间断面形态与绝对速度水平的一致性
 
-本指标描述 1D 背景结构（含 410/660 等间断面形态）的一致性，
-不能直接用于 FWI 初始模型排序。
+**2D SSIM(z)** — 逐深度横向结构一致性
+1. 每个公共深度层重采样到该模型对的最粗分辨率
+2. 去掉该层横向平均（扰动场），排除 1D 背景对分数的贡献
+3. 在 6° 横向高斯窗口下求 SSIM，得到 SSIM 随深度的曲线
+
+两者分工明确：1D 量背景，2D 量同一深度的横向异常图案。
+均为模型空间先验指标，不能直接用于 FWI 初始模型排序。
 
 使用方法:
 ----
@@ -36,7 +38,7 @@ analyzer.save_results()
 
 作者: EASTASIA-FWI Team
 日期: 2026-09
-版本: v18.0 (1D SSIM)
+版本: v19.0 (1D SSIM + 2D SSIM(z))
 """
 
 import sys
@@ -128,6 +130,19 @@ class ModelSimilarityConfig:
             'K2': 0.03,
             # 直接比较原始绝对速度 1D 剖面
             'perturbation': 'none',
+            'use_area_weights': True,
+        }
+
+        # ============ 2D SSIM 参数（逐深度切片的横向结构）============
+        self.ssim_2d = {
+            # 横向高斯窗口（度）；1D 背景已由 ssim 段负责，此处只看横向结构
+            'win_deg': 6.0,
+            'win_size': 11,
+            'gaussian_sigma_per_pixel': 1.5 / 11.0,
+            'K1': 0.01,
+            'K2': 0.03,
+            # 去掉该层横向平均，避免 1D 背景把分数抬到 0.9 以上
+            'perturbation': 'layer_mean',
             'use_area_weights': True,
         }
 
@@ -1346,7 +1361,7 @@ class CWSSIMCalculator:
 # ==================== 速度模型相似性分析器 ====================
 
 class VelocityModelSimilarity:
-    """速度模型结构相似性分析器 (v17.0 — SSIM 主路径)"""
+    """速度模型结构相似性分析器 (v18.0 — 1D SSIM 主路径)"""
 
     def __init__(self, config: Optional[ModelSimilarityConfig] = None):
         self.config = config or ModelSimilarityConfig()
@@ -1366,12 +1381,20 @@ class VelocityModelSimilarity:
         self.models: Dict[str, VelocityModelNetCDF] = {}
         self.results: Dict[str, Any] = {}
         self.analysis_metadata: Dict[str, Any] = {}
+        self.profiles: Dict[str, Dict[str, Dict[str, np.ndarray]]] = {}
 
         ss = self.config.ssim
         self.ssim_calc = SSIMCalculator(
             k1=ss.get('K1', 0.01),
             k2=ss.get('K2', 0.03),
             gaussian_sigma_per_pixel=ss.get('gaussian_sigma_per_pixel', 1.5 / 11.0),
+        )
+
+        s2 = self.config.ssim_2d
+        self.ssim2d_calc = SSIMCalculator(
+            k1=s2.get('K1', 0.01),
+            k2=s2.get('K2', 0.03),
+            gaussian_sigma_per_pixel=s2.get('gaussian_sigma_per_pixel', 1.5 / 11.0),
         )
 
         cw = self.config.cwssim
@@ -1389,24 +1412,25 @@ class VelocityModelSimilarity:
         self._backend_warned_pairs: set = set()
 
         self.logger.info("=" * 80)
-        self.logger.info("🚀 速度模型结构相似性分析器 v17.0 (SSIM 主路径)")
+        self.logger.info("🚀 速度模型结构相似性分析器 v19.0 (1D SSIM + 2D SSIM(z))")
         self.logger.info("=" * 80)
         self._print_config_summary()
 
     def _print_config_summary(self) -> None:
         """打印配置摘要"""
         ss = self.config.ssim
-        print("\n📋 相似性分析配置 (v17.0 — Wang et al. 2004 SSIM)")
+        s2 = self.config.ssim_2d
+        print("\n📋 相似性分析配置 (v19.0 — 1D SSIM + 2D SSIM(z))")
         print("-" * 60)
         print(f"目标模型: {len(self.config.models)} 个")
         for info in self.config.models.values():
             print(f"  • {info['name']}")
-        win_deg = ss.get('win_deg')
-        print("\n🔬 SSIM 主路径:")
-        print(f"  扰动: {ss.get('perturbation')} | 窗口: {win_deg}°")
+        print("\n🔬 1D SSIM（对齐 2_1 剖面）:")
+        print("  场: 原始绝对 Vs / Vp 的横向面积加权平均 V(z)")
+        print(f"  深度窗口: {ss.get('win_km')} km  → 整体 1D SSIM + 局部 SSIM(z)")
+        print("\n🔬 2D SSIM(z)（逐深度切片）:")
+        print(f"  场: 去横向平均后的扰动 | 横向窗口: {s2.get('win_deg')}°")
         print("  分辨率: 按模型对最粗 (EARA–FWEA→0.25°, Sino对→1.0°)")
-        print("  产品: 整体 SSIM（深度平均）+ 随深度 SSIM 曲线")
-        print(f"  CW-SSIM 对照: {'开' if self.config.analysis.get('compute_cwssim') else '关'}")
         print(f"\n📊 分析特征: {', '.join(self.config.analysis['target_features'])}")
         print(f"📁 输出: {self.figures_dir}")
         print("-" * 60)
@@ -1433,11 +1457,17 @@ class VelocityModelSimilarity:
             raise RuntimeError("至少需要 2 个模型才能进行相似性分析")
 
         self.analysis_metadata = {
-            'version': 'v17.0-SSIM',
-            'primary_metric': 'ssim',
-            'perturbation': self.config.ssim.get('perturbation'),
-            'ssim_win_deg': self.config.ssim.get('win_deg'),
-            'resolution_mode': self.config.cwssim.get('resolution_mode', 'pair_coarsest'),
+            'version': 'v19.0-1D+2D-SSIM',
+            'metrics': ['ssim_1d', 'ssim_2d'],
+            'ssim_1d': {
+                'field': 'raw absolute V(z), area-weighted lateral mean',
+                'win_km': self.config.ssim.get('win_km'),
+            },
+            'ssim_2d': {
+                'field': f"depth slice, perturbation={self.config.ssim_2d.get('perturbation')}",
+                'win_deg': self.config.ssim_2d.get('win_deg'),
+                'resolution_mode': self.config.cwssim.get('resolution_mode', 'pair_coarsest'),
+            },
             'models': list(self.models.keys()),
             'pair_resolutions_deg': {},
         }
@@ -1553,13 +1583,13 @@ class VelocityModelSimilarity:
 
     def _get_ssim_win_size(self, resolution_deg: Optional[float] = None) -> int:
         """
-        SSIM 高斯窗口像素数。
+        2D SSIM 的横向高斯窗口像素数。
 
-        优先用 win_deg 保证不同分辨率模型对比的物理窗口一致：
+        用 win_deg 保证不同分辨率模型对的物理窗口一致：
         6° @ 0.25° → 25 px；6° @ 1.0° → 7 px。SSIM 在 7 px 仍稳定，
         不像 DT-CWT 那样需要 2^nlevels 的最小尺寸。
         """
-        ss = self.config.ssim
+        ss = self.config.ssim_2d
         res = resolution_deg or 1.0
         if ss.get('win_deg') is not None:
             size = int(np.ceil(float(ss['win_deg']) / res))
@@ -1640,6 +1670,230 @@ class VelocityModelSimilarity:
             if d_min - 1e-6 <= d <= d_max + 1e-6
         ]
 
+    def _common_geographic_bbox(self) -> Dict[str, float]:
+        """所有已加载模型覆盖的经纬度交集（对齐 2_1 共同区域）。"""
+        return {
+            'lon_min': max(float(m.lon.min()) for m in self.models.values()),
+            'lon_max': min(float(m.lon.max()) for m in self.models.values()),
+            'lat_min': max(float(m.lat.min()) for m in self.models.values()),
+            'lat_max': min(float(m.lat.max()) for m in self.models.values()),
+        }
+
+    def _depth_grid(self) -> np.ndarray:
+        """统一深度网格（km）。"""
+        d_min, d_max = self.config.analysis.get('depth_range_km', (0.0, 1000.0))
+        dz = float(self.config.analysis.get('depth_grid_step_km', 20.0))
+        n = int(np.floor((d_max - d_min) / dz + 1e-9)) + 1
+        return np.round(d_min + dz * np.arange(n), 6)
+
+    def _extract_1d_profile(
+        self,
+        model: VelocityModelNetCDF,
+        feature: str,
+        bbox: Dict[str, float],
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        在共同地理范围内对原始绝对速度做面积加权横向平均，得到 V(z)。
+
+        与 2_1_Model_compare.calculate_1d_profile 同一物理定义，
+        仅将 nanmean 改为 cos(lat) 面积加权。
+        """
+        lon_m = (model.lon >= bbox['lon_min'] - 1e-6) & (model.lon <= bbox['lon_max'] + 1e-6)
+        lat_m = (model.lat >= bbox['lat_min'] - 1e-6) & (model.lat <= bbox['lat_max'] + 1e-6)
+        if not lon_m.any() or not lat_m.any():
+            return model.depth.copy(), np.full(model.depth.shape, np.nan)
+
+        data = model.get_parameter(feature)
+        depth_m = np.ones(data.shape[2], dtype=bool)
+        sub = data[np.ix_(lon_m, lat_m, depth_m)]
+        lats = np.asarray(model.lat[lat_m], dtype=np.float64)
+        w_lat = np.cos(np.radians(lats))
+        if not self.config.ssim.get('use_area_weights', True):
+            w_lat = np.ones_like(w_lat)
+        w = w_lat[np.newaxis, :, np.newaxis]
+        valid = np.isfinite(sub)
+        ww = np.where(valid, w, 0.0)
+        num = np.sum(np.where(valid, sub, 0.0) * ww, axis=(0, 1))
+        den = np.sum(ww, axis=(0, 1))
+        mean = np.divide(num, den, out=np.full(num.shape, np.nan), where=den > 0)
+        return np.asarray(model.depth, dtype=np.float64), mean
+
+    def _ensure_1d_profiles(self, feature: str) -> None:
+        """提取并缓存所有模型在共同区域、统一深度网格上的 1D 剖面。"""
+        if feature in self.profiles and self.profiles[feature]:
+            return
+        bbox = self._common_geographic_bbox()
+        target_z = self._depth_grid()
+        self.logger.info(
+            f"  1D 剖面区域: lon [{bbox['lon_min']:.1f}, {bbox['lon_max']:.1f}], "
+            f"lat [{bbox['lat_min']:.1f}, {bbox['lat_max']:.1f}], "
+            f"深度网格 {len(target_z)} 层"
+        )
+        self.profiles[feature] = {}
+        for key, model in self.models.items():
+            if not model.has_parameter(feature):
+                continue
+            z_src, v_src = self._extract_1d_profile(model, feature, bbox)
+            m = np.isfinite(z_src) & np.isfinite(v_src)
+            if m.sum() < 3:
+                self.logger.warning(f"  ⚠️ {model.name} {feature} 1D 剖面有效点不足")
+                continue
+            v_grid = np.interp(target_z, z_src[m], v_src[m], left=np.nan, right=np.nan)
+            z_min, z_max = float(z_src[m].min()), float(z_src[m].max())
+            v_grid[(target_z < z_min - 1e-6) | (target_z > z_max + 1e-6)] = np.nan
+            self.profiles[feature][key] = {'depth': target_z, 'value': v_grid}
+            self.logger.info(
+                f"    {model.name} {feature.upper()}: "
+                f"[{np.nanmin(v_grid):.3f}, {np.nanmax(v_grid):.3f}] km/s"
+            )
+
+    def _get_1d_win_size(self, depth_km: np.ndarray) -> int:
+        """由 win_km 和深度步长得到奇数窗口。"""
+        ss = self.config.ssim
+        if len(depth_km) >= 2:
+            dz = float(np.median(np.diff(depth_km)))
+        else:
+            dz = float(self.config.analysis.get('depth_grid_step_km', 20.0))
+        if dz <= 0:
+            dz = 20.0
+        win_km = ss.get('win_km')
+        if win_km is not None:
+            size = int(np.round(float(win_km) / dz))
+        else:
+            size = int(ss.get('win_size', 11))
+        n = int(len(depth_km))
+        size = max(3, size | 1)
+        if n >= 3:
+            size = min(size, n if n % 2 == 1 else n - 1)
+        return max(3, size)
+
+    def compute_1d_metrics(
+        self,
+        m1_key: str,
+        m2_key: str,
+        feature: str,
+    ) -> pd.DataFrame:
+        """
+        1D SSIM：对原始 Vs/Vp 的横向平均剖面 V(z) 计算局部 SSIM(z)。
+
+        整体 1D SSIM = 局部 SSIM(z) 的均值（Wang 局部图平均）。
+
+        Returns:
+            DataFrame: depth_km, v1, v2, ssim_1d, ssim_1d_overall, ssim_1d_win_pt
+        """
+        self._ensure_1d_profiles(feature)
+        profs = self.profiles.get(feature, {})
+        if m1_key not in profs or m2_key not in profs:
+            self.logger.warning(f"  ⚠️ {m1_key} vs {m2_key}: 缺少 1D 剖面")
+            return pd.DataFrame()
+
+        z = profs[m1_key]['depth']
+        v1 = profs[m1_key]['value']
+        v2 = profs[m2_key]['value']
+        m1 = self.models[m1_key]
+        m2 = self.models[m2_key]
+        win_size = self._get_1d_win_size(z)
+
+        overall, ssim_z = self.ssim_calc.compute_1d(v1, v2, win_size=win_size)
+        self.logger.info(
+            f"  📊 1D SSIM: {m1.name} vs {m2.name}  {feature.upper()}  "
+            f"整体={overall:.4f}  窗口={win_size}pt"
+        )
+
+        return pd.DataFrame({
+            'depth_km': z,
+            'v1': v1,
+            'v2': v2,
+            'ssim_1d': ssim_z,
+            'ssim_1d_overall': overall,
+            'ssim_1d_win_pt': win_size,
+        })
+
+    def compute_depth_wise_metrics(
+        self,
+        m1_key: str,
+        m2_key: str,
+        feature: str,
+    ) -> pd.DataFrame:
+        """
+        2D SSIM(z)：逐深度切片在去横向平均的扰动场上计算 SSIM。
+
+        与 1D SSIM 分工明确——1D 量背景剖面，本指标量同一深度的横向结构。
+
+        Returns:
+            DataFrame: depth_km, ssim, valid_frac, analysis_resolution_deg, ssim_win_px
+        """
+        m1 = self.models[m1_key]
+        m2 = self.models[m2_key]
+        coverage = self._get_common_coverage(m1, m2)
+        matched_depths = self._matched_depths(m1, m2)
+
+        if not matched_depths:
+            self.logger.warning(f"  ⚠️ {m1.name} vs {m2.name}: 无匹配深度层")
+            return pd.DataFrame()
+
+        res = coverage['resolution_deg']
+        ssim_win = self._get_ssim_win_size(res)
+        self.logger.info(
+            f"  🗺️ 2D SSIM(z): {m1.name} vs {m2.name}  {feature.upper()}  "
+            f"({len(matched_depths)} 层, 分辨率={res}°, 窗口={ssim_win}px)"
+        )
+
+        data1_3d = m1.get_parameter(feature)
+        data2_3d = m2.get_parameter(feature)
+        cfg2d = self.config.ssim_2d
+        use_area = bool(cfg2d.get('use_area_weights', True))
+        pert_mode = cfg2d.get('perturbation', 'layer_mean')
+        do_r = bool(self.config.companion.get('compute_signed_correlation', False))
+        do_sign = bool(self.config.companion.get('compute_sign_agreement', False))
+        sign_pct = float(self.config.companion.get('sign_threshold_percentile', 50.0))
+
+        rows: List[Dict[str, Any]] = []
+        for d_idx1, d_idx2, depth_km in tqdm(matched_depths, desc="  深度层", leave=False):
+            s1 = self._resample_slice(m1, data1_3d, d_idx1, coverage)
+            s2 = self._resample_slice(m2, data2_3d, d_idx2, coverage)
+            valid, weights, stat_mask = self._build_masks(
+                s1, s2, feature, depth_km, coverage,
+            )
+            area_w = weights if use_area else None
+
+            if pert_mode == 'layer_mean':
+                p1 = remove_layer_mean(s1, valid, weights)
+                p2 = remove_layer_mean(s2, valid, weights)
+            else:
+                p1, p2 = s1, s2
+
+            ssim_val, _ = self.ssim2d_calc.compute(
+                p1, p2,
+                valid=valid,
+                win_size=ssim_win,
+                weights=area_w,
+                stat_mask=stat_mask,
+            )
+
+            row: Dict[str, Any] = {
+                'depth_km': depth_km,
+                'ssim': ssim_val,
+                'valid_frac': float(valid.mean()) if valid.size else 0.0,
+                'analysis_resolution_deg': res,
+                'ssim_win_px': ssim_win,
+            }
+            if do_r:
+                row['r_signed'] = weighted_pearson(p1, p2, weights, valid)
+            if do_sign:
+                row['sign_agreement'] = sign_agreement(
+                    p1, p2, weights, valid, sign_pct,
+                )
+            rows.append(row)
+
+        df = pd.DataFrame(rows)
+        if len(df):
+            self.logger.info(
+                f"      2D SSIM: [{df['ssim'].min():.3f}, {df['ssim'].max():.3f}]  "
+                f"mean={df['ssim'].mean():.3f}"
+            )
+        return df
+
     def _compute_cwssim_spatial_huang(
         self,
         s1: np.ndarray,
@@ -1683,125 +1937,6 @@ class VelocityModelSimilarity:
             return float('nan'), cwssim_grid
         global_mean = float(np.mean(cwssim_grid[m]))
         return global_mean, cwssim_grid
-
-    # ---------- 逐深度层指标 ----------
-
-    def compute_depth_wise_metrics(
-        self,
-        m1_key: str,
-        m2_key: str,
-        feature: str,
-    ) -> pd.DataFrame:
-        """
-        逐深度层计算 SSIM。整体相似性 = 本表 ssim 列的算术平均。
-
-        Returns:
-            DataFrame: depth_km, ssim, valid_frac；可选 cwssim / 伴随指标
-        """
-        m1 = self.models[m1_key]
-        m2 = self.models[m2_key]
-        coverage = self._get_common_coverage(m1, m2)
-        matched_depths = self._matched_depths(m1, m2)
-
-        if not matched_depths:
-            self.logger.warning(f"  ⚠️ {m1.name} vs {m2.name}: 无匹配深度层")
-            return pd.DataFrame()
-
-        res = coverage['resolution_deg']
-        ssim_win = self._get_ssim_win_size(res)
-        cw_win = self._get_local_win_size(res)
-        self.logger.info(
-            f"  📊 逐深度层 SSIM: {m1.name} vs {m2.name}  "
-            f"({len(matched_depths)} 层, {feature.upper()}, "
-            f"分辨率={res}°, 窗口={ssim_win}px)"
-        )
-
-        data1_3d = m1.get_parameter(feature)
-        data2_3d = m2.get_parameter(feature)
-        do_cwssim = bool(self.config.analysis.get('compute_cwssim', False))
-        do_null = bool(self.config.null_test.get('enabled', False))
-        n_null = int(self.config.null_test.get('n_realizations', 20))
-        do_r = bool(self.config.companion.get('compute_signed_correlation', False))
-        do_sign = bool(self.config.companion.get('compute_sign_agreement', False))
-        sign_pct = float(self.config.companion.get('sign_threshold_percentile', 50.0))
-        use_area = bool(self.config.ssim.get('use_area_weights', True))
-        pert_mode = self.config.ssim.get('perturbation', 'layer_mean')
-
-        rows: List[Dict[str, Any]] = []
-        for d_idx1, d_idx2, depth_km in tqdm(matched_depths, desc="  深度层", leave=False):
-            s1 = self._resample_slice(m1, data1_3d, d_idx1, coverage)
-            s2 = self._resample_slice(m2, data2_3d, d_idx2, coverage)
-            valid, weights, stat_mask = self._build_masks(
-                s1, s2, feature, depth_km, coverage,
-            )
-            valid_frac = float(valid.mean()) if valid.size else 0.0
-            area_w = weights if use_area else None
-
-            if pert_mode == 'layer_mean':
-                p1 = remove_layer_mean(s1, valid, weights)
-                p2 = remove_layer_mean(s2, valid, weights)
-            else:
-                p1, p2 = s1, s2
-
-            ssim_val, _ = self.ssim_calc.compute(
-                p1, p2,
-                valid=valid,
-                win_size=ssim_win,
-                weights=area_w,
-                stat_mask=stat_mask,
-            )
-
-            row: Dict[str, Any] = {
-                'depth_km': depth_km,
-                'ssim': ssim_val,
-                'valid_frac': valid_frac,
-                'analysis_resolution_deg': res,
-                'ssim_win_px': ssim_win,
-            }
-
-            if do_cwssim:
-                if valid.any():
-                    c1 = fill_invalid_nearest(s1, valid)
-                    c2 = fill_invalid_nearest(s2, valid)
-                else:
-                    c1, c2 = s1, s2
-                row['cwssim'] = self.cwssim_calc.compute_global(
-                    c1, c2, depth_km=depth_km,
-                )
-
-            if do_r:
-                row['r_signed'] = weighted_pearson(p1, p2, weights, valid)
-            if do_sign:
-                row['sign_agreement'] = sign_agreement(
-                    p1, p2, weights, valid, sign_pct,
-                )
-
-            if do_null and do_cwssim and np.isfinite(row.get('cwssim', np.nan)):
-                null_stats = self.cwssim_calc.null_distribution(
-                    s1, s2, cw_win, depth_km, valid, weights, stat_mask,
-                    n_null, self._rng,
-                )
-                row.update({
-                    'null_mean': null_stats['null_mean'],
-                    'null_std': null_stats['null_std'],
-                    'null_p95': null_stats['null_p95'],
-                })
-                if np.isfinite(null_stats['null_std']) and null_stats['null_std'] > 1e-12:
-                    row['z_score'] = (
-                        (row['cwssim'] - null_stats['null_mean']) / null_stats['null_std']
-                    )
-                else:
-                    row['z_score'] = float('nan')
-
-            rows.append(row)
-
-        df = pd.DataFrame(rows)
-        if len(df) and 'ssim' in df.columns:
-            self.logger.info(
-                f"    SSIM: [{df['ssim'].min():.3f}, {df['ssim'].max():.3f}]  "
-                f"mean={df['ssim'].mean():.3f}  (整体)"
-            )
-        return df
 
     # ---------- CW-SSIM 空间分布 ----------
 
@@ -1922,6 +2057,9 @@ class VelocityModelSimilarity:
             for m1_key, m2_key in feature_pairs:
                 pair_id = f"{m1_key}_vs_{m2_key}_{feature}"
                 try:
+                    df_1d = self.compute_1d_metrics(m1_key, m2_key, feature)
+                    self.results[f"{pair_id}_1d"] = df_1d
+
                     if self.config.analysis['compute_depth_wise']:
                         df = self.compute_depth_wise_metrics(m1_key, m2_key, feature)
                         self.results[f"{pair_id}_depth"] = df
@@ -1944,9 +2082,9 @@ class VelocityModelSimilarity:
 
         features = set()
         for key in self.results:
-            if key.endswith('_depth'):
-                feat = key[:-len('_depth')].split('_')[-1]
-                features.add(feat)
+            for suffix in ('_depth', '_1d'):
+                if key.endswith(suffix):
+                    features.add(key[:-len(suffix)].split('_')[-1])
 
         for feature in features:
             feat_dir = self.output_dir / feature
@@ -1960,8 +2098,17 @@ class VelocityModelSimilarity:
             self.logger.info(f"  ✅ {meta_file.name}")
 
             suffix_depth = f'_{feature}_depth'
+            suffix_1d = f'_{feature}_1d'
             depth_keys = [k for k in self.results if k.endswith(suffix_depth)]
             all_summaries: List[Dict[str, Any]] = []
+
+            for k1d in [k for k in self.results if k.endswith(suffix_1d)]:
+                df_1d = self.results[k1d]
+                if not len(df_1d):
+                    continue
+                csv_1d = feat_dir / f"{k1d}.csv"
+                df_1d.to_csv(csv_1d, index=False, float_format='%.6f')
+                self.logger.info(f"  ✅ {csv_1d.name}")
 
             for dk in depth_keys:
                 df = self.results[dk]
@@ -1975,10 +2122,12 @@ class VelocityModelSimilarity:
                 summary: Dict[str, Any] = {
                     'pair': pair_name,
                     'feature': feature,
-                    'ssim_mean': ssim_mean,
-                    'ssim_std': ssim_std,
-                    'overall_ssim': ssim_mean,
+                    'ssim_2d_mean': ssim_mean,
+                    'ssim_2d_std': ssim_std,
                 }
+                df_1d = self.results.get(f"{pair_name}{suffix_1d}")
+                if df_1d is not None and len(df_1d):
+                    summary['ssim_1d_overall'] = float(df_1d['ssim_1d_overall'].iloc[0])
                 if 'cwssim' in df.columns:
                     summary['cwssim_mean'] = float(df['cwssim'].mean())
                     summary['cwssim_std'] = float(df['cwssim'].std())
@@ -2011,11 +2160,27 @@ class VelocityModelSimilarity:
                     json.dump(json_data, f, indent=2, ensure_ascii=False)
                 self.logger.info(f"  ✅ {json_file.name}")
 
+            if feature in self.profiles and self.profiles[feature]:
+                prof_rows = []
+                for key, prof in self.profiles[feature].items():
+                    name = self.models[key].name if key in self.models else key
+                    for z, v in zip(prof['depth'], prof['value']):
+                        prof_rows.append({
+                            'model': name, 'model_key': key,
+                            'depth_km': float(z), feature: float(v) if np.isfinite(v) else np.nan,
+                        })
+                if prof_rows:
+                    prof_file = feat_dir / f'1d_profiles_{feature}.csv'
+                    pd.DataFrame(prof_rows).to_csv(
+                        prof_file, index=False, float_format='%.6f',
+                    )
+                    self.logger.info(f"  ✅ {prof_file.name}")
+
         self.logger.info("✅ 所有结果已保存")
 
 
 class SimilarityVisualization:
-    """结构相似性可视化 (v17.0 — SSIM 主路径)"""
+    """结构相似性可视化 (v18.0 — 1D SSIM 主路径)"""
 
     def __init__(self, analyzer: VelocityModelSimilarity):
         self.analyzer = analyzer
@@ -2080,39 +2245,67 @@ class SimilarityVisualization:
 
     # ---------- 1. SSIM 深度曲线 ----------
 
+    def _plot_depth_curve(
+        self,
+        ax,
+        suffix: str,
+        column: str,
+        feature: str,
+    ) -> int:
+        """在给定坐标轴上绘制各模型对的 SSIM(z) 曲线，返回绘制条数。"""
+        keys = sorted(k for k in self.analyzer.results if k.endswith(suffix))
+        pair_colors = ['#E41A1C', '#377EB8', '#4DAF4A', '#984EA3', '#FF7F00']
+        n_plotted = 0
+        for idx, key in enumerate(keys):
+            df = self.analyzer.results[key]
+            if column not in df.columns or not len(df):
+                continue
+            ax.plot(
+                df[column], df['depth_km'], '-o',
+                color=pair_colors[idx % len(pair_colors)],
+                linewidth=2, markersize=3,
+                label=self._pair_label(key[:-len(suffix)]),
+            )
+            n_plotted += 1
+        if n_plotted:
+            ax.set_ylabel('Depth (km)', fontsize=12)
+            ax.invert_yaxis()
+            ax.set_xlim(-0.05, 1.05)
+            ax.grid(True, alpha=0.3)
+            self._add_discontinuities(ax, 'horizontal')
+        return n_plotted
+
     def plot_depth_ssim(self, feature: str = 'vs') -> Optional[plt.Figure]:
-        """绘制 SSIM 随深度变化曲线"""
-        suffix = f'_{feature}_depth'
-        depth_keys = [k for k in self.analyzer.results if k.endswith(suffix)]
-        if not depth_keys:
+        """绘制 1D SSIM(z) 与 2D SSIM(z) 随深度变化曲线（并排）"""
+        has_1d = any(k.endswith(f'_{feature}_1d') for k in self.analyzer.results)
+        has_2d = any(k.endswith(f'_{feature}_depth') for k in self.analyzer.results)
+        if not (has_1d or has_2d):
             return None
 
         self.logger.info(f"\n🎨 SSIM 深度曲线: {feature.upper()}")
 
-        fig, ax = plt.subplots(figsize=self.config.visualization['figsize_depth_curve'])
-        pair_colors = ['#E41A1C', '#377EB8', '#4DAF4A', '#984EA3', '#FF7F00']
-        depth_keys = sorted(depth_keys)
+        fig, (ax_1d, ax_2d) = plt.subplots(1, 2, figsize=(14, 9))
 
-        for idx, dk in enumerate(depth_keys):
-            df = self.analyzer.results[dk]
-            if 'ssim' not in df.columns:
-                continue
-            label = self._pair_label(dk[:-len(suffix)])
-            color = pair_colors[idx % len(pair_colors)]
-            ax.plot(df['ssim'], df['depth_km'], '-o', color=color, linewidth=2,
-                    markersize=3, label=label)
-
-        ax.set_xlabel('SSIM', fontsize=14)
-        ax.set_ylabel('Depth (km)', fontsize=14)
-        ax.set_title(
-            f'Structural Similarity vs Depth — {feature.upper()}',
-            fontsize=14, fontweight='bold',
+        self._plot_depth_curve(ax_1d, f'_{feature}_1d', 'ssim_1d', feature)
+        ax_1d.set_xlabel('1D SSIM', fontsize=13)
+        ax_1d.set_title(
+            '1D SSIM(z)\nraw mean V(z) profiles',
+            fontsize=13, fontweight='bold',
         )
-        ax.invert_yaxis()
-        ax.set_xlim(-0.05, 1.05)
-        self._add_discontinuities(ax, 'horizontal')
-        ax.legend(fontsize=11, loc='lower left')
-        ax.grid(True, alpha=0.3)
+        ax_1d.legend(fontsize=10, loc='lower left')
+
+        self._plot_depth_curve(ax_2d, f'_{feature}_depth', 'ssim', feature)
+        ax_2d.set_xlabel('2D SSIM', fontsize=13)
+        ax_2d.set_title(
+            '2D SSIM(z)\nlateral structure per depth slice',
+            fontsize=13, fontweight='bold',
+        )
+        ax_2d.legend(fontsize=10, loc='lower right')
+
+        fig.suptitle(
+            f'Structural Similarity vs Depth — {feature.upper()}',
+            fontsize=16, fontweight='bold', y=1.00,
+        )
         plt.tight_layout()
         self._save_figure(fig, f'depth_ssim_{feature}')
         return fig
@@ -2123,67 +2316,86 @@ class SimilarityVisualization:
 
     # ---------- 2. 整体 SSIM 热图矩阵 ----------
 
-    def plot_ssim_heatmap(self, feature: str = 'vs') -> Optional[plt.Figure]:
-        """绘制 N×N 整体 SSIM 热图（各深度算术平均）"""
-        suffix = f'_{feature}_depth'
-        depth_keys = [k for k in self.analyzer.results if k.endswith(suffix)]
-        if not depth_keys:
-            return None
+    def _build_matrix(self, feature: str, metric: str) -> Optional[np.ndarray]:
+        """
+        构建 N×N 相似性矩阵。
 
-        self.logger.info(f"\n🎨 整体 SSIM 热图: {feature.upper()}")
-
+        Args:
+            metric: '1d' 取整体 1D SSIM；'2d' 取 2D SSIM(z) 的深度平均
+        """
         model_keys = list(self.analyzer.models.keys())
         n = len(model_keys)
         matrix = np.ones((n, n))
+        found = False
 
-        for dk in sorted(depth_keys):
-            df = self.analyzer.results[dk]
-            if 'ssim' not in df.columns:
+        suffix = f'_{feature}_1d' if metric == '1d' else f'_{feature}_depth'
+        for key in sorted(k for k in self.analyzer.results if k.endswith(suffix)):
+            df = self.analyzer.results[key]
+            if not len(df):
                 continue
-            pair_name = dk[:-len(suffix)]
-            i, j = self._parse_pair_indices(pair_name, model_keys)
-            if i is not None:
-                mean_ssim = float(df['ssim'].mean())
-                matrix[i, j] = mean_ssim
-                matrix[j, i] = mean_ssim
+            i, j = self._parse_pair_indices(key[:-len(suffix)], model_keys)
+            if i is None:
+                continue
+            if metric == '1d':
+                if 'ssim_1d_overall' not in df.columns:
+                    continue
+                val = float(df['ssim_1d_overall'].iloc[0])
+            else:
+                if 'ssim' not in df.columns:
+                    continue
+                val = float(np.nanmean(df['ssim']))
+            matrix[i, j] = val
+            matrix[j, i] = val
+            found = True
 
-        names = [self.analyzer.models[k].name for k in model_keys]
-        df_matrix = pd.DataFrame(matrix, index=names, columns=names)
-        mask = np.tril(np.ones_like(matrix, dtype=bool), k=-1)
+        return matrix if found else None
 
+    def _draw_heatmap(self, ax, matrix: np.ndarray, label: str) -> None:
+        """在给定坐标轴绘制上三角相似性热图。"""
         hm_cfg = self.config.visualization['heatmap']
-        fig, ax = plt.subplots(figsize=self.config.visualization['figsize_heatmap'])
-
+        names = [self.analyzer.models[k].name for k in self.analyzer.models]
+        mask = np.tril(np.ones_like(matrix, dtype=bool), k=-1)
         sns.heatmap(
-            df_matrix, mask=mask, annot=True, fmt='.3f',
-            cmap=hm_cfg['cmap'],
+            pd.DataFrame(matrix, index=names, columns=names),
+            mask=mask, annot=True, fmt='.3f', cmap=hm_cfg['cmap'],
             vmin=hm_cfg.get('ssim_vmin', 0.0), vmax=hm_cfg.get('ssim_vmax', 1.0),
             square=True,
             linewidths=hm_cfg['cell_linewidth'],
             linecolor=hm_cfg['cell_linecolor'],
-            annot_kws={'fontsize': hm_cfg['annot_fontsize'], 'fontweight': 'bold'},
-            cbar_kws={'label': 'SSIM (depth-averaged)', 'shrink': 0.8},
+            annot_kws={'fontsize': 18, 'fontweight': 'bold'},
+            cbar_kws={'label': label, 'shrink': 0.8},
             ax=ax,
         )
-
         ax.set_xticklabels(ax.get_xticklabels(), rotation=45, ha='right',
-                           fontsize=hm_cfg['label_fontsize'], fontweight='bold')
+                           fontsize=12, fontweight='bold')
         ax.set_yticklabels(ax.get_yticklabels(), rotation=0,
-                           fontsize=hm_cfg['label_fontsize'], fontweight='bold')
+                           fontsize=12, fontweight='bold')
 
-        cbar = ax.collections[0].colorbar
-        cbar.ax.tick_params(labelsize=hm_cfg['cbar_fontsize'])
-        cbar.ax.set_ylabel(
-            'SSIM Index', fontsize=hm_cfg['cbar_fontsize'] + 2,
-            rotation=270, labelpad=20,
+    def plot_ssim_heatmap(self, feature: str = 'vs') -> Optional[plt.Figure]:
+        """绘制 N×N 相似性矩阵：整体 1D SSIM 与深度平均 2D SSIM 并排"""
+        m_1d = self._build_matrix(feature, '1d')
+        m_2d = self._build_matrix(feature, '2d')
+        if m_1d is None and m_2d is None:
+            return None
+
+        self.logger.info(f"\n🎨 整体 SSIM 热图: {feature.upper()}")
+        hm_cfg = self.config.visualization['heatmap']
+        panels = [(m, lab) for m, lab in
+                  ((m_1d, '1D SSIM'), (m_2d, '2D SSIM (depth-averaged)'))
+                  if m is not None]
+
+        fig, axes = plt.subplots(1, len(panels), figsize=(9 * len(panels), 8))
+        if len(panels) == 1:
+            axes = [axes]
+
+        for ax, (matrix, label) in zip(axes, panels):
+            self._draw_heatmap(ax, matrix, label)
+            ax.set_title(label, fontsize=15, fontweight='bold', pad=12)
+
+        fig.suptitle(
+            f'Model Similarity Matrix — {feature.upper()}',
+            fontsize=hm_cfg['title_fontsize'], fontweight='bold', y=1.01,
         )
-
-        ax.set_title(
-            f'Model Similarity Matrix — {feature.upper()}\n'
-            f'SSIM (depth-averaged)',
-            fontsize=hm_cfg['title_fontsize'], fontweight='bold', pad=15,
-        )
-
         plt.tight_layout()
         self._save_figure(fig, f'ssim_heatmap_{feature}')
         return fig
@@ -2294,73 +2506,96 @@ class SimilarityVisualization:
 
     # ---------- 5. 综合概览面板 ----------
 
+    def plot_1d_profiles(self, feature: str = 'vs') -> Optional[plt.Figure]:
+        """绘制共同区域原始 1D 速度剖面（对齐 2_1）。"""
+        profs = self.analyzer.profiles.get(feature, {})
+        if not profs:
+            return None
+
+        self.logger.info(f"\n🎨 1D 速度剖面: {feature.upper()}")
+        fig, ax = plt.subplots(figsize=(6, 8))
+        for key, prof in profs.items():
+            model = self.analyzer.models.get(key)
+            name = model.name if model else key
+            color = model.color if model else '#333333'
+            z = prof['depth']
+            v = prof['value']
+            m = np.isfinite(z) & np.isfinite(v)
+            ax.plot(v[m], z[m], color=color, linewidth=1.8, label=name)
+
+        ax.set_xlabel(f'{feature.upper()} (km/s)', fontsize=14)
+        ax.set_ylabel('Depth (km)', fontsize=14)
+        ax.set_title(
+            f'1D Mean {feature.upper()} Profiles (common region)',
+            fontsize=14, fontweight='bold',
+        )
+        ax.invert_yaxis()
+        self._add_discontinuities(ax, 'horizontal')
+        ax.legend(fontsize=11, loc='lower left')
+        ax.grid(True, alpha=0.3)
+        plt.tight_layout()
+        self._save_figure(fig, f'1d_profile_{feature}')
+        return fig
+
     def plot_similarity_overview(self, feature: str = 'vs') -> Optional[plt.Figure]:
-        """整体 SSIM 热图 + 随深度 SSIM 曲线（1×2）"""
-        suffix_depth = f'_{feature}_depth'
-        depth_keys = [k for k in self.analyzer.results if k.endswith(suffix_depth)]
-        if not depth_keys:
+        """1D 剖面 + 1D SSIM(z) + 2D SSIM(z) + 两个相似性矩阵"""
+        has_1d = any(k.endswith(f'_{feature}_1d') for k in self.analyzer.results)
+        has_2d = any(k.endswith(f'_{feature}_depth') for k in self.analyzer.results)
+        if not (has_1d or has_2d):
             return None
 
         self.logger.info(f"\n🎨 综合概览面板: {feature.upper()}")
-        depth_keys = sorted(depth_keys)
-        pair_colors = ['#E41A1C', '#377EB8', '#4DAF4A', '#984EA3', '#FF7F00']
 
-        def _get_label(dk: str) -> str:
-            return self._pair_label(dk[:-len(suffix_depth)])
+        fig = plt.figure(figsize=(20, 11))
+        gs = fig.add_gridspec(2, 3, hspace=0.32, wspace=0.30)
+        ax_prof = fig.add_subplot(gs[0, 0])
+        ax_1d = fig.add_subplot(gs[0, 1])
+        ax_2d = fig.add_subplot(gs[0, 2])
+        ax_hm1 = fig.add_subplot(gs[1, 0])
+        ax_hm2 = fig.add_subplot(gs[1, 1])
 
-        fig, (ax_depth, ax_heatmap) = plt.subplots(1, 2, figsize=(16, 7))
+        for key, prof in self.analyzer.profiles.get(feature, {}).items():
+            model = self.analyzer.models.get(key)
+            name = model.name if model else key
+            color = model.color if model else '#333333'
+            z, v = prof['depth'], prof['value']
+            m = np.isfinite(z) & np.isfinite(v)
+            ax_prof.plot(v[m], z[m], color=color, linewidth=1.8, label=name)
+        ax_prof.set_xlabel(f'{feature.upper()} (km/s)', fontsize=12)
+        ax_prof.set_ylabel('Depth (km)', fontsize=12)
+        ax_prof.set_title('1D Mean Profiles', fontsize=14, fontweight='bold')
+        ax_prof.invert_yaxis()
+        ax_prof.legend(fontsize=9, loc='lower left')
+        ax_prof.grid(True, alpha=0.3)
+        self._add_discontinuities(ax_prof)
 
-        for idx, dk in enumerate(depth_keys):
-            df = self.analyzer.results[dk]
-            if 'ssim' not in df.columns:
-                continue
-            ax_depth.plot(
-                df['ssim'], df['depth_km'], '-o',
-                color=pair_colors[idx % len(pair_colors)],
-                linewidth=2, markersize=3, label=_get_label(dk),
-            )
-        ax_depth.set_xlabel('SSIM', fontsize=12)
-        ax_depth.set_ylabel('Depth (km)', fontsize=12)
-        ax_depth.set_title('SSIM vs Depth', fontsize=14, fontweight='bold')
-        ax_depth.invert_yaxis()
-        ax_depth.set_xlim(-0.05, 1.05)
-        ax_depth.legend(fontsize=9)
-        ax_depth.grid(True, alpha=0.3)
-        self._add_discontinuities(ax_depth)
+        self._plot_depth_curve(ax_1d, f'_{feature}_1d', 'ssim_1d', feature)
+        ax_1d.set_xlabel('1D SSIM', fontsize=12)
+        ax_1d.set_title('1D SSIM vs Depth', fontsize=14, fontweight='bold')
+        ax_1d.legend(fontsize=8, loc='lower left')
 
-        model_keys = list(self.analyzer.models.keys())
-        n = len(model_keys)
-        matrix = np.ones((n, n))
-        for dk in depth_keys:
-            df = self.analyzer.results[dk]
-            if 'ssim' not in df.columns:
-                continue
-            pair_name = dk[:-len(suffix_depth)]
-            i, j = self._parse_pair_indices(pair_name, model_keys)
-            if i is not None:
-                val = float(df['ssim'].mean())
-                matrix[i, j] = val
-                matrix[j, i] = val
+        self._plot_depth_curve(ax_2d, f'_{feature}_depth', 'ssim', feature)
+        ax_2d.set_xlabel('2D SSIM', fontsize=12)
+        ax_2d.set_title('2D SSIM vs Depth', fontsize=14, fontweight='bold')
+        ax_2d.legend(fontsize=8, loc='lower right')
 
-        hm_cfg = self.config.visualization['heatmap']
-        names = [self.analyzer.models[k].name for k in model_keys]
-        mask = np.tril(np.ones_like(matrix, dtype=bool), k=-1)
-        sns.heatmap(
-            pd.DataFrame(matrix, index=names, columns=names),
-            mask=mask, annot=True, fmt='.3f', cmap=hm_cfg['cmap'],
-            vmin=hm_cfg.get('ssim_vmin', 0.0), vmax=hm_cfg.get('ssim_vmax', 1.0),
-            square=True,
-            annot_kws={'fontsize': 16, 'fontweight': 'bold'},
-            cbar_kws={'label': 'SSIM (depth-averaged)', 'shrink': 0.8},
-            ax=ax_heatmap,
-        )
-        ax_heatmap.set_title('Overall SSIM', fontsize=14, fontweight='bold')
+        m_1d = self._build_matrix(feature, '1d')
+        m_2d = self._build_matrix(feature, '2d')
+        if m_1d is not None:
+            self._draw_heatmap(ax_hm1, m_1d, '1D SSIM')
+            ax_hm1.set_title('Overall 1D SSIM', fontsize=14, fontweight='bold')
+        else:
+            ax_hm1.set_visible(False)
+        if m_2d is not None:
+            self._draw_heatmap(ax_hm2, m_2d, '2D SSIM')
+            ax_hm2.set_title('2D SSIM (depth-averaged)', fontsize=14, fontweight='bold')
+        else:
+            ax_hm2.set_visible(False)
 
         fig.suptitle(
             f'Structural Similarity — {feature.upper()}',
-            fontsize=18, fontweight='bold', y=1.01,
+            fontsize=18, fontweight='bold', y=0.98,
         )
-        plt.tight_layout()
         self._save_figure(fig, f'similarity_overview_{feature}')
         return fig
 
@@ -2368,15 +2603,14 @@ class SimilarityVisualization:
 # ==================== 主函数 ====================
 
 def main():
-    """主函数 — Wang 2004 SSIM：整体 + 随深度"""
+    """主函数 — 1D SSIM + 2D SSIM(z)"""
     print("\n" + "=" * 80)
-    print("🚀 EASTASIA-FWI 速度模型结构相似性分析 (v17.0)")
-    print("   框架: Wang et al. (2004) SSIM")
+    print("🚀 EASTASIA-FWI 速度模型结构相似性分析 (v19.0)")
+    print("   框架: Wang et al. (2004) SSIM — 1D 剖面 + 2D 逐深度切片")
     print("=" * 80)
     print("\n🎯 主路径:")
-    print("  • 每层去横向平均后计算 SSIM")
-    print("  • 产品: 整体 SSIM（深度平均）+ 随深度 SSIM 曲线")
-    print("  • 分辨率: 按模型对最粗 (EARA–FWEA=0.25°, Sino对=1.0°)")
+    print("  • 1D SSIM: 共同区域横向平均的原始 Vs / Vp 剖面 V(z)")
+    print("  • 2D SSIM(z): 逐深度切片、去横向平均后的横向结构")
     print("=" * 80 + "\n")
 
     analyzer = None
@@ -2399,12 +2633,13 @@ def main():
 
         features_done = set()
         for key in analyzer.results:
-            if key.endswith('_depth'):
-                feat = key[:-len('_depth')].split('_')[-1]
-                features_done.add(feat)
+            for suffix in ('_depth', '_1d'):
+                if key.endswith(suffix):
+                    features_done.add(key[:-len(suffix)].split('_')[-1])
 
-        for feature in features_done:
+        for feature in sorted(features_done):
             print(f"\n  📊 {feature.upper()}...")
+            visualizer.plot_1d_profiles(feature)
             visualizer.plot_depth_ssim(feature)
             visualizer.plot_ssim_heatmap(feature)
             visualizer.plot_similarity_overview(feature)
@@ -2412,7 +2647,7 @@ def main():
                 visualizer.plot_cwssim_spatial(feature)
 
         print("\n" + "=" * 80)
-        print("✅ 分析完成 (SSIM 主路径)")
+        print("✅ 分析完成 (1D SSIM + 2D SSIM(z))")
         print(f"📁 结果: {analyzer.output_dir}")
         print(f"📁 图表: {analyzer.figures_dir}")
         print("=" * 80 + "\n")

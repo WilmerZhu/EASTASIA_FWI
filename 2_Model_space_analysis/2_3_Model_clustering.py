@@ -267,6 +267,38 @@ class ClusteringConfig:
             'enabled': False,
             'seeds': [1234, 20240901],  # 每个种子一次独立复验
         },
+        # K 扫描稳健性（论文主证据，默认关闭以免拖慢常规运行）：与其论证
+        # "K* 是真实簇数"，不如证明结论在一段 K 区间内不变。复用 BIC 扫描已
+        # 缓存的各 K 模型，边际开销仅为逐 K 的一次 predict。
+        'k_robustness': {
+            'enabled': False,
+            'neutral_threshold': 0.01,  # 快/慢三分类的中性带半宽（物理 δlnVs）
+        },
+        # 簇编号排序：GMM 组分索引由 EM 初始化随机决定，未排序时 C0 在不同
+        # 模型/深度带间含义不同，配色与跨模型对应都无法直接进行。按簇均值
+        # δlnVs 升序重排后 C0 = 最慢、C_{K-1} = 最快，编号与配色即可跨模型比较。
+        # 标准化是单调仿射变换，故在标准化域排序等价于在物理 δlnVs 上排序。
+        'cluster_order': 'dlnvs_ascending',  # 'dlnvs_ascending'|'dlnvs_descending'|None
+        # ── HMRF-GMM 空间正则化 ──
+        # 逐体元独立分类忽略了相邻体元的相关性，而层析模型本身经反演正则化
+        # 平滑，实际分辨长度远大于网格间距，相邻体元并非独立观测。结果是标签
+        # 场出现椒盐噪声：后验接近 0.5/0.5 的体元被噪声推向任意一侧。
+        #
+        # 采用隐马尔可夫随机场 GMM（Zhang, Brady & Smith 2001, IEEE TMI）：
+        # 标签场服从 Potts 先验，能量 U = -log N(x|μ_k,Σ_k) + β·Σ_j w_j·1[l_j≠l_k]。
+        # 用均场近似而非硬 ICM，以保留软后验（下游概率图与投票均需要）。
+        # 邻域权重 w_j 按邻点物理距离反比加权：经度间距随纬度收缩、深度层间距
+        # 与水平间距量级不同，若等权则等价于在物理空间做各向异性平滑。
+        #
+        # ⚠️ 跨模型投票前提：三个模型必须用同一组 (beta, 邻域定义)，否则有效
+        # 平滑量不同，一致性不可比。
+        'hmrf': {
+            'enabled': False,
+            'beta': 1.0,        # Potts 耦合强度（相对于对数似然的量纲）
+            'max_iter': 8,      # 均场外迭代上限
+            'tol': 1e-3,        # 标签变动比例收敛阈值
+            'update_params': True,  # 是否在均场迭代中同步更新 μ/Σ/π（完整 EM）
+        },
         'max_iter': 300,
         'covariance_type': 'full',  # 保留 Vp–Vs 相关
         'random_state': RANDOM_SEED,
@@ -735,6 +767,9 @@ class GMMAutoClusteringOptimizer:
         self._cached_gmms: Dict[int, GaussianMixture] = {}
         # 由 pipeline 注入，用于 moho_4band 空间分带
         self.concordance_eval: Optional['GeologyConcordanceEvaluator'] = None
+        # 由 pipeline 注入（processor.scaler.inverse_transform），把标准化簇均值
+        # 还原为物理 δlnV，供 K 扫描的快/慢三分类使用
+        self.feature_inverse_transform: Optional[Any] = None
 
     @staticmethod
     def _repair_loglik_monotone(
@@ -1009,9 +1044,30 @@ class GMMAutoClusteringOptimizer:
         n_clusters: Optional[int] = None,
         band_name: str = 'full',
         bic_analysis: Optional[Dict[str, Any]] = None,
+        spatial_indices: Optional[np.ndarray] = None,
+        dims: Optional[Tuple[int, int, int]] = None,
+        geometry: Optional[Dict[str, Any]] = None,
+        sort_col: Optional[int] = None,
     ) -> Tuple[np.ndarray, np.ndarray, GaussianMixture, Dict[str, Any]]:
         """
         执行 GMM 聚类；若 reuse_bic_fit 且缓存命中则复用 BIC 搜索中的模型。
+
+        在标准 GMM 之后可选做两步后处理：
+        1. HMRF 空间正则化（均场近似），消除逐体元独立分类产生的椒盐噪声；
+        2. 按簇均值 δlnVs 重排簇编号，使编号跨模型、跨深度带含义一致。
+
+        Args:
+            X: 该带特征矩阵 (n_points, n_features)
+            n_clusters: 簇数；None 时自动选 K
+            band_name: 深度带名称（日志与指标标注用）
+            bic_analysis: 选 K 诊断信息
+            spatial_indices: 该带各点的 (lat_idx, lon_idx, depth_idx)，HMRF 必需
+            dims: 全网格形状 (n_lat, n_lon, n_depth)，HMRF 必需
+            geometry: 含 lats/lons/depths 的网格几何，用于各向异性邻域权重
+            sort_col: 用于排序的特征列索引（δlnVs 所在列）
+
+        Returns:
+            (labels, probabilities, gmm, metrics)
         """
         if n_clusters is None:
             n_clusters, bic_analysis = self.find_optimal_clusters(X, band_name=band_name)
@@ -1044,10 +1100,34 @@ class GMMAutoClusteringOptimizer:
         # 始终在全量点上预测，保证 3D 标签体完整
         labels = gmm.predict(X)
         probabilities = gmm.predict_proba(X)
+
+        # ── HMRF 空间正则化（均场近似 EM）──
+        hmrf_cfg = gmm_config.get('hmrf', {}) or {}
+        hmrf_info: Optional[Dict[str, Any]] = None
+        if hmrf_cfg.get('enabled', False):
+            if spatial_indices is None or dims is None or geometry is None:
+                self.logger.warning(
+                    f"    ⚠️ [{band_name}] 缺少空间索引/网格几何，跳过 HMRF 正则化"
+                )
+            else:
+                labels, probabilities, hmrf_info = self._hmrf_refine(
+                    X, probabilities, gmm, spatial_indices, dims,
+                    geometry, hmrf_cfg, band_name,
+                )
+
+        # ── 簇编号按均值 δlnVs 重排 ──
+        order_rule = gmm_config.get('cluster_order')
+        if order_rule and sort_col is not None:
+            labels, probabilities = self._order_clusters(
+                labels, probabilities, gmm, int(sort_col), str(order_rule)
+            )
+
         metrics = self._calculate_clustering_metrics(
             X, labels, probabilities, gmm, fit_time
         )
         metrics['band_name'] = band_name
+        if hmrf_info is not None:
+            metrics['hmrf'] = hmrf_info
         if bic_analysis is not None:
             metrics['bic_optimal_n'] = bic_analysis.get('optimal_n')
 
@@ -1114,6 +1194,453 @@ class GMMAutoClusteringOptimizer:
             f"    🔁 [{band_name}] 稳定性复验汇总: mean ARI={mean_ari:.4f} [{verdict}]"
         )
         return {'seeds_ari': aris, 'mean_ari': mean_ari, 'n_clusters': n_clusters}
+
+    # ==================== K 扫描稳健性 ====================
+
+    def scan_k_robustness(
+        self,
+        X: np.ndarray,
+        k_selected: int,
+        band_name: str,
+        k_range: Optional[List[int]] = None,
+        sort_col: int = 1,
+        neutral_threshold: float = 0.01,
+        inverse_transform: Optional[Any] = None,
+    ) -> Dict[str, Any]:
+        """
+        K 扫描稳健性：量化科学结论对 K 取值的依赖程度。
+
+        K 无法从体元级数据可靠估计（Cai, Campbell & Broderick 2021, ICML：
+        模型设定只要有任意偏差，有限混合模型的组分数后验即发散）。因此与其
+        论证"K* 是真实簇数"，不如直接证明"结论在一段 K 区间内不变"——这正是
+        Bao et al. (2026, Science) 补充材料中跨 k、跨阈值、跨模型的做法。
+
+        输出两类指标：
+        1. 相邻 K 的 ARI：反映分区本身随 K 的变化。K 不同则粒度不同，ARI
+           必然小于 1，该曲线只用于定位分区结构趋于稳定的 K 区间。
+        2. 快/慢三分类一致度：按簇平均 δlnVs 与 ±neutral_threshold 的关系把
+           每个体元归为快/中性/慢，再与 K* 的结果比较。跨模型投票图只依赖这个
+           三分类，故该曲线才是"结论是否依赖 K"的直接证据，应作为主要论据。
+
+        Args:
+            X: 该带特征矩阵（标准化域）
+            k_selected: 已选定的 K*
+            band_name: 深度带名称
+            k_range: 扫描范围；缺省用已缓存的全部 K
+            sort_col: δlnVs 所在特征列
+            neutral_threshold: 中性带半宽（物理 δlnVs 单位）
+            inverse_transform: 把标准化簇均值还原为物理量的回调
+
+        Returns:
+            含 k_values / ari_consecutive / ari_vs_selected / trichotomy_agreement
+            的字典
+        """
+        gmm_config = self.config.auto_gmm
+        if k_range is None:
+            k_range = sorted(self._cached_gmms.keys()) or [k_selected]
+        k_range = [int(k) for k in k_range]
+        if k_selected not in k_range:
+            k_range = sorted(set(k_range) | {int(k_selected)})
+
+        self.logger.info(
+            f"    📐 [{band_name}] K 扫描稳健性: K={k_range[0]}..{k_range[-1]}, "
+            f"基准 K*={k_selected}"
+        )
+
+        labels_by_k: Dict[int, np.ndarray] = {}
+        tri_by_k: Dict[int, np.ndarray] = {}
+
+        for k in k_range:
+            gmm = self._cached_gmms.get(k)
+            if gmm is None:
+                gmm = GaussianMixture(
+                    n_components=k,
+                    covariance_type=gmm_config['covariance_type'],
+                    n_init=gmm_config['n_init'],
+                    max_iter=gmm_config['max_iter'],
+                    random_state=gmm_config['random_state'],
+                    reg_covar=1e-6,
+                )
+                gmm.fit(self._subsample_for_fit(X))
+            lbl = gmm.predict(X)
+            labels_by_k[k] = lbl
+
+            # 簇均值还原到物理 δlnVs，据此把体元归为 快(+1)/中性(0)/慢(-1)
+            means = np.asarray(gmm.means_, dtype=float)
+            phys = (
+                np.asarray(inverse_transform(means))
+                if inverse_transform is not None
+                else means
+            )
+            vs_mean = phys[:, sort_col] if sort_col < phys.shape[1] else phys[:, 0]
+            cluster_tri = np.where(
+                vs_mean >= neutral_threshold, 1,
+                np.where(vs_mean <= -neutral_threshold, -1, 0),
+            ).astype(np.int8)
+            tri_by_k[k] = cluster_tri[lbl]
+
+        ref_tri = tri_by_k[int(k_selected)]
+        ref_lbl = labels_by_k[int(k_selected)]
+
+        ari_consecutive: Dict[str, float] = {}
+        for a, b in zip(k_range[:-1], k_range[1:]):
+            ari_consecutive[f"{a}->{b}"] = float(
+                adjusted_rand_score(labels_by_k[a], labels_by_k[b])
+            )
+        ari_vs_selected = {
+            str(k): float(adjusted_rand_score(ref_lbl, labels_by_k[k]))
+            for k in k_range
+        }
+        tri_agreement = {
+            str(k): float(np.mean(tri_by_k[k] == ref_tri)) for k in k_range
+        }
+
+        tri_vals = [v for k, v in tri_agreement.items() if int(k) != int(k_selected)]
+        self.logger.info(
+            f"    📐 [{band_name}] 三分类一致度: 最低 {min(tri_vals):.3f}, "
+            f"均值 {float(np.mean(tri_vals)):.3f}（相对 K*={k_selected}）"
+            if tri_vals else
+            f"    📐 [{band_name}] K 扫描仅含单个 K，无对比"
+        )
+
+        return {
+            'band_name': band_name,
+            'k_values': k_range,
+            'k_selected': int(k_selected),
+            'neutral_threshold': float(neutral_threshold),
+            'ari_consecutive': ari_consecutive,
+            'ari_vs_selected': ari_vs_selected,
+            'trichotomy_agreement': tri_agreement,
+        }
+
+    # ==================== 簇编号排序 ====================
+
+    @staticmethod
+    def _order_clusters(
+        labels: np.ndarray,
+        probabilities: np.ndarray,
+        gmm: GaussianMixture,
+        sort_col: int,
+        rule: str,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        按簇均值在指定特征列上的取值重排簇编号，并同步重排 GMM 组分参数。
+
+        GMM 的组分索引由 EM 初始化随机决定，本身不含信息：同一模型换个种子、
+        或换个深度带，C0 的含义就完全不同，导致配色无法固定、跨模型的簇也无法
+        直接对应。按 δlnVs 升序重排后 C0 = 最慢、C_{K-1} = 最快，编号本身即携带
+        物理含义。标准化是单调仿射变换，故在标准化域上排序等价于在物理 δlnVs
+        上排序，无需反变换。
+
+        就地重排 gmm 的组分参数，使其与返回的标签、概率保持一致。
+
+        Args:
+            labels: 原始标签 (n_points,)
+            probabilities: 原始后验概率 (n_points, K)
+            gmm: 已拟合的 GMM（就地修改）
+            sort_col: 排序依据的特征列索引
+            rule: 'dlnvs_ascending' 或 'dlnvs_descending'
+
+        Returns:
+            (重排后的标签, 重排后的概率)
+        """
+        means = np.asarray(gmm.means_)
+        if sort_col >= means.shape[1]:
+            return labels, probabilities
+
+        order = np.argsort(means[:, sort_col], kind='stable')
+        if rule == 'dlnvs_descending':
+            order = order[::-1].copy()
+
+        if np.array_equal(order, np.arange(order.size)):
+            return labels, probabilities
+
+        # rank[旧编号] = 新编号
+        rank = np.empty(order.size, dtype=np.int64)
+        rank[order] = np.arange(order.size)
+
+        new_labels = rank[labels].astype(labels.dtype, copy=False)
+        new_probs = probabilities[:, order]
+
+        gmm.weights_ = np.asarray(gmm.weights_)[order]
+        gmm.means_ = means[order]
+        # tied 协方差为全局共享 (d,d)，不随组分重排；其余按首轴重排
+        for attr in ('covariances_', 'precisions_', 'precisions_cholesky_'):
+            arr = getattr(gmm, attr, None)
+            if arr is not None and np.asarray(arr).shape[0] == order.size:
+                setattr(gmm, attr, np.asarray(arr)[order])
+
+        return new_labels, new_probs
+
+    # ==================== HMRF-GMM 空间正则化 ====================
+
+    @staticmethod
+    def _neighbor_edge_weights(
+        geometry: Dict[str, Any],
+        dims: Tuple[int, int, int],
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """
+        计算 6 邻域三个方向的边权，按邻点物理距离反比加权。
+
+        三个方向的格点间距在物理上并不等价：经度方向弧长随纬度按 cos(lat)
+        收缩（本区跨 -15°~60°，高低纬相差约 2 倍），深度层间距通常非均匀且
+        与水平间距量级不同。若三方向等权，等价于在物理空间中做各向异性平滑，
+        高纬与深部会被过度平滑。以三方向特征间距的中位数为参考距离 d_ref，
+        边权取 w = d_ref / d，并截断上限以防极端各向异性主导邻域项。
+
+        Returns:
+            (w_lat, w_lon, w_dep)，形状分别为 (n_lat-1,1,1)、(n_lat,1,1)、
+            (1,1,n_dep-1)，可直接与移位后的三维场广播相乘。
+        """
+        DEG_KM = 111.19
+        lats = np.asarray(geometry['lats'], dtype=float)
+        lons = np.asarray(geometry['lons'], dtype=float)
+        depths = np.asarray(geometry['depths'], dtype=float)
+        n_lat, n_lon, n_dep = dims
+
+        # 纬度方向：逐条边的弧长
+        if n_lat > 1 and lats.size == n_lat:
+            d_lat = np.abs(np.diff(lats)) * DEG_KM
+        else:
+            d_lat = np.array([np.inf])
+
+        # 经度方向：弧长随格点纬度收缩，权重是纬度的函数
+        if n_lon > 1 and lons.size == n_lon:
+            d_lon_eq = float(np.median(np.abs(np.diff(lons)))) * DEG_KM
+            # cos 下限防止极区弧长趋零导致权重爆炸
+            d_lon = d_lon_eq * np.maximum(np.cos(np.deg2rad(lats)), 0.05)
+        else:
+            d_lon = np.array([np.inf])
+
+        # 深度方向：层间距常随深度变粗
+        if n_dep > 1 and depths.size == n_dep:
+            d_dep = np.abs(np.diff(depths))
+        else:
+            d_dep = np.array([np.inf])
+
+        finite = np.concatenate(
+            [a[np.isfinite(a)] for a in (d_lat, d_lon, d_dep)] or [np.array([1.0])]
+        )
+        d_ref = float(np.median(finite)) if finite.size else 1.0
+
+        def _w(d: np.ndarray) -> np.ndarray:
+            return np.clip(d_ref / np.maximum(d, 1e-6), 0.0, 4.0)
+
+        return (
+            _w(d_lat).astype(np.float32).reshape(-1, 1, 1),
+            _w(d_lon).astype(np.float32).reshape(-1, 1, 1),
+            _w(d_dep).astype(np.float32).reshape(1, 1, -1),
+        )
+
+    @staticmethod
+    def _neighbor_field(
+        gamma: np.ndarray,
+        li: np.ndarray,
+        lj: np.ndarray,
+        lk: np.ndarray,
+        dims: Tuple[int, int, int],
+        w_lat: np.ndarray,
+        w_lon: np.ndarray,
+        w_dep: np.ndarray,
+    ) -> np.ndarray:
+        """
+        计算邻域一致性场 S_ik = Σ_{j∈N(i)} w_ij · γ_jk。
+
+        逐类散射到三维网格后用移位求和，内存占用为单个网格大小而非 K 倍。
+        带外体元在网格中留零，故深度带边界处邻域项自然减弱——各深度带本就
+        独立聚类，跨带传播标签信息没有意义。
+
+        Returns:
+            (n_points, K) 的邻域一致性场
+        """
+        n_pts, n_k = gamma.shape
+        out = np.empty((n_pts, n_k), dtype=np.float64)
+        buf = np.zeros(dims, dtype=np.float32)
+        acc = np.zeros(dims, dtype=np.float32)
+
+        for k in range(n_k):
+            buf[...] = 0.0
+            buf[li, lj, lk] = gamma[:, k].astype(np.float32)
+            acc[...] = 0.0
+            # 纬度方向
+            acc[:-1] += w_lat * buf[1:]
+            acc[1:] += w_lat * buf[:-1]
+            # 经度方向
+            acc[:, :-1] += w_lon * buf[:, 1:]
+            acc[:, 1:] += w_lon * buf[:, :-1]
+            # 深度方向
+            acc[:, :, :-1] += w_dep * buf[:, :, 1:]
+            acc[:, :, 1:] += w_dep * buf[:, :, :-1]
+            out[:, k] = acc[li, lj, lk]
+
+        return out
+
+    @staticmethod
+    def _full_covariances(gmm: GaussianMixture, n_k: int, n_feat: int) -> np.ndarray:
+        """把任意 covariance_type 的协方差统一展开为 (K, d, d)"""
+        cov = np.asarray(gmm.covariances_)
+        ctype = getattr(gmm, 'covariance_type', 'full')
+        if ctype == 'full':
+            return cov.astype(float).copy()
+        if ctype == 'tied':
+            return np.repeat(cov.astype(float)[None], n_k, axis=0)
+        if ctype == 'diag':
+            return np.stack([np.diag(cov[k].astype(float)) for k in range(n_k)])
+        if ctype == 'spherical':
+            return np.stack([np.eye(n_feat) * float(cov[k]) for k in range(n_k)])
+        raise ValueError(f"不支持的协方差类型: {ctype}")
+
+    @staticmethod
+    def _gaussian_log_density(
+        X: np.ndarray, means: np.ndarray, covs: np.ndarray
+    ) -> np.ndarray:
+        """各组分的多元正态对数密度 (n_points, K)，经 Cholesky 分解求马氏距离"""
+        n_pts, n_feat = X.shape
+        n_k = means.shape[0]
+        out = np.empty((n_pts, n_k), dtype=np.float64)
+        cst = n_feat * np.log(2.0 * np.pi)
+        eye = np.eye(n_feat)
+        for k in range(n_k):
+            chol = np.linalg.cholesky(covs[k] + eye * 1e-10)
+            sol = np.linalg.solve(chol, (X - means[k]).T).T
+            out[:, k] = -0.5 * (
+                cst
+                + 2.0 * np.sum(np.log(np.diag(chol)))
+                + np.einsum('ij,ij->i', sol, sol)
+            )
+        return out
+
+    @staticmethod
+    def _weighted_gaussian_mstep(
+        X: np.ndarray, gamma: np.ndarray, reg: float = 1e-6
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """以均场后验为权重的 M 步，返回 (means, covs, weights)"""
+        n_pts, n_feat = X.shape
+        n_k = gamma.shape[1]
+        n_eff = gamma.sum(axis=0) + 1e-10
+        means = (gamma.T @ X) / n_eff[:, None]
+        covs = np.empty((n_k, n_feat, n_feat), dtype=float)
+        for k in range(n_k):
+            diff = X - means[k]
+            covs[k] = (diff * gamma[:, k : k + 1]).T @ diff / n_eff[k]
+            covs[k].flat[:: n_feat + 1] += reg
+        return means, covs, n_eff / float(n_pts)
+
+    def _hmrf_refine(
+        self,
+        X: np.ndarray,
+        probabilities: np.ndarray,
+        gmm: GaussianMixture,
+        spatial_indices: np.ndarray,
+        dims: Tuple[int, int, int],
+        geometry: Dict[str, Any],
+        cfg: Dict[str, Any],
+        band_name: str,
+    ) -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
+        """
+        HMRF-GMM 空间正则化（均场近似 EM）。
+
+        标签场服从 Potts 先验，单体元能量
+            U(l_i=k) = -log[π_k · N(x_i | μ_k, Σ_k)] + β·Σ_{j∈N(i)} w_ij·1[l_j ≠ k]
+        取均场近似把邻域指示函数换成邻居后验 γ_jk，则罚项为
+            β·Σ_j w_ij·(1 - γ_jk) = β·(W_i - S_ik)
+        其中 W_i = Σ_j w_ij 与类别 k 无关，在 softmax 中作为逐点常数被约去。
+        故均场后验只需在对数似然上加 +β·S_ik，S 即邻域一致性场——形式上是
+        "与邻居一致则获得奖励"，且奖励按邻居自身的确信度加权。
+
+        使用均场而非硬 ICM 的原因：下游的概率分布图、最大后验图与跨模型投票
+        都依赖软后验，硬指派会把后验退化成 0/1，这些输出随之失效。
+
+        参数更新（update_params=True）使其成为完整的 HMRF-EM：初始 GMM 只在
+        子样本上拟合，而均场迭代在全量体元上进行，同步更新 μ/Σ/π 可让组分
+        参数与正则化后的分区自洽。收敛后回写 gmm，并重算 precisions_cholesky_
+        以保证该对象后续调用 predict/score 时仍然自洽。
+
+        Returns:
+            (labels, probabilities, 诊断信息)
+        """
+        beta = float(cfg.get('beta', 1.0))
+        max_iter = int(cfg.get('max_iter', 8))
+        tol = float(cfg.get('tol', 1e-3))
+        update_params = bool(cfg.get('update_params', True))
+
+        t0 = time.time()
+        n_pts, n_feat = X.shape
+        n_k = probabilities.shape[1]
+
+        li = np.ascontiguousarray(spatial_indices[:, 0], dtype=np.intp)
+        lj = np.ascontiguousarray(spatial_indices[:, 1], dtype=np.intp)
+        lk = np.ascontiguousarray(spatial_indices[:, 2], dtype=np.intp)
+        w_lat, w_lon, w_dep = self._neighbor_edge_weights(geometry, dims)
+
+        gamma = np.asarray(probabilities, dtype=np.float64).copy()
+        labels = np.argmax(gamma, axis=1).astype(np.int32)
+        labels_gmm = labels.copy()
+
+        means = np.asarray(gmm.means_, dtype=float).copy()
+        covs = self._full_covariances(gmm, n_k, n_feat)
+        weights = np.asarray(gmm.weights_, dtype=float).copy()
+
+        self.logger.info(
+            f"    🧲 [{band_name}] HMRF 空间正则化: β={beta}, "
+            f"最多 {max_iter} 次均场迭代"
+        )
+
+        changed_hist: List[float] = []
+        for it in range(max_iter):
+            field = self._neighbor_field(
+                gamma, li, lj, lk, dims, w_lat, w_lon, w_dep
+            )
+            log_post = self._gaussian_log_density(X, means, covs)
+            log_post += np.log(np.maximum(weights, 1e-300))
+            log_post += beta * field
+
+            log_post -= log_post.max(axis=1, keepdims=True)
+            np.exp(log_post, out=log_post)
+            gamma = log_post / log_post.sum(axis=1, keepdims=True)
+
+            new_labels = np.argmax(gamma, axis=1).astype(np.int32)
+            changed = float(np.mean(new_labels != labels))
+            labels = new_labels
+            changed_hist.append(changed)
+
+            if update_params:
+                means, covs, weights = self._weighted_gaussian_mstep(X, gamma)
+
+            self.logger.info(
+                f"      迭代 {it + 1}/{max_iter}: 标签变动 {changed:.4%}"
+            )
+            if changed < tol:
+                break
+
+        # 回写自洽的组分参数
+        if update_params:
+            gmm.means_ = means
+            gmm.weights_ = weights
+            if getattr(gmm, 'covariance_type', 'full') == 'full':
+                gmm.covariances_ = covs
+                prec_chol = np.empty_like(covs)
+                for k in range(n_k):
+                    prec_chol[k] = np.linalg.inv(np.linalg.cholesky(covs[k])).T
+                gmm.precisions_cholesky_ = prec_chol
+                gmm.precisions_ = np.stack(
+                    [prec_chol[k] @ prec_chol[k].T for k in range(n_k)]
+                )
+
+        moved = float(np.mean(labels != labels_gmm))
+        self.logger.info(
+            f"    🧲 [{band_name}] HMRF 完成: 相对纯 GMM 改判 {moved:.2%} 体元, "
+            f"{time.time() - t0:.1f}s"
+        )
+
+        return labels, gamma, {
+            'beta': beta,
+            'n_iter': len(changed_hist),
+            'changed_history': changed_hist,
+            'converged': bool(changed_hist and changed_hist[-1] < tol),
+            'relabeled_fraction_vs_gmm': moved,
+            'update_params': update_params,
+        }
 
     def _active_scheme(self) -> Tuple[str, Dict[str, Any]]:
         """返回当前分层方案名与方案配置"""
@@ -1229,6 +1756,20 @@ class GMMAutoClusteringOptimizer:
         """
         depths = np.asarray(metadata['depths'], dtype=float)
         dims = metadata['dims']
+
+        # HMRF 邻域权重所需的网格几何；簇排序所需的 δlnVs 列索引
+        geometry = {
+            'lats': metadata['lats'],
+            'lons': metadata['lons'],
+            'depths': depths,
+        }
+        feature_names = [str(f).lower() for f in metadata.get('features', [])]
+        sort_col = feature_names.index('vs') if 'vs' in feature_names else None
+        if sort_col is None and feature_names:
+            # 无 vs 时退回首个特征，保证簇编号仍然有序可比
+            sort_col = 0
+            self.logger.warning("  ⚠️ 特征中无 vs，簇排序退回首个特征列")
+
         scheme, scheme_cfg = self._active_scheme()
         bands = scheme_cfg['bands']
         offset_labels = self.config.depth_stratified.get('offset_labels_across_bands', True)
@@ -1251,6 +1792,7 @@ class GMMAutoClusteringOptimizer:
         global_probs = np.zeros((len(X), max_k_possible), dtype=np.float64)
 
         per_band: Dict[str, Any] = {}
+        per_band_krob: Dict[str, Any] = {}
         label_offset = 0
         total_fit_time = 0.0
         point_depths = depths[spatial_indices[:, 2]]
@@ -1298,8 +1840,30 @@ class GMMAutoClusteringOptimizer:
                 n_clusters=optimal_n,
                 band_name=name,
                 bic_analysis=bic_analysis,
+                spatial_indices=spatial_indices[mask],
+                dims=dims,
+                geometry=geometry,
+                sort_col=sort_col,
             )
             total_fit_time += float(metrics_b.get('fit_time', 0.0))
+
+            # K 扫描稳健性：在 BIC 缓存仍然有效时进行。各 K 一律用纯 GMM 标签
+            # 比较，以隔离 K 本身的影响（若含 HMRF 则平滑效应会与 K 效应混淆）。
+            krob_cfg = self.config.auto_gmm.get('k_robustness', {}) or {}
+            if krob_cfg.get('enabled', False):
+                try:
+                    per_band_krob[name] = self.scan_k_robustness(
+                        X_band,
+                        k_selected=optimal_n,
+                        band_name=name,
+                        sort_col=int(sort_col) if sort_col is not None else 1,
+                        neutral_threshold=float(
+                            krob_cfg.get('neutral_threshold', 0.01)
+                        ),
+                        inverse_transform=self.feature_inverse_transform,
+                    )
+                except Exception as exc:
+                    self.logger.warning(f"  ⚠️ [{name}] K 扫描稳健性失败: {exc}")
 
             if offset_labels:
                 labels_global_b = labels_b + label_offset
@@ -1412,6 +1976,7 @@ class GMMAutoClusteringOptimizer:
             'metrics': overall_metrics,
             'bic_analysis': first_band['bic_analysis'],
             'per_band': per_band,
+            'k_robustness': per_band_krob,
             'mode': 'depth_stratified',
             'scheme': scheme,
         }
@@ -1825,6 +2390,13 @@ class SmartClusteringPipeline:
                         'kmeans_results': None,
                     }
 
+                    # 注入标准化反变换：K 扫描的快/慢三分类须在物理 δlnV 上判定
+                    self.gmm_optimizer.feature_inverse_transform = (
+                        self.processor.scaler.inverse_transform
+                        if getattr(self.processor, 'scaler', None) is not None
+                        else None
+                    )
+
                     self.logger.info("\n🤖 执行 GMM 速度相聚类...")
                     if stratified:
                         gmm_results = self.gmm_optimizer.perform_depth_stratified_clustering(
@@ -1921,6 +2493,12 @@ class SmartClusteringPipeline:
                 self.enhanced_visualizer.plot_bic_analysis(
                     gmm_results['bic_analysis'], viz_dir, model_name
                 )
+
+        # K 扫描稳健性图（k_robustness 开启时才有数据）
+        if gmm_results.get('k_robustness'):
+            self.enhanced_visualizer.plot_k_robustness(
+                gmm_results['k_robustness'], viz_dir, model_name
+            )
 
         # 概率分析：分层时用 max_probability 构造伪概率分布
         if vis_config.get('probability_distribution') or vis_config.get(
