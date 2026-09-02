@@ -78,10 +78,12 @@ import cartopy.crs as ccrs
 import cartopy.feature as cfeature
 from cartopy.mpl.geoaxes import GeoAxes
 import matplotlib.pyplot as plt
+from matplotlib.colors import LinearSegmentedColormap
 from matplotlib.figure import Figure
+from matplotlib.gridspec import GridSpec
 import numpy as np
 import xarray as xr
-from matplotlib.patches import Rectangle
+from matplotlib.patches import Patch, Rectangle
 
 # 添加项目根目录到路径
 project_root = Path(__file__).parent.parent
@@ -262,6 +264,21 @@ class ModelCompareConfig:
                 'vpv': '--',
                 'vph': ':'
             }
+        }
+        
+        # ============ 论文主图参数（1D 剖面 + 三深度 dlnVs）============
+        self.paper_figure = {
+            'depths': [100, 200, 500],      # km；取最近层
+            'param': 'vs',
+            'cmap': 'seis',                 # GMT seis：红(低速)→黄→绿→蓝(高速)
+            'dlnv_limit': 6.0,              # 与参考图一致 ±6%
+            'figsize': (13.2, 8.2),         # 英寸：左 1D + 右三列地图
+            'panel_letters': True,
+            'include_1d': True,             # 左侧融合全深度 1D VS 剖面
+            '1d_sigma': 1.0,                # 1D 阴影为 ±N σ
+            '1d_xlim': (3.0, 7.0),          # VS (km/s)
+            '1d_params': ('vs',),           # 同轴绘制的 1D 参数
+            'save_formats': ['jpg', 'pdf'], # 论文图：jpg + 矢量 pdf，不用 png
         }
         
         # ============ 输出参数 ============
@@ -1861,6 +1878,389 @@ class ModelComparator:
         
         self.logger.info(f"✅ 成功生成 {len(figures)} 个水平切片对比图（模式: {mode}）")
         return figures
+    
+    # ==================== 论文主图：1D 剖面 + 三深度 dlnVs ====================
+    
+    def plot_paper_dlnv_maps(self, param: Optional[str] = None) -> Figure:
+        """
+        绘制论文主图：左侧全深度 1D VS 剖面 + 右侧三模型 × 三深度 dlnVs。
+        
+        左栏三模型 1D 平均 VS（0–1000 km），并在切片深度处画水平参考线，
+        与右栏地图对齐。右栏各模型保持原生网格，SinoScope 的 1° 块状
+        分辨率不加平滑。色标 GMT seis（红=低速，蓝=高速，±6%）。
+        
+        Args:
+            param: 速度参数，默认 vs
+            
+        Returns:
+            论文主图 Figure
+        """
+        paper_cfg = self.config.paper_figure
+        param_name = param or str(paper_cfg['param'])
+        depths = list(paper_cfg['depths'])
+        cmap_name = str(paper_cfg['cmap'])
+        cmap = self._resolve_paper_cmap(cmap_name)
+        include_1d = bool(paper_cfg.get('include_1d', True))
+        
+        self.logger.info("📄 绘制论文主图: 1D VS + 三深度 dlnVs")
+        self.logger.info(f"  深度: {depths} km  |  参数: {param_name.upper()}  |  色标: {cmap_name}")
+        
+        model_items = [
+            (key, model) for key, model in self.models.items()
+            if model.has_parameter(param_name)
+        ]
+        if len(model_items) == 0:
+            raise RuntimeError(f"没有任何模型包含参数 {param_name}")
+        
+        n_rows = len(model_items)
+        n_cols = len(depths)
+        
+        slices: List[List[Tuple[np.ndarray, np.ndarray, np.ndarray]]] = []
+        actual_depths: List[float] = []
+        all_dlnv: List[np.ndarray] = []
+        
+        lon_mins: List[float] = []
+        lon_maxs: List[float] = []
+        lat_mins: List[float] = []
+        lat_maxs: List[float] = []
+        
+        for depth in depths:
+            actual_this_col: List[float] = []
+            col_slices: List[Tuple[np.ndarray, np.ndarray, np.ndarray]] = []
+            for _, model in model_items:
+                lon_grid, lat_grid, dlnv = model.get_horizontal_slice_dlnv(param_name, depth)
+                depth_idx = int(np.argmin(np.abs(model._depth - depth)))
+                actual_this_col.append(float(model._depth[depth_idx]))
+                col_slices.append((lon_grid, lat_grid, dlnv))
+                valid = dlnv[np.isfinite(dlnv)]
+                if valid.size > 0:
+                    all_dlnv.append(valid)
+                lon_mins.append(float(lon_grid.min()))
+                lon_maxs.append(float(lon_grid.max()))
+                lat_mins.append(float(lat_grid.min()))
+                lat_maxs.append(float(lat_grid.max()))
+            slices.append(col_slices)
+            actual_depths.append(float(np.median(actual_this_col)))
+        
+        slices_rc: List[List[Tuple[np.ndarray, np.ndarray, np.ndarray]]] = [
+            [slices[c][r] for c in range(n_cols)] for r in range(n_rows)
+        ]
+        
+        extent = [max(lon_mins), min(lon_maxs), max(lat_mins), min(lat_maxs)]
+        
+        configured_limit = paper_cfg.get('dlnv_limit')
+        if configured_limit is not None:
+            dlnv_lim = float(configured_limit)
+        elif len(all_dlnv) > 0:
+            p95 = float(np.percentile(np.abs(np.concatenate(all_dlnv)), 95))
+            dlnv_lim = max(3.0, float(np.ceil(p95)))
+        else:
+            dlnv_lim = 5.0
+        vmin, vmax = -dlnv_lim, dlnv_lim
+        self.logger.info(
+            f"  共用色标范围: ±{dlnv_lim:.1f}%  |  地图范围: "
+            f"{extent[0]:.1f}–{extent[1]:.1f}°E, {extent[2]:.1f}–{extent[3]:.1f}°N"
+        )
+        
+        fig = plt.figure(figsize=tuple(paper_cfg['figsize']))
+        
+        if include_1d:
+            outer = GridSpec(
+                1, 2,
+                figure=fig,
+                width_ratios=[1.15, 3.20],
+                wspace=0.18,
+                left=0.055,
+                right=0.94,
+                top=0.96,
+                bottom=0.08,
+            )
+            ax_1d = fig.add_subplot(outer[0, 0])
+            inner = outer[0, 1].subgridspec(
+                n_rows, n_cols + 1,
+                width_ratios=[1] * n_cols + [0.055],
+                wspace=0.08,
+                hspace=0.10,
+            )
+            map_gs = inner
+        else:
+            ax_1d = None
+            map_gs = GridSpec(
+                n_rows, n_cols + 1,
+                figure=fig,
+                width_ratios=[1] * n_cols + [0.045],
+                wspace=0.06,
+                hspace=0.08,
+                left=0.07,
+                right=0.93,
+                top=0.96,
+                bottom=0.08,
+            )
+        
+        letters = 'abcdefghijklmnopqrstuvwxyz'
+        letter_idx = 0
+        
+        if ax_1d is not None:
+            self._draw_paper_1d_profile(
+                ax_1d, model_items, actual_depths
+            )
+            if paper_cfg.get('panel_letters', True):
+                ax_1d.text(
+                    0.04, 0.98, f'({letters[letter_idx]})',
+                    transform=ax_1d.transAxes,
+                    va='top', ha='left',
+                    fontsize=9, fontweight='bold',
+                )
+            letter_idx += 1
+        
+        last_im = None
+        for row, (_model_key, model) in enumerate(model_items):
+            for col in range(n_cols):
+                lon_grid, lat_grid, dlnv = slices_rc[row][col]
+                ax: GeoAxes = fig.add_subplot(
+                    map_gs[row, col], projection=ccrs.PlateCarree()
+                )  # type: ignore[assignment]
+                
+                ax.set_extent(extent, crs=ccrs.PlateCarree())
+                
+                if self.config.slice_params['add_coastlines']:
+                    ax.add_feature(
+                        cfeature.COASTLINE,
+                        linewidth=0.4,
+                        edgecolor='k',
+                        zorder=5,
+                    )
+                    ax.add_feature(
+                        cfeature.BORDERS,
+                        linewidth=0.25,
+                        linestyle=':',
+                        edgecolor='0.4',
+                        zorder=4,
+                    )
+                
+                last_im = ax.pcolormesh(
+                    lon_grid, lat_grid, dlnv,
+                    cmap=cmap,
+                    vmin=vmin,
+                    vmax=vmax,
+                    shading='nearest',
+                    transform=ccrs.PlateCarree(),
+                    rasterized=True,
+                    zorder=1,
+                )
+                
+                gl = ax.gridlines(
+                    draw_labels=True,
+                    linewidth=0.35,
+                    color='0.5',
+                    alpha=0.35,
+                    linestyle='--',
+                    x_inline=False,
+                    y_inline=False,
+                )
+                self._configure_map_gridliner(
+                    gl,
+                    left_labels=(col == 0),
+                    bottom_labels=(row == n_rows - 1),
+                )
+                gl.xlabel_style = {'size': 7}
+                gl.ylabel_style = {'size': 7}
+                
+                letter = letters[letter_idx]
+                letter_idx += 1
+                if paper_cfg.get('panel_letters', True):
+                    label = f'({letter})'
+                    if col == 0:
+                        label = f'({letter}) {model.metadata.full_name}'
+                    ax.text(
+                        0.03, 0.96, label,
+                        transform=ax.transAxes,
+                        va='top', ha='left',
+                        fontsize=8, fontweight='bold',
+                        bbox=dict(
+                            boxstyle='square,pad=0.12',
+                            facecolor='white',
+                            edgecolor='none',
+                            alpha=0.85,
+                        ),
+                        zorder=10,
+                    )
+                
+                if row == 0:
+                    ax.set_title(
+                        f'{actual_depths[col]:.0f} km',
+                        fontsize=11,
+                        pad=4,
+                        fontweight='bold',
+                    )
+        
+        cax = fig.add_subplot(map_gs[:, -1])
+        if last_im is not None:
+            cbar = fig.colorbar(last_im, cax=cax)
+            cbar.set_label(r'dlnV (%)', fontsize=10)
+            cbar.ax.tick_params(labelsize=8)
+            cbar.set_ticks(np.arange(-dlnv_lim, dlnv_lim + 1e-6, 2.0))
+        
+        self.logger.info("  ✅ 论文主图绘制完成")
+        
+        prefix = self.config.output_params['figure_prefix']
+        out_stem = self.output_dir / f"{prefix}paper_dlnv_maps"
+        dpi = int(self.config.output_params['save_dpi'])
+        for fmt in paper_cfg.get('save_formats', ['jpg', 'pdf']):
+            fp = out_stem.with_suffix(f'.{fmt}')
+            save_kw: Dict[str, Any] = {
+                'dpi': dpi,
+                'bbox_inches': 'tight',
+                'facecolor': 'white',
+            }
+            if fmt in ('jpg', 'jpeg'):
+                save_kw['format'] = 'jpeg'
+                save_kw['pil_kwargs'] = {'quality': 95}
+            fig.savefig(fp, **save_kw)
+            self.logger.info(f"  ✅ {fp.name}")
+        
+        return fig
+    
+    def _draw_paper_1d_profile(
+        self,
+        ax: Any,
+        model_items: List[Tuple[str, Any]],
+        slice_depths: List[float],
+    ) -> None:
+        """
+        在论文主图左栏绘制三模型全深度 1D VS 平均剖面。
+        
+        切片深度处画实线，与右侧地图对齐；410 / 660 km
+        间断面用虚线。阴影为空间标准差（±N σ），图例放在左下角。
+        """
+        paper_cfg = self.config.paper_figure
+        depth_range = self.config.profile_params['depth_range']
+        sigma = float(paper_cfg.get('1d_sigma', 1.0))
+        xlim = tuple(paper_cfg.get('1d_xlim', (3.0, 7.0)))
+        params = tuple(paper_cfg.get('1d_params', ('vs',)))
+        
+        for _model_key, model in model_items:
+            profile = model.calculate_1d_profile(
+                depth_range=depth_range,
+                spatial_averaging=True,
+            )
+            if 'depth' not in profile or len(profile['depth']) == 0:
+                continue
+            
+            z = profile['depth']
+            color = model.metadata.color
+            model_labeled = False
+            
+            for target_param in params:
+                if target_param not in profile:
+                    continue
+                values = profile[target_param]
+                valid = ~np.isnan(values['mean'])
+                if valid.sum() == 0:
+                    continue
+                
+                ax.plot(
+                    values['mean'][valid], z[valid],
+                    color=color,
+                    linestyle='-',
+                    linewidth=1.6,
+                    label=model.metadata.full_name if not model_labeled else None,
+                    zorder=3,
+                )
+                model_labeled = True
+                
+                std_mask = valid & ~np.isnan(values['std'])
+                if std_mask.sum() > 0:
+                    ax.fill_betweenx(
+                        z[std_mask],
+                        values['mean'][std_mask] - sigma * values['std'][std_mask],
+                        values['mean'][std_mask] + sigma * values['std'][std_mask],
+                        color=color,
+                        alpha=0.15,
+                        linewidth=0,
+                        zorder=2,
+                    )
+        
+        for depth in slice_depths:
+            ax.axhline(y=depth, color='0.25', linestyle='-', linewidth=0.9, alpha=0.7, zorder=1)
+            ax.text(
+                xlim[1] - 0.08, depth,
+                f'{depth:.0f} km',
+                va='bottom', ha='right',
+                fontsize=7, color='0.25',
+                clip_on=True,
+                zorder=5,
+            )
+        
+        for disc in (410.0, 660.0):
+            if depth_range[0] < disc <= depth_range[1]:
+                ax.axhline(y=disc, color='0.55', linestyle='--', linewidth=0.8, alpha=0.7, zorder=1)
+        
+        ax.set_ylim(depth_range[1], depth_range[0])
+        ax.set_xlim(xlim[0], xlim[1])
+        ax.set_xlabel(r'$V_S$ (km/s)', fontsize=9)
+        ax.set_ylabel('Depth (km)', fontsize=9)
+        ax.tick_params(axis='both', labelsize=8)
+        ax.set_title('1-D average', fontsize=11, pad=4, fontweight='bold')
+        ax.grid(True, linestyle=':', alpha=0.35)
+        
+        handles, labels = ax.get_legend_handles_labels()
+        sigma_label = rf'$\pm {sigma:g}\sigma$'
+        handles.append(Patch(facecolor='0.55', alpha=0.35, edgecolor='none', label=sigma_label))
+        labels.append(sigma_label)
+        ax.legend(
+            handles,
+            labels,
+            loc='lower left',
+            fontsize=7,
+            frameon=True,
+            framealpha=0.9,
+            borderpad=0.3,
+            labelspacing=0.25,
+            handlelength=1.4,
+        )
+    
+    def _resolve_paper_cmap(self, name: str) -> Any:
+        """
+        解析论文主图色标。
+        
+        GMT seis（Suzan van der Lee）：红(低速)→橙→黄→绿→青→蓝(高速)。
+        节点取自 GMT share/cpt/gmt/seis.cpt，与 5_8 的 PyGMT seis 一致。
+        """
+        key = name.lower().strip()
+        if key in ('seis', 'gmt_seis'):
+            nodes = [
+                (0.0000, (170 / 255, 0.0, 0.0)),
+                (0.1111, (1.0, 0.0, 0.0)),
+                (0.2222, (1.0, 85 / 255, 0.0)),
+                (0.3333, (1.0, 170 / 255, 0.0)),
+                (0.4444, (1.0, 1.0, 0.0)),
+                (0.5556, (1.0, 1.0, 0.0)),
+                (0.6667, (90 / 255, 1.0, 30 / 255)),
+                (0.7778, (0.0, 240 / 255, 110 / 255)),
+                (0.8889, (0.0, 80 / 255, 1.0)),
+                (1.0000, (0.0, 0.0, 205 / 255)),
+            ]
+            return LinearSegmentedColormap.from_list('gmt_seis', nodes, N=256)
+        return name
+    
+    def _configure_map_gridliner(
+        self,
+        gl: Any,
+        left_labels: bool,
+        bottom_labels: bool,
+    ) -> None:
+        """兼容新旧 Cartopy Gridliner 的刻度标签开关。"""
+        gl.top_labels = False
+        gl.right_labels = False
+        if hasattr(gl, 'left_labels'):
+            gl.left_labels = left_labels
+            gl.bottom_labels = bottom_labels
+        else:
+            gl.ylabels_left = left_labels
+            gl.xlabels_bottom = bottom_labels
+            gl.xlabels_top = False
+            gl.ylabels_right = False
     
     # ==================== 垂直剖面对比（保持原有实现）====================
     

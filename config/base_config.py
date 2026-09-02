@@ -25,10 +25,10 @@ class BaseConfig:
         
         # 共用的研究区域定义
         self.region = {
-            'lat_min': -15.0,
+            'lat_min': -10.0,
             'lat_max': 60.0, 
             'lon_min': 60.0,
-            'lon_max': 170.0,
+            'lon_max': 150.0,
             'depth_min': 0.0,  # km
             'depth_max': 1000.0,  # km
             'name': 'EastAsia'
@@ -57,13 +57,16 @@ class BaseConfig:
             'figures': self.project_root / 'figures',
             'logs': self.project_root / 'logs',
             'temp': self.project_root / 'temp',
-            'config': self.project_root / 'config'
+            'config': self.project_root / 'config',
+            'specfem3d_globe': self.project_root / 'specfem3d_globe',  # SPECFEM3D 安装目录（需手动 git clone）
+            'simulations': self.project_root / 'output' / 'simulations'  # 正演模拟输出
         }
     
     def _ensure_directories(self):
         """确保所有目录存在"""
+        skip_dirs = {'project_root', 'specfem3d_globe'}  # specfem3d_globe 需手动 git clone
         for dir_name, dir_path in self.dirs.items():
-            if dir_name != 'project_root':
+            if dir_name not in skip_dirs:
                 dir_path.mkdir(parents=True, exist_ok=True)
     
     def load_from_file(self, config_file: Path):

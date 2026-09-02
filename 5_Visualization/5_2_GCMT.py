@@ -75,6 +75,8 @@ focal_map = gcmt_plotter.plot_focal_mechanisms_map(
 
 配置说明:
 ----------
+- 研究区经纬范围与球图 General Perspective 透视中心：统一来自 `config.base_config.BaseConfig.region`；
+  修改 `base_config.py` 后，本模块地图范围、事件地理筛选与测试库球图蓝框会自动一致，无需在本文件写死边界。
 通过 GCMTPlottingConfig 类配置可视化参数:
 - pygmt: PyGMT地图框架配置
 - projection: 地图投影配置
@@ -100,7 +102,7 @@ focal_map = gcmt_plotter.plot_focal_mechanisms_map(
 - 数据去重: 确保数据质量，避免重复事件影响统计分析结果
 
 作者: EASTASIA-FWI Team
-日期: 2025-02-01
+日期: 2026-04-01
 版本: v1.0
 """
 import pygmt
@@ -1149,6 +1151,550 @@ class GCMTPlotter:
             traceback.print_exc()
             return ""
 
+    def plot_test_database_map(self, save_file: Optional[str] = None) -> str:
+        """
+        绘制标准测试数据库的震源机制解+台站分布图
+
+        从 test_database 目录加载 CMT3D 选取的事件和永久台站，
+        使用简洁的陆地/海洋纯色底图，绘制震源球（按深度着色）和台站分布。
+
+        Args:
+            save_file: 输出文件名，默认自动生成
+
+        Returns:
+            输出文件路径
+        """
+        if save_file is None:
+            save_file = self._generate_filename("test_database_map")
+
+        self.logger.info("🎯 开始绘制标准测试数据库分布图...")
+
+        try:
+            # ---- 加载数据 ----
+            test_db_dir = self.base_config.dirs['data'] / 'events' / 'test_database'
+            events_csv = test_db_dir / 'test_database_events.csv'
+            stations_file = self.base_config.dirs['stations'] / 'EastAsia_permanent_stations_filtered.csv'
+
+            if not events_csv.exists():
+                self.logger.error(f"测试数据库事件文件不存在: {events_csv}")
+                self.logger.info("请先运行 1_7_Build_test_database.py 构建测试数据库")
+                return ""
+
+            events_df = pd.read_csv(events_csv)
+            self.logger.info(f"📊 加载 {len(events_df)} 个测试事件")
+
+            stations_df = None
+            if stations_file.exists():
+                stations_df = pd.read_csv(stations_file)
+                self.logger.info(
+                    f"📡 永久台站: {len(stations_df)} 个 ← {stations_file}"
+                )
+
+            # ---- 深度色标 ----
+            depth_cpt = self.output_dir / '_tmp_test_db_depth.cpt'
+            pygmt.makecpt(
+                cmap="seis",
+                series="0/700",
+                output=str(depth_cpt),
+            )
+
+            fig = pygmt.Figure()
+
+            # ---- 简洁底图：纯色陆地+海洋 ----
+            fig.coast(
+                region=self.region,
+                projection=self.projection,
+                frame=[self.config.projection['frame_interval'], "WSen"],
+                land="floralwhite",
+                water="aliceblue",
+                borders="1/0.3p,gray60",
+                shorelines="1/0.3p,gray40",
+                resolution="full",
+            )
+
+            # 地质构造要素（板块边界、俯冲带等）
+            self.add_geological_features(fig)
+
+            # ---- 绘制永久台站 ----
+            if stations_df is not None and len(stations_df) > 0:
+                fig.plot(
+                    x=stations_df['Longitude'].values,
+                    y=stations_df['Latitude'].values,
+                    style="i0.12c",
+                    fill="dodgerblue",
+                    pen="0.15p,gray30",
+                    transparency=30,
+                )
+
+            # ---- 绘制震源球（按深度着色）----
+            mt_cols = ['mrr', 'mtt', 'mpp', 'mrt', 'mrp', 'mtp']
+            has_mt = all(col in events_df.columns for col in mt_cols)
+
+            success_count = 0
+            fallback_count = 0
+
+            for _, ev in events_df.iterrows():
+                try:
+                    lon = float(ev['longitude'])
+                    lat = float(ev['latitude'])
+                    dep = float(ev['depth'])
+                    mag = float(ev['magnitude_mw'])
+
+                    # 震源球大小随震级缩放
+                    scale = 0.15 + (mag - 5.0) * 0.06
+                    scale = max(0.12, min(0.45, scale))
+
+                    if has_mt:
+                        mrr = float(ev['mrr'])
+                        mtt = float(ev['mtt'])
+                        mpp = float(ev['mpp'])
+                        mrt = float(ev['mrt'])
+                        mrp = float(ev['mrp'])
+                        mtp = float(ev['mtp'])
+
+                        # 归一化矩张量分量，避免 GMT 数值溢出
+                        abs_vals = [abs(v) for v in [mrr, mtt, mpp, mrt, mrp, mtp]]
+                        max_val = max(abs_vals) if max(abs_vals) > 0 else 1.0
+                        exp = int(np.floor(np.log10(max_val)))
+                        sf = 10.0 ** exp
+
+                        # PyGMT mt convention: mff=mpp, mrf=mrp, mtf=mtp
+                        fig.meca(
+                            spec={
+                                "mrr": mrr / sf, "mtt": mtt / sf, "mff": mpp / sf,
+                                "mrt": mrt / sf, "mrf": mrp / sf, "mtf": mtp / sf,
+                                "exponent": exp,
+                            },
+                            convention="mt",
+                            scale=f"{scale:.2f}c",
+                            longitude=lon,
+                            latitude=lat,
+                            depth=dep,
+                            cmap=str(depth_cpt),
+                            pen="0.2p,gray20",
+                        )
+                        success_count += 1
+                    else:
+                        fig.plot(
+                            x=lon, y=lat,
+                            style=f"c{scale:.2f}c",
+                            fill="orange",
+                            pen="0.3p,black",
+                        )
+                        fallback_count += 1
+
+                except Exception as e:
+                    self.logger.debug(f"事件 {ev.get('event_name', '?')} 绘制失败: {e}")
+                    fallback_count += 1
+
+            self.logger.info(
+                f"✅ 震源球: {success_count} 个成功, {fallback_count} 个 fallback"
+            )
+
+            # ---- 深度色标条（地图底部） ----
+            fig.colorbar(
+                cmap=str(depth_cpt),
+                position="JBC+o0c/-1.2c+w10c/0.35c+h",
+                frame=["xa100f50+lDepth (km)", "y"],
+            )
+
+            # ---- 手动图例 ----
+            n_sta = len(stations_df) if stations_df is not None else 0
+            n_shallow = int((events_df['depth_category'] == 'shallow').sum())
+            n_inter = int((events_df['depth_category'] == 'intermediate').sum())
+            n_deep = int((events_df['depth_category'] == 'deep').sum())
+
+            legend_lines = [
+                "H 10p,Helvetica-Bold Legend",
+                "D 0.1c 1p",
+                f"S 0.15c i 0.18c dodgerblue 0.15p,gray30 0.4c Permanent stations ({n_sta})",
+                "D 0.05c 0.5p",
+                "H 9p,Helvetica Focal mechanisms (CMT3D)",
+                f"S 0.15c c 0.2c red 0.2p,black 0.4c Shallow 0-70 km ({n_shallow})",
+                f"S 0.15c c 0.2c darkorange 0.2p,black 0.4c Intermediate 70-300 km ({n_inter})",
+                f"S 0.15c c 0.2c purple 0.2p,black 0.4c Deep 300-700 km ({n_deep})",
+            ]
+
+            legend_file = self.output_dir / '_tmp_test_db_legend.txt'
+            legend_file.write_text('\n'.join(legend_lines) + '\n', encoding='utf-8')
+
+            fig.legend(
+                spec=str(legend_file),
+                position="JTL+jTL+o0.3c/-0.8c",
+                box=True,
+            )
+
+            legend_file.unlink(missing_ok=True)
+            depth_cpt.unlink(missing_ok=True)
+
+            # ---- 标题 ----
+            fig.text(
+                position="TC",
+                offset="0/0.6c",
+                text=f"CMT3D Test Database: {len(events_df)} Events + {n_sta} Stations",
+                font="12p,Helvetica-Bold,black",
+            )
+
+            # ---- 右侧统计面板 ----
+            layout = self.config.layout
+            fig.shift_origin(xshift=layout['main_shift_x'])
+
+            # 深度直方图
+            if 'depth' in events_df.columns and events_df['depth'].notna().any():
+                depth_data = events_df['depth'].dropna()
+                fig.histogram(
+                    data=depth_data,
+                    projection=f"X{layout['histogram_width']}/{layout['histogram_height']}",
+                    region=[0, 700, 0, max(20, int(len(depth_data) * 0.5))],
+                    series="0/700/50",
+                    frame=["WSrt", "xaf+lDepth (km)", "yaf+lCounts"],
+                    pen="0.5p,black",
+                    fill="lightsalmon",
+                    transparency=30,
+                )
+
+            # 震级直方图
+            fig.shift_origin(yshift=layout['histogram_shift_y'])
+
+            if 'magnitude_mw' in events_df.columns:
+                mag_data = events_df['magnitude_mw'].dropna()
+                mag_lo, mag_hi = mag_data.min() - 0.1, mag_data.max() + 0.1
+                fig.histogram(
+                    data=mag_data,
+                    projection=f"X{layout['histogram_width']}/{layout['histogram_height']}",
+                    region=[mag_lo, mag_hi, 0, max(20, int(len(mag_data) * 0.5))],
+                    series=f"{mag_lo:.1f}/{mag_hi:.1f}/0.2",
+                    frame=["WSrt", "xaf+lMagnitude (Mw)", "yaf+lCounts"],
+                    pen="0.5p,black",
+                    fill="lightskyblue",
+                    transparency=30,
+                )
+
+            # 年份直方图
+            fig.shift_origin(yshift=layout['histogram_shift_y'])
+
+            if 'pde_year' in events_df.columns:
+                year_data = events_df['pde_year'].dropna()
+                yr_lo, yr_hi = int(year_data.min()), int(year_data.max())
+                fig.histogram(
+                    data=year_data,
+                    projection=f"X{layout['histogram_width']}/{layout['histogram_height']}",
+                    region=[yr_lo, yr_hi, 0, max(15, int(len(year_data) * 0.5))],
+                    series=f"{yr_lo}/{yr_hi}/1",
+                    frame=["WSrt", "xaf+lYear", "yaf+lCounts"],
+                    pen="0.5p,black",
+                    fill="palegreen",
+                    transparency=30,
+                )
+
+            # ---- 保存 ----
+            output_config = self.config.output
+            output_path = self.output_dir / save_file
+
+            if output_config['save_jpg']:
+                fig.savefig(str(output_path), dpi=output_config['dpi_jpg'], crop=output_config['crop'])
+                self.logger.info(f"✅ jpg 图像保存至: {output_path}")
+
+            if output_config['save_pdf']:
+                pdf_path = output_path.with_suffix('.pdf')
+                fig.savefig(str(pdf_path), dpi=output_config['dpi_pdf'], crop=output_config['crop'])
+                self.logger.info(f"✅ PDF 版本保存至: {pdf_path}")
+
+            return str(output_path)
+
+        except Exception as e:
+            self.logger.error(f"测试数据库分布图绘制失败: {e}")
+            import traceback
+            traceback.print_exc()
+            return ""
+
+    def plot_test_database_globe(
+        self,
+        save_file: Optional[str] = None,
+        source: str = 'test_database',
+    ) -> str:
+        """
+        绘制标准测试数据库的地球半球投影图（双面板）
+
+        Panel A: 震源机制解（beachball）或圆形标记按深度着色
+        Panel B: 永久台站分布按台网着色
+
+        使用 General Perspective 透视投影，带蓝色研究区域边界多边形（base_config.region）。
+
+        Args:
+            save_file: 输出文件名，默认自动生成
+            source: 数据来源
+                - 'test_database': 使用 test_database_events.csv（含矩张量，画震源球）
+                - 'excel': 使用 1-s2.0-S0012821X24001973-mmc2.xlsx（仅坐标，画圆形）
+
+        Returns:
+            输出文件路径
+        """
+        if save_file is None:
+            suffix = "globe" if source == 'test_database' else "globe_ref141"
+            save_file = self._generate_filename(f"test_database_{suffix}")
+
+        self.logger.info(f"🌍 开始绘制地球半球投影图 (source={source})...")
+
+        try:
+            # ---- 加载数据 ----
+            test_db_dir = self.base_config.dirs['data'] / 'events' / 'test_database'
+            stations_file = (
+                self.base_config.dirs['stations'] / 'EastAsia_permanent_stations_filtered.csv'
+            )
+
+            if source == 'excel':
+                excel_path = test_db_dir / '1-s2.0-S0012821X24001973-mmc2.xlsx'
+                if not excel_path.exists():
+                    self.logger.error(f"Excel 文件不存在: {excel_path}")
+                    return ""
+                raw = pd.read_excel(excel_path, header=None, skiprows=2)
+                events_df = pd.DataFrame({
+                    'event_id': raw.iloc[:, 0],
+                    'longitude': pd.to_numeric(raw.iloc[:, 1], errors='coerce'),
+                    'latitude': pd.to_numeric(raw.iloc[:, 2], errors='coerce'),
+                    'depth': pd.to_numeric(raw.iloc[:, 3], errors='coerce'),
+                })
+                events_df.dropna(subset=['longitude', 'latitude', 'depth'], inplace=True)
+                self.logger.info(f"📊 从 Excel 加载 {len(events_df)} 个事件")
+            else:
+                events_csv = test_db_dir / 'test_database_events.csv'
+                if not events_csv.exists():
+                    self.logger.error(f"测试数据库事件文件不存在: {events_csv}")
+                    return ""
+                events_df = pd.read_csv(events_csv)
+                self.logger.info(f"📊 加载 {len(events_df)} 个测试事件")
+
+            stations_df = None
+            if stations_file.exists():
+                stations_df = pd.read_csv(stations_file)
+                # 仅保留 base_config.region (蓝框) 内的台站
+                _region_full = self.base_config.region
+                _mask = (
+                    (stations_df['Longitude'] >= _region_full['lon_min']) &
+                    (stations_df['Longitude'] <= _region_full['lon_max']) &
+                    (stations_df['Latitude']  >= _region_full['lat_min']) &
+                    (stations_df['Latitude']  <= _region_full['lat_max'])
+                )
+                n_before = len(stations_df)
+                stations_df = stations_df[_mask].reset_index(drop=True)
+                self.logger.info(
+                    f"📡 永久台站: {len(stations_df)}/{n_before} 个 (蓝框内) ← {stations_file}"
+                )
+
+            # ---- 投影参数 ----
+            # General Perspective 投影：从太空高度俯瞰，带轻微透视效果
+            # 格式: G<lon>/<lat>/<altitude>/<azimuth>/<tilt>/<twist>/<W>/<H>/<width>
+            # altitude: 观测高度（地球半径倍数），越小透视越明显
+            # 透视中心取 base_config.region 经纬包络中心，与蓝框研究区一致
+            region = self.base_config.region
+            center_lon = (region['lon_min'] + region['lon_max']) / 2.0
+            center_lat = (region['lat_min'] + region['lat_max']) / 2.0
+            self.logger.info(
+                f"🌐 地球透视中心: ({center_lon:.2f}°E, {center_lat:.2f}°N) "
+                f"[来自 base_config.region]"
+            )
+            altitude = 2.75
+            globe_width = "12c"
+            projection = (
+                f"G{center_lon}/{center_lat}/{altitude}/"
+                f"0/0/0/0/0/{globe_width}"
+            )
+            globe_region = "g"  # 全球
+
+            # 研究区域边界（闭合多边形）
+            bnd_lon = [
+                region['lon_min'], region['lon_max'],
+                region['lon_max'], region['lon_min'], region['lon_min'],
+            ]
+            bnd_lat = [
+                region['lat_min'], region['lat_min'],
+                region['lat_max'], region['lat_max'], region['lat_min'],
+            ]
+
+            # 三模型 (FWEA23/EARA2024/SinoScope) 共同覆盖区域 (红色虚线框)
+            common_region = {
+                'lon_min': 80.0, 'lon_max': 150.0,
+                'lat_min': 10.0, 'lat_max': 55.0,
+            }
+            common_lon = [
+                common_region['lon_min'], common_region['lon_max'],
+                common_region['lon_max'], common_region['lon_min'], common_region['lon_min'],
+            ]
+            common_lat = [
+                common_region['lat_min'], common_region['lat_min'],
+                common_region['lat_max'], common_region['lat_max'], common_region['lat_min'],
+            ]
+
+            # 深度色标
+            depth_cpt = self.output_dir / '_tmp_globe_depth.cpt'
+            pygmt.makecpt(cmap="seis", series="0/700", output=str(depth_cpt))
+
+            fig = pygmt.Figure()
+
+            # ============================================================
+            # Panel A — 震源机制解
+            # ============================================================
+            fig.coast(
+                region=globe_region,
+                projection=projection,
+                frame="g45",
+                land="gray75",
+                water="white",
+                borders="1/0.2p,gray60",
+                resolution="low",
+            )
+
+            # 研究区域蓝色边界（EASTASIA-FWI / base_config）
+            fig.plot(x=bnd_lon, y=bnd_lat, pen="1.5p,blue", projection=projection)
+            # 三模型共同覆盖区域（红色虚线框）
+            fig.plot(x=common_lon, y=common_lat, pen="1.5p,red,-", projection=projection)
+
+            # 震源标记
+            mt_cols = ['mrr', 'mtt', 'mpp', 'mrt', 'mrp', 'mtp']
+            has_mt = all(col in events_df.columns for col in mt_cols)
+            success = 0
+
+            if has_mt and source != 'excel':
+                for _, ev in events_df.iterrows():
+                    try:
+                        lon = float(ev['longitude'])
+                        lat = float(ev['latitude'])
+                        dep = float(ev['depth'])
+                        mag = float(ev['magnitude_mw'])
+
+                        scale = 0.12 + (mag - 5.0) * 0.05
+                        scale = max(0.10, min(0.40, scale))
+
+                        vals = [float(ev[c]) for c in mt_cols]
+                        max_v = max(abs(v) for v in vals) or 1.0
+                        exp = int(np.floor(np.log10(max_v)))
+                        sf = 10.0 ** exp
+
+                        fig.meca(
+                            spec={
+                                "mrr": vals[0]/sf, "mtt": vals[1]/sf,
+                                "mff": vals[2]/sf, "mrt": vals[3]/sf,
+                                "mrf": vals[4]/sf, "mtf": vals[5]/sf,
+                                "exponent": exp,
+                            },
+                            convention="mt",
+                            scale=f"{scale:.2f}c",
+                            longitude=lon, latitude=lat, depth=dep,
+                            cmap=str(depth_cpt),
+                            pen="0.15p,gray30",
+                        )
+                        success += 1
+                    except Exception:
+                        pass
+                self.logger.info(f"✅ Panel A: {success} 个震源球")
+            else:
+                lons = events_df['longitude'].values.astype(float)
+                lats = events_df['latitude'].values.astype(float)
+                deps = events_df['depth'].values.astype(float)
+                fig.plot(
+                    x=lons, y=lats,
+                    style="c0.18c",
+                    fill=deps,
+                    cmap=str(depth_cpt),
+                    pen="0.3p,black",
+                )
+                success = len(events_df)
+                self.logger.info(f"✅ Panel A: {success} 个事件 (圆形标记)")
+
+            # 面板标注 "A"
+            fig.text(
+                position="TL", offset="0.3c/-0.3c",
+                text="A", font="16p,Helvetica-Bold,black", no_clip=True,
+            )
+
+            # ============================================================
+            # Panel B — 台站分布
+            # ============================================================
+            fig.shift_origin(xshift="13.5c")
+
+            fig.coast(
+                region=globe_region,
+                projection=projection,
+                frame="g45",
+                land="gray75",
+                water="white",
+                borders="1/0.2p,gray60",
+                resolution="low",
+            )
+
+            # 研究区域蓝色边界
+            fig.plot(x=bnd_lon, y=bnd_lat, pen="1.5p,blue", projection=projection)
+            # 三模型共同覆盖区域（红色虚线框）
+            fig.plot(x=common_lon, y=common_lat, pen="1.5p,red,-", projection=projection)
+
+            # 台站按台网着色
+            if stations_df is not None and len(stations_df) > 0:
+                # 为主要台网分配颜色
+                network_colors = {
+                    'IC': 'red',          'IU': 'darkred',
+                    'II': 'orangered',    'G':  'darkorange',
+                    'GE': 'gold',         'AU': 'limegreen',
+                    'MY': 'forestgreen',  'JP': 'dodgerblue',
+                    'MM': 'mediumpurple', 'KZ': 'deeppink',
+                    'TW': 'cyan',         'KR': 'royalblue',
+                    'AD': 'salmon',       'CB': '128/128/0',
+                    'TM': '0/128/128',    'PS': '160/82/45',
+                    'KN': '112/128/144',
+                }
+                default_color = "gray50"
+
+                for _, sta in stations_df.iterrows():
+                    net = str(sta.get('Network', ''))
+                    color = network_colors.get(net, default_color)
+                    try:
+                        fig.plot(
+                            x=float(sta['Longitude']),
+                            y=float(sta['Latitude']),
+                            style="i0.2c",
+                            fill=color,
+                            pen="0.08p,gray30",
+                        )
+                    except Exception:
+                        pass
+
+                self.logger.info(f"✅ Panel B: {len(stations_df)} 个台站")
+
+            # 面板标注 "B"
+            fig.text(
+                position="TL", offset="0.3c/-0.3c",
+                text="B", font="16p,Helvetica-Bold,black", no_clip=True,
+            )
+
+            depth_cpt.unlink(missing_ok=True)
+
+            # ---- 保存 ----
+            output_config = self.config.output
+            output_path = self.output_dir / save_file
+
+            if output_config['save_jpg']:
+                fig.savefig(
+                    str(output_path), dpi=output_config['dpi_jpg'],
+                    crop=output_config['crop'],
+                )
+                self.logger.info(f"✅ jpg 图像保存至: {output_path}")
+
+            if output_config['save_pdf']:
+                pdf_path = output_path.with_suffix('.pdf')
+                fig.savefig(
+                    str(pdf_path), dpi=output_config['dpi_pdf'],
+                    crop=output_config['crop'],
+                )
+                self.logger.info(f"✅ PDF 版本保存至: {pdf_path}")
+
+            return str(output_path)
+
+        except Exception as e:
+            self.logger.error(f"地球半球投影图绘制失败: {e}")
+            import traceback
+            traceback.print_exc()
+            return ""
+
     def plot_all_gcmt_analysis(self, 
                               gcmt_file: Optional[str] = None,
                               # === 可修改的筛选参数 ===
@@ -1237,6 +1783,19 @@ class GCMTPlotter:
             if comprehensive_analysis:
                 results['comprehensive_analysis'] = comprehensive_analysis
             
+            # 3. 测试数据库分布图（如果存在）
+            test_db_csv = self.base_config.dirs['data'] / 'events' / 'test_database' / 'test_database_events.csv'
+            if test_db_csv.exists():
+                self.logger.info("  🗺️ 生成标准测试数据库分布图...")
+                test_db_map = self.plot_test_database_map()
+                if test_db_map:
+                    results['test_database_map'] = test_db_map
+
+                self.logger.info("  🌍 生成标准测试数据库地球半球投影图...")
+                test_globe = self.plot_test_database_globe()
+                if test_globe:
+                    results['test_database_globe'] = test_globe
+            
             self.logger.info("✅ GCMT分析图集生成完成!")
             
         except Exception as e:
@@ -1285,39 +1844,71 @@ def main():
     MIN_MAGNITUDE_FOR_MECA = 5.5  # 震源机制解最小震级阈值
     PERFORM_DEDUPLICATION = True  # 是否执行数据去重（修复2021年后重复问题）
     
+    # === 绘图模式选择 ===
+    # 'all': 全部分析图（含测试数据库图）
+    # 'gcmt': 仅 GCMT 分析图
+    # 'test_database': 仅标准测试数据库分布图
+    PLOT_MODE = 'all'
+    
     try:
-        # 查找GCMT数据文件
-        gcmt_file = find_gcmt_data_file()
-        
-        if not gcmt_file:
-            print("❌ 未找到GCMT数据文件")
-            print("   请先运行 1_2_Process_gcmt_catalogs.py 生成GCMT事件数据")
-            return
-        
-        print(f"📊 找到GCMT数据文件: {Path(gcmt_file).name}")
-        
-        # 创建GCMT绘图器
         gcmt_plotter = GCMTPlotter()
+        results = {}
         
-        print("\n🎨 开始生成GCMT分析图集...")
-        print(f"📋 筛选参数: 震级{MAGNITUDE_RANGE}, 深度{DEPTH_RANGE}km, 时间{TIME_RANGE}")
-        print(f"🔄 数据去重: {'开启' if PERFORM_DEDUPLICATION else '关闭'}")
+        # ---- GCMT 分析图集 ----
+        if PLOT_MODE in ('all', 'gcmt'):
+            gcmt_file = find_gcmt_data_file()
+            
+            if not gcmt_file:
+                print("❌ 未找到GCMT数据文件")
+                print("   请先运行 1_2_Process_gcmt_catalogs.py 生成GCMT事件数据")
+            else:
+                print(f"📊 找到GCMT数据文件: {Path(gcmt_file).name}")
+                print(f"\n🎨 开始生成GCMT分析图集...")
+                print(f"📋 筛选参数: 震级{MAGNITUDE_RANGE}, 深度{DEPTH_RANGE}km, 时间{TIME_RANGE}")
+                print(f"🔄 数据去重: {'开启' if PERFORM_DEDUPLICATION else '关闭'}")
+                
+                gcmt_results = gcmt_plotter.plot_all_gcmt_analysis(
+                    gcmt_file=gcmt_file,
+                    magnitude_range=MAGNITUDE_RANGE,
+                    depth_range=DEPTH_RANGE,
+                    time_range=TIME_RANGE,
+                    geographic_bounds=GEOGRAPHIC_BOUNDS,
+                    use_mb=USE_MB,
+                    use_ms=USE_MS,
+                    min_magnitude_for_meca=MIN_MAGNITUDE_FOR_MECA,
+                    perform_deduplication=PERFORM_DEDUPLICATION
+                )
+                results.update(gcmt_results)
         
-        # 生成完整分析图集
-        results = gcmt_plotter.plot_all_gcmt_analysis(
-            gcmt_file=gcmt_file,
-            magnitude_range=MAGNITUDE_RANGE,
-            depth_range=DEPTH_RANGE,
-            time_range=TIME_RANGE,
-            geographic_bounds=GEOGRAPHIC_BOUNDS,
-            use_mb=USE_MB,
-            use_ms=USE_MS,
-            min_magnitude_for_meca=MIN_MAGNITUDE_FOR_MECA,
-            perform_deduplication=PERFORM_DEDUPLICATION
-        )
+        # ---- 标准测试数据库分布图 ----
+        if PLOT_MODE in ('all', 'test_database'):
+            test_db_csv = (gcmt_plotter.base_config.dirs['data']
+                           / 'events' / 'test_database' / 'test_database_events.csv')
+            if test_db_csv.exists():
+                print("\n🗺️ 生成标准测试数据库分布图...")
+                test_map = gcmt_plotter.plot_test_database_map()
+                if test_map:
+                    results['test_database_map'] = test_map
+
+                print("🌍 生成标准测试数据库地球半球投影图...")
+                test_globe = gcmt_plotter.plot_test_database_globe()
+                if test_globe:
+                    results['test_database_globe'] = test_globe
+            else:
+                print("⚠️  测试数据库不存在，请先运行 1_7_Build_test_database.py")
+
+            # Excel 参考事件 141 个（如果存在）
+            excel_ref = (gcmt_plotter.base_config.dirs['data']
+                         / 'events' / 'test_database'
+                         / '1-s2.0-S0012821X24001973-mmc2.xlsx')
+            if excel_ref.exists():
+                print("🌍 生成参考文献 141 事件地球半球投影图...")
+                ref_globe = gcmt_plotter.plot_test_database_globe(source='excel')
+                if ref_globe:
+                    results['test_database_globe_ref141'] = ref_globe
         
-        # 结果汇总
-        print(f"\n🎉 GCMT分析图集生成完成!")
+        # ---- 结果汇总 ----
+        print(f"\n🎉 分析图集生成完成!")
         print("="*70)
         print(f"📁 所有图片保存在: {gcmt_plotter.output_dir}")
         print(f"\n📊 生成的图表:")

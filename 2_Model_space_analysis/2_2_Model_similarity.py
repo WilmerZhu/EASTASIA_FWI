@@ -1,29 +1,27 @@
 """
 2_2_Model_similarity.py:
-多尺度速度模型相似性分析模块
+速度模型 1D 结构相似性分析模块
 ================================================================
 
 功能描述:
 ----
-基于绝对速度值的多尺度结构相似性量化。核心使用 CW-SSIM 指标衡量速度模型的
-空间结构一致性，结合最近邻采样策略避免空间域插值操作。
+对齐 2_1_Model_compare 的 1D 剖面定义：在共同覆盖区内对原始 Vs / Vp
+做面积加权横向平均，得到 V(z)，再用 Wang et al. (2004) 的 1D SSIM
+比较两条绝对速度剖面。
 
-核心功能:
+主路径:
 ----
-1. ✅ CW-SSIM (Complex Wavelet SSIM): 复小波域多尺度结构相似性
-   - 天然抗平移/缩放畸变 (Wang & Simoncelli, 2005)
-   - 独立归一化（min-max / 稳健百分位），仅比较空间模式
-   - 深度自适应尺度权重，符合地震学分层特征
-   - 降采样到统一分析分辨率，保证跨模型可比性
-   - 局部滑动窗口（均匀/高斯），产生空间分布图
+1. 共同地理范围（所有已加载模型覆盖的交集，与 2_1 standardized 对比一致）
+2. 原始绝对速度横向平均 → 1D 剖面 V(z)，插值到统一深度网格
+3. 深度曲线：1D 局部 SSIM(z)（沿深度的高斯窗口）
+4. 整体相似性：该 1D SSIM 图的均值（Wang 定义，不是二维切片再对深度平均）
+
+本指标描述 1D 背景结构（含 410/660 等间断面形态）的一致性，
+不能直接用于 FWI 初始模型排序。
 
 使用方法:
 ----
 ```python
-from 2_Model_space_analysis.2_2_Model_similarity import (
-    ModelSimilarityConfig, VelocityModelSimilarity
-)
-
 config = ModelSimilarityConfig()
 analyzer = VelocityModelSimilarity(config)
 analyzer.load_models()
@@ -31,42 +29,14 @@ analyzer.compare_all_models()
 analyzer.save_results()
 ```
 
-配置说明:
+参考文献:
 ----
-通过 ModelSimilarityConfig 类配置参数:
-- cwssim: 小波分解层数、稳定常数 K、分析分辨率、深度自适应权重
-- analysis: 目标特征、深度范围、计算开关
-- normalize_method: 'minmax' | 'percentile'（稳健归一化）
-
-输出文件:
-----
-- similarity_summary_{feature}.csv: 模型对 CW-SSIM 摘要
-- depth_cwssim_{pair}.csv: 深度逐层 CW-SSIM
-- 2-2_depth_cwssim.{png,pdf}: CW-SSIM 深度曲线
-- 2-2_cwssim_heatmap.{png,pdf}: N×N CW-SSIM 矩阵
-- 2-2_cwssim_spatial.{png,pdf}: CW-SSIM 空间分布图
-- 2-2_similarity_overview.{png,pdf}: CW-SSIM 综合面板
-
-科学原理:
-----
-- CW-SSIM 基于 Dual-Tree Complex Wavelet Transform (DT-CWT)，
-  通过分析复小波系数的相位一致性衡量结构相似性。
-  核心公式: CW-SSIM = (2|Σc_x c_y*| + K) / (Σ|c_x|² + Σ|c_y|² + K)
-- Wang & Simoncelli (2005) ICASSP: 平移不变性、复小波域相位比较
-- Sampat et al. (2009) IEEE TIP: 完整多尺度、方向子带 CW-SSIM
-- Huang et al. (2024) Earthquake Science 37(6): 514-528:
-  中国大陆岩石圈速度模型结构相似性分析。DOI: 10.1016/j.eqs.2024.05.004
-
-空间分布计算方式 (Huang 论文方法):
-----
-采用 Huang et al. (2024) 的「空间域滑动窗口」：
-  - 每个网格点取 local_win_deg°×local_win_deg° 物理 patch，单独计算该 patch 的 CW-SSIM
-  - 物理尺度明确（如 6°≈600 km），参数由 config.cwssim.local_win_deg 控制
-  - 计算较慢（约 10–30 分钟/深度层），带进度条
+- Wang, Z. et al. (2004) IEEE TIP 13(4): 600-612. SSIM
+- 1D 剖面定义对齐 2_1_Model_compare.py
 
 作者: EASTASIA-FWI Team
-日期: 2026-03
-版本: v14.0
+日期: 2026-09
+版本: v18.0 (1D SSIM)
 """
 
 import sys
@@ -82,7 +52,7 @@ import xarray as xr
 import matplotlib.pyplot as plt
 import seaborn as sns
 from scipy.interpolate import RegularGridInterpolator
-from scipy.ndimage import uniform_filter, gaussian_filter
+from scipy.ndimage import uniform_filter, gaussian_filter, gaussian_filter1d
 from tqdm import tqdm
 
 try:
@@ -108,7 +78,7 @@ warnings.filterwarnings('ignore')
 # ==================== 配置类 ====================
 
 class ModelSimilarityConfig:
-    """模型相似性分析配置类 (v13.0 — CW-SSIM)"""
+    """模型相似性分析配置类 (v18.0 — 1D SSIM 主路径)"""
 
     def __init__(self):
 
@@ -139,36 +109,75 @@ class ModelSimilarityConfig:
             'target_features': ['vs', 'vp'],
             'primary_feature': 'vs',
             'compute_depth_wise': True,
-            'compute_cwssim_spatial': True,
-            # 地壳: 5–150 km 参考 Huang；地幔: 200–1000 km 覆盖 410/660 等关键界面
-            'cwssim_spatial_depths': [5, 20, 60, 100, 150, 200, 300, 410, 660, 800, 900, 1000],
+            # 空间 CW-SSIM 图默认关闭；当前产品只需要整体 + 深度曲线
+            'compute_cwssim': False,
+            'compute_cwssim_spatial': False,
+            'cwssim_spatial_depths': [20, 60, 100, 160, 200, 300, 400, 660, 800, 900, 1000],
+            'depth_grid_step_km': 20.0,
+            'depth_range_km': (0.0, 1000.0),
         }
 
-        # ============ CW-SSIM 参数（东亚区域优化，非盲目对齐 Huang 2024）============
+        # ============ 1D SSIM 参数（原始 Vs/Vp 剖面，对齐 2_1）============
+        self.ssim = {
+            'mode': '1d_profile',
+            # 沿深度的高斯窗口（km）。20 km 采样下 200 km → 11 点，对应 Wang 默认
+            'win_km': 200.0,
+            'win_size': 11,
+            'gaussian_sigma_per_pixel': 1.5 / 11.0,
+            'K1': 0.01,
+            'K2': 0.03,
+            # 直接比较原始绝对速度 1D 剖面
+            'perturbation': 'none',
+            'use_area_weights': True,
+        }
+
+        # ============ CW-SSIM 参数（可选对照，默认不计算）============
         self.cwssim = {
+            # 分辨率策略: 'pair_coarsest' — 按模型对取最粗
+            #   SinoScope vs * → 1.0°;  EARA vs FWEA → 0.25°
+            'resolution_mode': 'pair_coarsest',
             'nlevels': 4,
-            # K: 稳定常数。Sampat 2009 用 0.03；1e-6 对高幅系数更稳健，可调
             'K': 1e-6,
-            # 空间滑窗（Huang 方法）：每个网格点取 local_win_deg°×local_win_deg° patch 计算 CW-SSIM
-            # Huang 中国大陆用 6°；东亚区域 6° 仍合理，可设 local_win_deg_range=(4,12) 做 grid-search
+            # Huang: 6°×6° 空间滑窗
             'local_win_deg': 6.0,
-            'local_win_size': None,  # 若 None 则从 local_win_deg 推导
-            'local_win_deg_range': None,  # 若设 (min, max) 可做 grid-search 找最优窗口
-            # 分析分辨率：按模型对取最粗（pair_analysis_resolution_deg），公平比较
-            'analysis_resolution_deg': 0.25,  # 仅作 fallback；实际使用 coverage 中的 pair 分辨率
+            'local_win_size': None,
             'level_weights': [0.05, 0.15, 0.35, 0.45],
-            # 深度自适应尺度权重: (depth_max_km, weights) 按深度区间选用
-            # 浅层偏细尺度、深层偏粗尺度，符合地震学分层特征
             'depth_adaptive_weights': {
-                100: [0.15, 0.25, 0.35, 0.25],   # 0-100 km 地壳/LAB
-                410: [0.08, 0.18, 0.37, 0.37],  # 100-410 km 上地幔
-                660: [0.05, 0.15, 0.35, 0.45],   # 410-660 km 过渡带
-                1000: [0.03, 0.12, 0.35, 0.50], # 660-1000 km 下地幔顶部
+                100: [0.15, 0.25, 0.35, 0.25],
+                410: [0.08, 0.18, 0.37, 0.37],
+                660: [0.05, 0.15, 0.35, 0.45],
+                1000: [0.03, 0.12, 0.35, 0.50],
             },
             'use_depth_adaptive_weights': True,
-            'use_gaussian_window': False,  # 局部 CW-SSIM 用高斯窗口（更平滑）
-            'normalize_method': 'minmax',  # 'minmax' | 'percentile'
-            'percentile_range': (2.0, 98.0),   # 稳健归一化百分位
+            'use_gaussian_window': False,
+            # Huang 原做法
+            'normalize_method': 'minmax',
+            'percentile_range': (2.0, 98.0),
+            # Huang 空间滑窗主路径; 'local_filter' 仅作快速备选
+            'spatial_method': 'huang_patch',
+        }
+
+        # ============ 掩膜与采样 ============
+        self.masking = {
+            # 仅当前模型对有效交集（Huang）
+            'use_all_model_common_mask': False,
+            'fill_method': 'nearest',  # 避免 nanmean 假高分
+            'boundary_buffer_px': 0,
+            'downsample_method': 'block_mean',
+        }
+
+        # ============ 零假设基线（附录，默认关）============
+        self.null_test = {
+            'enabled': False,
+            'n_realizations': 20,
+            'random_seed': 42,
+        }
+
+        # ============ 伴随指标（附录，默认关）============
+        self.companion = {
+            'compute_signed_correlation': False,
+            'compute_sign_agreement': False,
+            'sign_threshold_percentile': 50.0,
         }
 
         # ============ 可视化配置 ============
@@ -179,6 +188,8 @@ class ModelSimilarityConfig:
             'figsize_cwssim_spatial': (16, 10),
             'figsize_overview': (20, 16),
             'heatmap': {
+                'ssim_vmin': 0.0,
+                'ssim_vmax': 1.0,
                 'cwssim_vmin': 0.0,
                 'cwssim_vmax': 1.0,
                 'cmap': 'RdYlGn',
@@ -189,6 +200,7 @@ class ModelSimilarityConfig:
                 'cell_linewidth': 2,
                 'cell_linecolor': 'white',
             },
+            'cmap_ssim': 'RdYlGn',
             'cmap_cwssim': 'RdYlGn',
             'discontinuities': [
                 ('Moho', 40),
@@ -203,7 +215,8 @@ class ModelSimilarityConfig:
 
         # ============ 输出参数 ============
         self.output = {
-            'save_formats': ['png'],
+            # 项目规范: 同时保存 jpg + pdf，均 300 dpi
+            'save_formats': ['jpg'],
             'save_dpi': 300,
             'figure_prefix': '2-2_',
         }
@@ -298,11 +311,25 @@ class VelocityModelNetCDF:
         return {'lon': lon_res, 'lat': lat_res}
 
     def close(self):
+        """显式关闭 NetCDF 文件句柄"""
         if self.ds is not None:
-            self.ds.close()
+            try:
+                self.ds.close()
+            except Exception:
+                # 解释器退出期 netCDF4 C 扩展可能已被回收，此时忽略
+                pass
+            finally:
+                self.ds = None
 
-    def __del__(self):
+    def __enter__(self) -> 'VelocityModelNetCDF':
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         self.close()
+
+    # 注意: 刻意不实现 __del__。在解释器关闭阶段调用 xr.Dataset.close()
+    # 会触及已被回收的 netCDF4 C 扩展，实测导致 TypeError 乃至 SIGSEGV(139)，
+    # 并因 stdout 缓冲未刷新而丢失全部日志。改由 close()/上下文管理器显式释放。
 
 
 # ==================== 工具函数 ====================
@@ -349,6 +376,476 @@ def nearest_neighbor_sample(
     tlon, tlat = np.meshgrid(target_lons, target_lats, indexing='ij')
     points = np.column_stack([tlon.ravel(), tlat.ravel()])
     return interp(points).reshape(len(target_lons), len(target_lats))
+
+
+def block_mean_sample(
+    model_lon: np.ndarray, model_lat: np.ndarray,
+    data_2d: np.ndarray,
+    target_lons: np.ndarray, target_lats: np.ndarray
+) -> np.ndarray:
+    """
+    面积加权块平均重采样（抗混叠），用于将细网格模型降采样到粗分析网格。
+
+    最近邻抽样会把短波长内容折叠成虚假长波长（混叠），污染小波粗尺度层级。
+    本函数对落入每个目标格元的所有源网格点做 cos(lat) 加权平均。
+    若某目标格元内无源网格点（源比目标粗），退化为最近邻取值。
+
+    Args:
+        model_lon, model_lat: 模型原生坐标（升序）
+        data_2d: 形状 (n_lon, n_lat)，可含 NaN
+        target_lons, target_lats: 目标坐标（升序，等间距）
+
+    Returns:
+        形状 (n_target_lon, n_target_lat) 的数组；全 NaN 格元返回 NaN
+    """
+    d_lon = float(np.median(np.diff(target_lons))) if len(target_lons) > 1 else 1.0
+    d_lat = float(np.median(np.diff(target_lats))) if len(target_lats) > 1 else 1.0
+
+    lon_edges = np.concatenate([target_lons - d_lon / 2.0, [target_lons[-1] + d_lon / 2.0]])
+    lat_edges = np.concatenate([target_lats - d_lat / 2.0, [target_lats[-1] + d_lat / 2.0]])
+
+    n_i, n_j = len(target_lons), len(target_lats)
+
+    # 每个源点归属的目标格元索引；落在目标网格外的源点直接剔除
+    i_src = np.searchsorted(lon_edges, model_lon, side='right') - 1
+    j_src = np.searchsorted(lat_edges, model_lat, side='right') - 1
+    keep_i = (i_src >= 0) & (i_src < n_i)
+    keep_j = (j_src >= 0) & (j_src < n_j)
+
+    ii = i_src[keep_i]
+    jj = j_src[keep_j]
+    sub = np.asarray(data_2d, dtype=np.float64)[np.ix_(keep_i, keep_j)]
+    w_lat = np.cos(np.radians(np.asarray(model_lat, dtype=np.float64)[keep_j]))
+
+    valid = np.isfinite(sub)
+    weight_2d = np.broadcast_to(w_lat[np.newaxis, :], sub.shape)
+    contrib = np.where(valid, sub * weight_2d, 0.0)
+    weight = np.where(valid, weight_2d, 0.0)
+
+    num = np.zeros((n_i, n_j), dtype=np.float64)
+    den = np.zeros((n_i, n_j), dtype=np.float64)
+    idx_i = np.broadcast_to(ii[:, np.newaxis], sub.shape)
+    idx_j = np.broadcast_to(jj[np.newaxis, :], sub.shape)
+    np.add.at(num, (idx_i.ravel(), idx_j.ravel()), contrib.ravel())
+    np.add.at(den, (idx_i.ravel(), idx_j.ravel()), weight.ravel())
+
+    out = np.full((n_i, n_j), np.nan, dtype=np.float64)
+    ok = den > 0
+    out[ok] = num[ok] / den[ok]
+
+    # 空格元（源比目标粗）用最近邻补
+    if not ok.all():
+        nn = nearest_neighbor_sample(model_lon, model_lat, data_2d,
+                                     target_lons, target_lats)
+        out[~ok] = nn[~ok]
+
+    return out
+
+
+def fill_invalid_nearest(data_2d: np.ndarray, valid: np.ndarray) -> np.ndarray:
+    """
+    用最近邻外延填充无效区，避免常数填充在掩膜边界制造人工阶跃。
+
+    高通小波系数对阶跃极其敏感；而常数填充还会让两图在该区同时趋于常数，
+    使 num/den → K/K = 1，产生虚假的完美相似。最近邻外延保持场的连续性。
+
+    Args:
+        data_2d: 待填充数组
+        valid: 有效掩膜（True 为有效）
+
+    Returns:
+        填充后的数组（无 NaN）；若全无效则返回全 0
+    """
+    from scipy.ndimage import distance_transform_edt
+
+    if valid.all():
+        return np.asarray(data_2d, dtype=np.float64)
+    if not valid.any():
+        return np.zeros_like(data_2d, dtype=np.float64)
+
+    # distance_transform_edt 对 valid==False 的点给出最近 valid 点的索引
+    idx = distance_transform_edt(~valid, return_distances=False, return_indices=True)
+    filled = np.asarray(data_2d, dtype=np.float64).copy()
+    filled[~valid] = filled[tuple(i[~valid] for i in idx)]
+    return filled
+
+
+def erode_mask(valid: np.ndarray, buffer_px: int) -> np.ndarray:
+    """
+    对有效掩膜做腐蚀，排除距无效区 buffer_px 格以内的缓冲带。
+
+    小波系数在掩膜边界附近受填充值污染，污染范围约等于最粗层级的支撑尺度。
+
+    Args:
+        valid: 有效掩膜
+        buffer_px: 缓冲宽度（网格数）；<= 0 时原样返回
+
+    Returns:
+        腐蚀后的掩膜
+    """
+    if buffer_px <= 0 or valid.all():
+        return valid
+    from scipy.ndimage import binary_erosion
+    struct = np.ones((2 * buffer_px + 1, 2 * buffer_px + 1), dtype=bool)
+    return binary_erosion(valid, structure=struct, border_value=0)
+
+
+def latitude_weights(lats: np.ndarray, shape: Tuple[int, int]) -> np.ndarray:
+    """
+    构造 cos(lat) 面积权重，形状为 (n_lon, n_lat)。
+
+    等经纬网格上格元物理面积正比于 cos(lat)。10-55°N 权重差 1.72 倍，
+    不加权会系统性高估高纬度区域的贡献。
+
+    Args:
+        lats: 纬度数组
+        shape: 目标形状 (n_lon, n_lat)
+
+    Returns:
+        权重数组，形状 (n_lon, n_lat)
+    """
+    w = np.cos(np.radians(np.asarray(lats, dtype=np.float64)))
+    return np.broadcast_to(w[np.newaxis, :], shape).copy()
+
+
+def weighted_pearson(
+    x: np.ndarray, y: np.ndarray,
+    weights: np.ndarray, valid: np.ndarray
+) -> float:
+    """
+    面积加权的带符号 Pearson 相关系数。
+
+    这是 CW-SSIM 极性盲区的直接补充: CW-SSIM 对结构反相给出 1.0，
+    而本指标在反相时给出接近 -1 的值。
+
+    Args:
+        x, y: 两个场（同形状）
+        weights: 面积权重
+        valid: 有效掩膜
+
+    Returns:
+        r ∈ [-1, 1]；有效点不足时返回 nan
+    """
+    m = valid & np.isfinite(x) & np.isfinite(y)
+    if m.sum() < 10:
+        return float('nan')
+
+    w = weights[m]
+    xv, yv = x[m], y[m]
+    w_sum = w.sum()
+
+    xm = xv - (w * xv).sum() / w_sum
+    ym = yv - (w * yv).sum() / w_sum
+
+    cov = (w * xm * ym).sum()
+    var_x = (w * xm ** 2).sum()
+    var_y = (w * ym ** 2).sum()
+
+    if var_x <= 0 or var_y <= 0:
+        return float('nan')
+    return float(cov / np.sqrt(var_x * var_y))
+
+
+def sign_agreement(
+    x: np.ndarray, y: np.ndarray,
+    weights: np.ndarray, valid: np.ndarray,
+    threshold_percentile: float = 50.0
+) -> float:
+    """
+    符号一致率: 在两个场的异常幅度均超过阈值的区域内，符号相同的面积占比。
+
+    阈值按分位数自适应（参考 Shephard et al. 2017 的 depth-dependent threshold），
+    而非固定绝对值——固定阈值在不同深度会截取到差异极大的面积比例。
+    近零区被排除，因为"两个模型都接近区域均值"不构成有意义的共识。
+
+    Args:
+        x, y: 两个场（应为去均值后的扰动）
+        weights: 面积权重
+        valid: 有效掩膜
+        threshold_percentile: 幅度阈值分位数
+
+    Returns:
+        一致率 ∈ [0, 1]；有效点不足时返回 nan
+    """
+    m = valid & np.isfinite(x) & np.isfinite(y)
+    if m.sum() < 10:
+        return float('nan')
+
+    w = weights[m]
+    xv, yv = x[m], y[m]
+    w_sum = w.sum()
+    xm = xv - (w * xv).sum() / w_sum
+    ym = yv - (w * yv).sum() / w_sum
+
+    tx = np.percentile(np.abs(xm), threshold_percentile)
+    ty = np.percentile(np.abs(ym), threshold_percentile)
+    strong = (np.abs(xm) >= tx) & (np.abs(ym) >= ty)
+
+    if strong.sum() < 10:
+        return float('nan')
+
+    same = np.sign(xm[strong]) == np.sign(ym[strong])
+    return float((w[strong] * same).sum() / w[strong].sum())
+
+
+def phase_randomize(img: np.ndarray, rng: np.random.Generator) -> np.ndarray:
+    """
+    相位随机化 surrogate: 保留功率谱、随机化相位。
+
+    产生"功率谱与原场相同但空间结构无关"的场，作为相似性指标的零假设基线
+    (Theiler et al., 1992)。比白噪声更严格——白噪声的谱结构完全不同，
+    对比它得到的高分值毫无意义。
+
+    Args:
+        img: 输入 2D 场（不含 NaN）
+        rng: 随机数生成器
+
+    Returns:
+        相位随机化后的场
+    """
+    mean_val = float(np.mean(img))
+    spec = np.fft.fft2(img - mean_val)
+    phase = rng.uniform(0, 2 * np.pi, spec.shape)
+    return np.real(np.fft.ifft2(np.abs(spec) * np.exp(1j * phase))) + mean_val
+
+
+def remove_layer_mean(
+    data: np.ndarray,
+    valid: np.ndarray,
+    weights: np.ndarray,
+) -> np.ndarray:
+    """
+    去掉面积加权横向平均，得到该深度的相对扰动。
+
+    绝对速度的 SSIM 会被 1D 背景主导（两模型都像 PREM，分数虚高）。
+    对每个模型各自去该层均值，等价于相对横向平均的 δV 对比。
+    """
+    out = np.array(data, dtype=np.float64, copy=True)
+    m = valid & np.isfinite(data)
+    if not m.any():
+        return out
+    w = weights[m]
+    wsum = float(w.sum())
+    if wsum <= 0.0:
+        return out
+    mean_val = float((w * data[m]).sum() / wsum)
+    out[m] = data[m] - mean_val
+    return out
+
+
+class SSIMCalculator:
+    """
+    Wang et al. (2004) 结构相似性指数 (SSIM)。
+
+    在 2D 深度切片上计算局部 SSIM 图，再对有效区做面积加权平均。
+    结构项为局部协方差：极性相反时分数下降，这是与 CW-SSIM 的关键差别。
+    """
+
+    def __init__(
+        self,
+        k1: float = 0.01,
+        k2: float = 0.03,
+        gaussian_sigma_per_pixel: float = 1.5 / 11.0,
+    ) -> None:
+        self.k1 = float(k1)
+        self.k2 = float(k2)
+        self.gaussian_sigma_per_pixel = float(gaussian_sigma_per_pixel)
+
+    def compute(
+        self,
+        img1: np.ndarray,
+        img2: np.ndarray,
+        valid: np.ndarray,
+        win_size: int,
+        weights: Optional[np.ndarray] = None,
+        stat_mask: Optional[np.ndarray] = None,
+        data_range: Optional[float] = None,
+    ) -> Tuple[float, np.ndarray]:
+        """
+        计算两张 2D 场的 SSIM。
+
+        Args:
+            img1, img2: 同形状的 2D 场（建议已去横向平均）
+            valid: 有效掩膜
+            win_size: 高斯窗口像素数（奇数）
+            weights: 面积权重；None 时等权
+            stat_mask: 参与全局平均的掩膜
+            data_range: 动态范围 L；None 时用有效区 2–98 百分位跨度
+
+        Returns:
+            (全局 SSIM, 局部 SSIM 图)；无效区为 NaN
+        """
+        img1 = np.asarray(img1, dtype=np.float64)
+        img2 = np.asarray(img2, dtype=np.float64)
+        valid = np.asarray(valid, dtype=bool)
+
+        if img1.shape != img2.shape:
+            raise ValueError(f"输入形状不一致: {img1.shape} vs {img2.shape}")
+        if not valid.any():
+            return float('nan'), np.full(img1.shape, np.nan)
+
+        x = fill_invalid_nearest(img1, valid)
+        y = fill_invalid_nearest(img2, valid)
+
+        win_size = int(win_size)
+        if win_size % 2 == 0:
+            win_size += 1
+        min_dim = int(min(img1.shape))
+        if min_dim < 3:
+            return float('nan'), np.full(img1.shape, np.nan)
+        if win_size > min_dim:
+            win_size = min_dim if min_dim % 2 == 1 else min_dim - 1
+            win_size = max(3, win_size)
+
+        sigma = max(0.5, self.gaussian_sigma_per_pixel * win_size)
+
+        # Wang SSIM 按非负图像设计。扰动场若零均值，反相时亮度项与结构项
+        # 同号为负，乘积变正，会把反相关误判为相似。两场共用同一平移到
+        # 正值区间，极性只留在结构项（协方差）里。
+        vals = np.concatenate([img1[valid], img2[valid]])
+        vals = vals[np.isfinite(vals)]
+        if vals.size < 10:
+            return float('nan'), np.full(img1.shape, np.nan)
+        lo, hi = np.percentile(vals, [2.0, 98.0])
+        span = float(hi - lo)
+        if span < 1e-12:
+            span = float(np.ptp(vals))
+        if span < 1e-12:
+            return 1.0, np.ones(img1.shape, dtype=np.float64)
+
+        if data_range is None:
+            data_range = span
+        x = x - float(lo)
+        y = y - float(lo)
+
+        c1 = (self.k1 * data_range) ** 2
+        c2 = (self.k2 * data_range) ** 2
+
+        mu1 = gaussian_filter(x, sigma=sigma, mode='reflect')
+        mu2 = gaussian_filter(y, sigma=sigma, mode='reflect')
+        mu1_sq = mu1 ** 2
+        mu2_sq = mu2 ** 2
+        mu12 = mu1 * mu2
+
+        sigma1_sq = gaussian_filter(x * x, sigma=sigma, mode='reflect') - mu1_sq
+        sigma2_sq = gaussian_filter(y * y, sigma=sigma, mode='reflect') - mu2_sq
+        sigma12 = gaussian_filter(x * y, sigma=sigma, mode='reflect') - mu12
+        sigma1_sq = np.maximum(sigma1_sq, 0.0)
+        sigma2_sq = np.maximum(sigma2_sq, 0.0)
+
+        num = (2.0 * mu12 + c1) * (2.0 * sigma12 + c2)
+        den = (mu1_sq + mu2_sq + c1) * (sigma1_sq + sigma2_sq + c2)
+        ssim_map = np.divide(num, den, out=np.zeros_like(num), where=den > 0)
+
+        if stat_mask is None:
+            stat_mask = valid
+        m = stat_mask & np.isfinite(ssim_map)
+        if not m.any():
+            global_val = float('nan')
+        elif weights is None:
+            global_val = float(np.mean(ssim_map[m]))
+        else:
+            w = weights[m]
+            wsum = float(w.sum())
+            global_val = (
+                float((w * ssim_map[m]).sum() / wsum) if wsum > 0 else float('nan')
+            )
+
+        ssim_map = np.where(valid, ssim_map, np.nan)
+        return global_val, ssim_map
+
+    def compute_1d(
+        self,
+        x: np.ndarray,
+        y: np.ndarray,
+        win_size: int,
+        data_range: Optional[float] = None,
+    ) -> Tuple[float, np.ndarray]:
+        """
+        两条 1D 剖面的 SSIM（Wang 2004，沿深度的高斯局部统计）。
+
+        用于原始绝对速度 V(z)。不做扰动化平移：Vs/Vp 已为正值，
+        亮度项接近 1，分数由对比度与结构项（间断面形态是否对齐）决定。
+
+        Args:
+            x, y: 同长度 1D 剖面（km/s）
+            win_size: 高斯窗口采样点数（奇数）
+            data_range: 动态范围 L；None 时用两剖面 2–98 百分位跨度
+
+        Returns:
+            (整体 SSIM, 局部 SSIM(z))
+        """
+        x = np.asarray(x, dtype=np.float64).ravel()
+        y = np.asarray(y, dtype=np.float64).ravel()
+        if x.shape != y.shape:
+            raise ValueError(f"1D 剖面长度不一致: {x.shape} vs {y.shape}")
+        n = int(x.size)
+        valid = np.isfinite(x) & np.isfinite(y)
+        if valid.sum() < 5:
+            return float('nan'), np.full(n, np.nan)
+
+        x_f = x.copy()
+        y_f = y.copy()
+        if not valid.all():
+            idx = np.arange(n)
+            x_f[~valid] = np.interp(idx[~valid], idx[valid], x[valid])
+            y_f[~valid] = np.interp(idx[~valid], idx[valid], y[valid])
+
+        win_size = int(win_size)
+        if win_size % 2 == 0:
+            win_size += 1
+        win_size = max(3, min(win_size, n if n % 2 == 1 else n - 1))
+        sigma = max(0.5, self.gaussian_sigma_per_pixel * win_size)
+
+        vals = np.concatenate([x[valid], y[valid]])
+        if data_range is None:
+            lo, hi = np.percentile(vals, [2.0, 98.0])
+            data_range = float(hi - lo)
+            if data_range < 1e-12:
+                data_range = float(np.ptp(vals)) if np.ptp(vals) > 0 else 1.0
+
+        c1 = (self.k1 * data_range) ** 2
+        c2 = (self.k2 * data_range) ** 2
+
+        mu1 = gaussian_filter1d(x_f, sigma=sigma, mode='reflect')
+        mu2 = gaussian_filter1d(y_f, sigma=sigma, mode='reflect')
+        mu1_sq = mu1 ** 2
+        mu2_sq = mu2 ** 2
+        mu12 = mu1 * mu2
+
+        sigma1_sq = gaussian_filter1d(x_f * x_f, sigma=sigma, mode='reflect') - mu1_sq
+        sigma2_sq = gaussian_filter1d(y_f * y_f, sigma=sigma, mode='reflect') - mu2_sq
+        sigma12 = gaussian_filter1d(x_f * y_f, sigma=sigma, mode='reflect') - mu12
+        sigma1_sq = np.maximum(sigma1_sq, 0.0)
+        sigma2_sq = np.maximum(sigma2_sq, 0.0)
+
+        num = (2.0 * mu12 + c1) * (2.0 * sigma12 + c2)
+        den = (mu1_sq + mu2_sq + c1) * (sigma1_sq + sigma2_sq + c2)
+        ssim_map = np.divide(num, den, out=np.zeros_like(num), where=den > 0)
+        ssim_map = np.where(valid, ssim_map, np.nan)
+        global_val = float(np.nanmean(ssim_map)) if np.isfinite(ssim_map).any() else float('nan')
+        return global_val, ssim_map
+
+
+def level_wavelength_bands(
+    resolution_deg: float, nlevels: int
+) -> List[Tuple[float, float]]:
+    """
+    计算各小波层级对应的物理波长区间（km）。
+
+    DT-CWT 层级 ℓ 的高通子带对应波长约 [2^ℓ·Δ, 2^(ℓ+1)·Δ]，
+    Δ 为分析网格间距。此映射是解释 level_weights 的前提。
+
+    Args:
+        resolution_deg: 分析分辨率（度）
+        nlevels: 分解层数
+
+    Returns:
+        [(λ_min, λ_max), ...] 长度为 nlevels
+    """
+    delta_km = resolution_deg * 111.195
+    return [(2 ** lev * delta_km, 2 ** (lev + 1) * delta_km)
+            for lev in range(1, nlevels + 1)]
 
 
 # ==================== CW-SSIM 计算器 ====================
@@ -436,13 +933,22 @@ class CWSSIMCalculator:
         if np.all(np.isnan(img1)) or np.all(np.isnan(img2)):
             return 0.0
 
-        img1 = np.nan_to_num(img1, nan=float(np.nanmean(img1)))
-        img2 = np.nan_to_num(img2, nan=float(np.nanmean(img2)))
+        # 无效区用最近邻外延（非常数 nanmean），避免缺失区虚假高分
+        valid = np.isfinite(img1) & np.isfinite(img2)
+        if valid.any() and not valid.all():
+            img1 = fill_invalid_nearest(img1, valid)
+            img2 = fill_invalid_nearest(img2, valid)
+        else:
+            img1 = np.nan_to_num(img1, nan=0.0)
+            img2 = np.nan_to_num(img2, nan=0.0)
 
-        img1, img2 = self._normalize_pair(img1, img2)
+        img1, img2 = self._normalize_pair(img1, img2, valid=valid if valid.any() else None)
 
         min_dim = min(img1.shape)
         use_dtcwt = self._use_dtcwt and min_dim >= (2 ** self.nlevels + 1)
+        if not use_dtcwt and self._use_dtcwt:
+            # 调用方应已告警；此处静默回退以保持可运行
+            pass
 
         if use_dtcwt:
             return self._cwssim_dtcwt(img1, img2, depth_km)
@@ -452,55 +958,199 @@ class CWSSIMCalculator:
 
     def compute_local(
         self, img1: np.ndarray, img2: np.ndarray, win_size: int = 7,
-        depth_km: Optional[float] = None
+        depth_km: Optional[float] = None,
+        valid: Optional[np.ndarray] = None,
+        weights: Optional[np.ndarray] = None,
+        stat_mask: Optional[np.ndarray] = None,
     ) -> Tuple[float, np.ndarray]:
         """
-        计算局部 CW-SSIM 图 + 全局均值。
+        计算局部 CW-SSIM 图 + 掩膜感知、面积加权的全局均值。
+
+        这是本模块的主计算路径。相比 compute_global，它保留了 CW-SSIM 的
+        平移不变性（该特性来自局部窗口内取模，全局求和会使其消失）。
 
         Args:
+            img1, img2: 两个 2D 场，形状必须一致
+            win_size: 系数域局部平均窗口（网格数）
             depth_km: 深度 (km)，用于深度自适应尺度权重
+            valid: 有效掩膜；无效区用最近邻外延填充（而非常数），避免人工阶跃
+            weights: 面积权重（cos(lat)）；None 时等权
+            stat_mask: 参与全局均值统计的掩膜（通常为 valid 腐蚀掉边界缓冲带后）；
+                       None 时退回 valid
 
         Returns:
-            (global_cwssim, local_map)
+            (global_cwssim, local_map)；local_map 在 valid 之外为 NaN
         """
         img1 = np.asarray(img1, dtype=np.float64)
         img2 = np.asarray(img2, dtype=np.float64)
 
-        img1 = np.nan_to_num(img1, nan=float(np.nanmean(img1)) if not np.all(np.isnan(img1)) else 0.0)
-        img2 = np.nan_to_num(img2, nan=float(np.nanmean(img2)) if not np.all(np.isnan(img2)) else 0.0)
+        if img1.shape != img2.shape:
+            raise ValueError(f"输入形状不一致: {img1.shape} vs {img2.shape}")
 
-        img1, img2 = self._normalize_pair(img1, img2)
+        if valid is None:
+            valid = np.isfinite(img1) & np.isfinite(img2)
+        else:
+            valid = valid & np.isfinite(img1) & np.isfinite(img2)
+
+        if not valid.any():
+            return float('nan'), np.full(img1.shape, np.nan)
+
+        # 最近邻外延填充，避免常数填充导致缺失区虚假高相似
+        img1 = fill_invalid_nearest(img1, valid)
+        img2 = fill_invalid_nearest(img2, valid)
+
+        # 归一化只依据有效区的统计量
+        img1, img2 = self._normalize_pair(img1, img2, valid=valid)
 
         min_dim = min(img1.shape)
         use_dtcwt = self._use_dtcwt and min_dim >= (2 ** self.nlevels + 1)
 
         if use_dtcwt:
-            return self._cwssim_local_dtcwt(img1, img2, win_size, depth_km)
-        return self._cwssim_local_gabor(img1, img2, win_size, depth_km)
+            _, local_map = self._cwssim_local_dtcwt(img1, img2, win_size, depth_km)
+        else:
+            _, local_map = self._cwssim_local_gabor(img1, img2, win_size, depth_km)
+
+        if stat_mask is None:
+            stat_mask = valid
+
+        m = stat_mask & np.isfinite(local_map)
+        if not m.any():
+            global_val = float('nan')
+        elif weights is None:
+            global_val = float(np.mean(local_map[m]))
+        else:
+            w = weights[m]
+            global_val = float((w * local_map[m]).sum() / w.sum())
+
+        # 展示与后续统计一律排除无效区
+        local_map = np.where(valid, local_map, np.nan)
+        return global_val, local_map
+
+    def compute_local_by_level(
+        self, img1: np.ndarray, img2: np.ndarray, win_size: int,
+        valid: np.ndarray, weights: np.ndarray, stat_mask: np.ndarray,
+    ) -> List[float]:
+        """
+        分层级返回未加权的 CW-SSIM，用于判断 level_weights 的影响。
+
+        深度自适应权重是主观设定的；只看加权后的单一数值无法判断结论
+        对权重有多敏感。逐层级值让这一敏感性可见。
+
+        Args:
+            img1, img2: 两个 2D 场
+            win_size: 局部平均窗口
+            valid: 有效掩膜
+            weights: 面积权重
+            stat_mask: 统计掩膜
+
+        Returns:
+            长度为 nlevels 的列表，每项为该层级的面积加权 CW-SSIM
+        """
+        img1 = fill_invalid_nearest(np.asarray(img1, dtype=np.float64), valid)
+        img2 = fill_invalid_nearest(np.asarray(img2, dtype=np.float64), valid)
+        img1, img2 = self._normalize_pair(img1, img2, valid=valid)
+
+        min_dim = min(img1.shape)
+        if not (self._use_dtcwt and min_dim >= (2 ** self.nlevels + 1)):
+            return [float('nan')] * self.nlevels
+
+        maps = self._level_maps_dtcwt(img1, img2, win_size)
+        out = []
+        for lev_map in maps:
+            m = stat_mask & np.isfinite(lev_map)
+            if not m.any():
+                out.append(float('nan'))
+            else:
+                w = weights[m]
+                out.append(float((w * lev_map[m]).sum() / w.sum()))
+        return out
+
+    def null_distribution(
+        self, img1: np.ndarray, img2: np.ndarray, win_size: int,
+        depth_km: Optional[float], valid: np.ndarray,
+        weights: np.ndarray, stat_mask: np.ndarray,
+        n_realizations: int, rng: np.random.Generator,
+    ) -> Dict[str, float]:
+        """
+        相位随机化零假设基线。
+
+        对 img2 反复做相位随机化（保留功率谱、打乱相位），得到"谱相同但结构
+        无关"的 CW-SSIM 分布。没有这条基线，CW-SSIM 的数值没有标尺——
+        实测 660 km 处 0.136 看似"不相似"，但相对 null 的 z 值仍达 8.4。
+
+        Args:
+            img1, img2: 两个 2D 场
+            win_size: 局部平均窗口
+            depth_km: 深度，用于层级权重
+            valid: 有效掩膜
+            weights: 面积权重
+            stat_mask: 统计掩膜
+            n_realizations: 重复次数
+            rng: 随机数生成器
+
+        Returns:
+            {'null_mean', 'null_std', 'null_p95'}
+        """
+        base2 = fill_invalid_nearest(np.asarray(img2, dtype=np.float64), valid)
+        vals = []
+        for _ in range(max(1, n_realizations)):
+            surrogate = phase_randomize(base2, rng)
+            val, _ = self.compute_local(
+                img1, surrogate, win_size=win_size, depth_km=depth_km,
+                valid=valid, weights=weights, stat_mask=stat_mask,
+            )
+            if np.isfinite(val):
+                vals.append(val)
+
+        if not vals:
+            return {'null_mean': float('nan'), 'null_std': float('nan'),
+                    'null_p95': float('nan')}
+        arr = np.asarray(vals)
+        return {
+            'null_mean': float(arr.mean()),
+            'null_std': float(arr.std()),
+            'null_p95': float(np.percentile(arr, 95)),
+        }
 
     # ---------- 归一化 ----------
 
     def _normalize_pair(
-        self, img1: np.ndarray, img2: np.ndarray
+        self,
+        img1: np.ndarray,
+        img2: np.ndarray,
+        valid: Optional[np.ndarray] = None,
     ) -> Tuple[np.ndarray, np.ndarray]:
         """
         对两张图像做独立归一化到 [0, 1]。
 
-        - minmax: Huang et al. (2024) 做法，消除绝对速度差异
-        - percentile: 稳健归一化，抗异常值
+        - minmax: Huang et al. (2024) 做法，消除绝对速度差异（对离群值极敏感）
+        - percentile: 稳健归一化，抗异常值（推荐）
+
+        统计量仅在 valid 区域上估计，避免填充值污染归一化尺度。
         """
         p_low, p_high = self._percentile_range
 
+        def _stats_region(img: np.ndarray) -> np.ndarray:
+            if valid is None:
+                return img[np.isfinite(img)]
+            return img[valid & np.isfinite(img)]
+
         def _norm_minmax(img: np.ndarray) -> np.ndarray:
-            vmin, vmax = np.nanmin(img), np.nanmax(img)
+            region = _stats_region(img)
+            if region.size == 0:
+                return np.zeros_like(img)
+            vmin, vmax = float(region.min()), float(region.max())
             drange = vmax - vmin
             if drange < 1e-12:
                 return np.zeros_like(img)
             return (img - vmin) / drange
 
         def _norm_percentile(img: np.ndarray) -> np.ndarray:
-            vmin = float(np.nanpercentile(img, p_low))
-            vmax = float(np.nanpercentile(img, p_high))
+            region = _stats_region(img)
+            if region.size == 0:
+                return np.zeros_like(img)
+            vmin = float(np.percentile(region, p_low))
+            vmax = float(np.percentile(region, p_high))
             drange = vmax - vmin
             if drange < 1e-12:
                 return np.zeros_like(img)
@@ -550,11 +1200,14 @@ class CWSSIMCalculator:
 
         return float(np.dot(weights, level_vals))
 
-    def _cwssim_local_dtcwt(
-        self, img1: np.ndarray, img2: np.ndarray, win_size: int,
-        depth_km: Optional[float] = None
-    ) -> Tuple[float, np.ndarray]:
-        """使用 dtcwt 的局部 CW-SSIM（支持高斯窗口）"""
+    def _level_maps_dtcwt(
+        self, img1: np.ndarray, img2: np.ndarray, win_size: int
+    ) -> List[np.ndarray]:
+        """
+        返回各小波层级的局部 CW-SSIM 图（已上采样到原图尺寸）。
+
+        供加权合成与分层级诊断共用，避免重复做 DT-CWT。
+        """
         from scipy.ndimage import zoom as nd_zoom
 
         orig_shape = img1.shape
@@ -564,11 +1217,11 @@ class CWSSIMCalculator:
         c1 = transform.forward(img1, nlevels=self.nlevels)
         c2 = transform.forward(img2, nlevels=self.nlevels)
 
-        level_maps = []
+        level_maps: List[np.ndarray] = []
         for lev in range(self.nlevels):
             hp1 = c1.highpasses[lev]
             hp2 = c2.highpasses[lev]
-            lev_map = np.zeros(hp1.shape[:2])
+            lev_map = np.zeros(hp1.shape[:2], dtype=np.float64)
             n_orient = hp1.shape[2]
 
             for o in range(n_orient):
@@ -588,11 +1241,19 @@ class CWSSIMCalculator:
 
             lev_map /= n_orient
             scale = np.array(orig_shape, dtype=float) / np.array(lev_map.shape, dtype=float)
-            level_maps.append(nd_zoom(lev_map, scale, order=1))
+            up = nd_zoom(lev_map, scale, order=1)
+            level_maps.append(up[:orig_shape[0], :orig_shape[1]])
 
+        return level_maps
+
+    def _cwssim_local_dtcwt(
+        self, img1: np.ndarray, img2: np.ndarray, win_size: int,
+        depth_km: Optional[float] = None
+    ) -> Tuple[float, np.ndarray]:
+        """使用 dtcwt 的局部 CW-SSIM（支持高斯窗口）"""
+        level_maps = self._level_maps_dtcwt(img1, img2, win_size)
         weights = self._get_level_weights(depth_km)
         local_map = np.average(level_maps, axis=0, weights=weights)
-        local_map = local_map[:orig_shape[0], :orig_shape[1]]
         return float(np.mean(local_map)), local_map
 
     # ---------- Gabor 备选实现 ----------
@@ -685,7 +1346,7 @@ class CWSSIMCalculator:
 # ==================== 速度模型相似性分析器 ====================
 
 class VelocityModelSimilarity:
-    """速度模型多尺度相似性分析器 (v13.0)"""
+    """速度模型结构相似性分析器 (v17.0 — SSIM 主路径)"""
 
     def __init__(self, config: Optional[ModelSimilarityConfig] = None):
         self.config = config or ModelSimilarityConfig()
@@ -704,6 +1365,14 @@ class VelocityModelSimilarity:
 
         self.models: Dict[str, VelocityModelNetCDF] = {}
         self.results: Dict[str, Any] = {}
+        self.analysis_metadata: Dict[str, Any] = {}
+
+        ss = self.config.ssim
+        self.ssim_calc = SSIMCalculator(
+            k1=ss.get('K1', 0.01),
+            k2=ss.get('K2', 0.03),
+            gaussian_sigma_per_pixel=ss.get('gaussian_sigma_per_pixel', 1.5 / 11.0),
+        )
 
         cw = self.config.cwssim
         self.cwssim_calc = CWSSIMCalculator(
@@ -716,38 +1385,35 @@ class VelocityModelSimilarity:
             percentile_range=tuple(cw.get('percentile_range', (2.0, 98.0))),
             use_gaussian_window=cw.get('use_gaussian_window', False),
         )
+        self._rng = np.random.default_rng(self.config.null_test.get('random_seed', 42))
+        self._backend_warned_pairs: set = set()
 
         self.logger.info("=" * 80)
-        self.logger.info("🚀 多尺度速度模型相似性分析器 v14.0 初始化")
-        self.logger.info(f"   CW-SSIM 后端: {'dtcwt (DT-CWT)' if HAS_DTCWT else 'Gabor 滤波器组 (备选)'}")
+        self.logger.info("🚀 速度模型结构相似性分析器 v17.0 (SSIM 主路径)")
         self.logger.info("=" * 80)
         self._print_config_summary()
 
-    def _print_config_summary(self):
+    def _print_config_summary(self) -> None:
         """打印配置摘要"""
-        cw = self.config.cwssim
-        print("\n📋 相似性分析配置 (v14.0 — CW-SSIM，按模型对最粗分辨率)")
+        ss = self.config.ssim
+        print("\n📋 相似性分析配置 (v17.0 — Wang et al. 2004 SSIM)")
         print("-" * 60)
         print(f"目标模型: {len(self.config.models)} 个")
         for info in self.config.models.values():
             print(f"  • {info['name']}")
-        print(f"\n🔬 核心指标:")
-        win_deg = cw.get('local_win_deg')
-        win_info = f"{win_deg}°" if win_deg else f"{cw.get('local_win_size', 12)}px"
-        print(f"  CW-SSIM — 复小波结构相似性 (nlevels={cw['nlevels']}, "
-              f"分析分辨率=按模型对最粗, 局部窗口≈{win_info})")
-        print(f"  空间分布: Huang 方法 — {win_deg or 6}°×{win_deg or 6}° 空间滑窗")
-        print(f"  CW-SSIM 后端: {'dtcwt' if HAS_DTCWT else 'Gabor (备选)'}")
-        print(f"  归一化: {cw.get('normalize_method', 'minmax')} | "
-              f"深度自适应权重: {'开' if cw.get('use_depth_adaptive_weights') else '关'} | "
-              f"高斯窗口: {'开' if cw.get('use_gaussian_window') else '关'}")
+        win_deg = ss.get('win_deg')
+        print("\n🔬 SSIM 主路径:")
+        print(f"  扰动: {ss.get('perturbation')} | 窗口: {win_deg}°")
+        print("  分辨率: 按模型对最粗 (EARA–FWEA→0.25°, Sino对→1.0°)")
+        print("  产品: 整体 SSIM（深度平均）+ 随深度 SSIM 曲线")
+        print(f"  CW-SSIM 对照: {'开' if self.config.analysis.get('compute_cwssim') else '关'}")
         print(f"\n📊 分析特征: {', '.join(self.config.analysis['target_features'])}")
         print(f"📁 输出: {self.figures_dir}")
         print("-" * 60)
 
     # ---------- 模型加载 ----------
 
-    def load_models(self):
+    def load_models(self) -> None:
         """加载所有 NetCDF 模型"""
         self.logger.info("\n📦 加载 NetCDF 模型...")
 
@@ -766,46 +1432,76 @@ class VelocityModelSimilarity:
         if len(self.models) < 2:
             raise RuntimeError("至少需要 2 个模型才能进行相似性分析")
 
-    # ---------- 公共覆盖区域 ----------
+        self.analysis_metadata = {
+            'version': 'v17.0-SSIM',
+            'primary_metric': 'ssim',
+            'perturbation': self.config.ssim.get('perturbation'),
+            'ssim_win_deg': self.config.ssim.get('win_deg'),
+            'resolution_mode': self.config.cwssim.get('resolution_mode', 'pair_coarsest'),
+            'models': list(self.models.keys()),
+            'pair_resolutions_deg': {},
+        }
+        # 预记录各对分析分辨率
+        keys = list(self.models.keys())
+        for i in range(len(keys)):
+            for j in range(i + 1, len(keys)):
+                m1, m2 = self.models[keys[i]], self.models[keys[j]]
+                cov = self._get_common_coverage(m1, m2)
+                self.analysis_metadata['pair_resolutions_deg'][
+                    f"{keys[i]}_vs_{keys[j]}"
+                ] = float(cov['resolution_deg'])
+                self.logger.info(
+                    f"🧭 {m1.name} vs {m2.name}: 分析分辨率="
+                    f"{cov['resolution_deg']:.2f}°, 网格="
+                    f"{len(cov['lons'])}×{len(cov['lats'])}"
+                )
+
+    def close(self) -> None:
+        """关闭所有模型文件句柄"""
+        for model in self.models.values():
+            model.close()
+
+    # ---------- 按模型对覆盖与采样 ----------
 
     def _get_common_coverage(
-        self, m1: VelocityModelNetCDF, m2: VelocityModelNetCDF
+        self,
+        m1: VelocityModelNetCDF,
+        m2: VelocityModelNetCDF,
     ) -> Dict[str, Any]:
         """
-        获取两个模型的公共空间覆盖和网格坐标。
+        模型对公共覆盖 + 按最粗分辨率构建分析网格（Huang/公平对比）。
 
-        使用较细分辨率模型的原生网格（在公共范围内），与 2_1 一致，
-        避免 np.arange 构建的网格与模型不对齐导致边缘 NaN 或多余块。
+        - EARA vs FWEA → 0.25°
+        - SinoScope vs * → 1.0°
         """
-        lon_min = max(m1.lon.min(), m2.lon.min())
-        lon_max = min(m1.lon.max(), m2.lon.max())
-        lat_min = max(m1.lat.min(), m2.lat.min())
-        lat_max = min(m1.lat.max(), m2.lat.max())
+        lon_min = max(float(m1.lon.min()), float(m2.lon.min()))
+        lon_max = min(float(m1.lon.max()), float(m2.lon.max()))
+        lat_min = max(float(m1.lat.min()), float(m2.lat.min()))
+        lat_max = min(float(m1.lat.max()), float(m2.lat.max()))
 
         res1 = m1.estimate_resolution()
         res2 = m2.estimate_resolution()
-        coarse_lon = max(res1['lon'], res2['lon'])
-        coarse_lat = max(res1['lat'], res2['lat'])
+        pair_res = float(max(res1['lon'], res2['lon'], res1['lat'], res2['lat']))
 
-        # 使用较细模型的原生网格（在公共范围内），与 2_1 地图范围一致
-        n1 = len(m1.lon) * len(m1.lat)
-        n2 = len(m2.lon) * len(m2.lat)
-        if n1 >= n2:
-            src_lons, src_lats = m1.lon, m1.lat
+        # 若两模型分辨率相同且等于 pair_res，优先用较细原生网格（对齐模型节点）
+        fine = m1 if (len(m1.lon) * len(m1.lat) >= len(m2.lon) * len(m2.lat)) else m2
+        fine_res = float(min(
+            fine.estimate_resolution()['lon'],
+            fine.estimate_resolution()['lat'],
+        ))
+
+        if abs(fine_res - pair_res) < 1e-6:
+            mask_lon = (fine.lon >= lon_min - 1e-6) & (fine.lon <= lon_max + 1e-6)
+            mask_lat = (fine.lat >= lat_min - 1e-6) & (fine.lat <= lat_max + 1e-6)
+            target_lons = np.asarray(fine.lon[mask_lon])
+            target_lats = np.asarray(fine.lat[mask_lat])
         else:
-            src_lons, src_lats = m2.lon, m2.lat
-
-        mask_lon = (src_lons >= lon_min - 1e-6) & (src_lons <= lon_max + 1e-6)
-        mask_lat = (src_lats >= lat_min - 1e-6) & (src_lats <= lat_max + 1e-6)
-        target_lons = np.asarray(src_lons[mask_lon])
-        target_lats = np.asarray(src_lats[mask_lat])
-
-        if len(target_lons) < 2 or len(target_lats) < 2:
-            # 回退：用 np.arange 构建
-            target_lons = np.arange(lon_min, lon_max + coarse_lon * 0.5, coarse_lon)
-            target_lats = np.arange(lat_min, lat_max + coarse_lat * 0.5, coarse_lat)
-            target_lons = target_lons[target_lons <= lon_max]
-            target_lats = target_lats[target_lats <= lat_max]
+            lon0 = np.ceil(lon_min / pair_res - 1e-12) * pair_res
+            lat0 = np.ceil(lat_min / pair_res - 1e-12) * pair_res
+            target_lons = np.arange(lon0, lon_max + pair_res * 0.5, pair_res)
+            target_lats = np.arange(lat0, lat_max + pair_res * 0.5, pair_res)
+            target_lons = target_lons[target_lons <= lon_max + 1e-9]
+            target_lats = target_lats[target_lats <= lat_max + 1e-9]
 
         if len(target_lons) < 2 or len(target_lats) < 2:
             raise ValueError(
@@ -813,179 +1509,317 @@ class VelocityModelSimilarity:
                 f"{len(target_lons)}×{len(target_lats)}"
             )
 
-        # 网格实际分辨率（较细模型的间距）
-        grid_res_lon = float(np.median(np.diff(target_lons))) if len(target_lons) > 1 else coarse_lon
-        grid_res_lat = float(np.median(np.diff(target_lats))) if len(target_lats) > 1 else coarse_lat
-        grid_resolution = min(grid_res_lon, grid_res_lat)
-        # 模型对分析分辨率：取两者最粗，公平比较（避免粗模型被上采样出虚假细尺度）
-        pair_analysis_resolution_deg = max(res1['lon'], res2['lon'], res1['lat'], res2['lat'])
-
         return {
             'lons': target_lons,
             'lats': target_lats,
-            'resolution_lon': coarse_lon,
-            'resolution_lat': coarse_lat,
-            'grid_resolution': grid_resolution,
-            'pair_analysis_resolution_deg': pair_analysis_resolution_deg,
+            'resolution_deg': pair_res,
+            'grid_resolution': pair_res,
+            'pair_analysis_resolution_deg': pair_res,
+            'resolution_lon': pair_res,
+            'resolution_lat': pair_res,
         }
 
-    def _sample_slice_to_coverage(
-        self,
-        model: VelocityModelNetCDF, data_3d: np.ndarray,
-        d_idx: int, coverage: Dict[str, Any],
-    ) -> np.ndarray:
-        """从已缓存的 3D 数组取一个深度层，最近邻采样到公共粗网格"""
-        return nearest_neighbor_sample(
-            model.lon, model.lat, data_3d[:, :, d_idx],
-            coverage['lons'], coverage['lats'],
+    def _warn_backend_if_needed(self, pair_label: str, patch_px: int) -> None:
+        """Huang 滑窗过小时显式告警（不再静默混用后端）"""
+        need = 2 ** self.config.cwssim['nlevels'] + 1
+        if patch_px >= need or not HAS_DTCWT:
+            return
+        if pair_label in self._backend_warned_pairs:
+            return
+        self._backend_warned_pairs.add(pair_label)
+        self.logger.warning(
+            f"  ⚠️ {pair_label}: Huang 滑窗={patch_px}px < DT-CWT 所需 {need}px "
+            f"(nlevels={self.config.cwssim['nlevels']})，将回退 Gabor。"
+            f"EARA–FWEA@0.25° 不受影响；Sino@1°+6° 属已知限制。"
         )
+
+    def _resample_slice(
+        self,
+        model: VelocityModelNetCDF,
+        data_3d: np.ndarray,
+        d_idx: int,
+        coverage: Dict[str, Any],
+    ) -> np.ndarray:
+        """将模型深度层重采样到分析网格（块平均或最近邻）"""
+        method = self.config.masking.get('downsample_method', 'block_mean')
+        src = data_3d[:, :, d_idx]
+        if method == 'nearest':
+            return nearest_neighbor_sample(
+                model.lon, model.lat, src, coverage['lons'], coverage['lats'],
+            )
+        return block_mean_sample(
+            model.lon, model.lat, src, coverage['lons'], coverage['lats'],
+        )
+
+    def _get_ssim_win_size(self, resolution_deg: Optional[float] = None) -> int:
+        """
+        SSIM 高斯窗口像素数。
+
+        优先用 win_deg 保证不同分辨率模型对比的物理窗口一致：
+        6° @ 0.25° → 25 px；6° @ 1.0° → 7 px。SSIM 在 7 px 仍稳定，
+        不像 DT-CWT 那样需要 2^nlevels 的最小尺寸。
+        """
+        ss = self.config.ssim
+        res = resolution_deg or 1.0
+        if ss.get('win_deg') is not None:
+            size = int(np.ceil(float(ss['win_deg']) / res))
+        else:
+            size = int(ss.get('win_size', 11))
+        return max(3, size | 1)
 
     def _get_local_win_size(self, resolution_deg: Optional[float] = None) -> int:
         """
-        获取 Huang 空间滑窗的 patch 大小（像素）。
+        获取局部窗口大小（网格数）。
 
-        local_win_deg°×local_win_deg° 物理窗口 → 像素数 = ceil(local_win_deg / res_deg)
-        结果保证为奇数。
+        local_win_deg° → 像素数 = ceil(local_win_deg / res_deg)，保证为奇数。
         """
         cw = self.config.cwssim
-        res = resolution_deg or cw['analysis_resolution_deg']
+        res = resolution_deg or cw.get('pair_fallback_resolution_deg', 1.0)
         if cw.get('local_win_deg') is not None:
             size = int(np.ceil(cw['local_win_deg'] / res))
         elif cw.get('local_win_size') is not None:
             size = int(cw['local_win_size'])
         else:
-            size = 12  # 6°/0.5° 默认
-        return size | 1  # 保证奇数
+            size = 7
+        return max(3, size | 1)
+
+    def _build_masks(
+        self,
+        s1: np.ndarray,
+        s2: np.ndarray,
+        feature: str,
+        depth_km: float,
+        coverage: Dict[str, Any],
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """
+        构建有效掩膜、面积权重与统计掩膜。
+
+        Returns:
+            (valid, weights, stat_mask)
+        """
+        valid = np.isfinite(s1) & np.isfinite(s2)
+
+        if self.config.masking.get('use_all_model_common_mask', True):
+            method = self.config.masking.get('downsample_method', 'block_mean')
+            for m in self.models.values():
+                if not m.has_parameter(feature):
+                    continue
+                try:
+                    slice_m, _ = m.get_depth_slice(feature, depth_km)
+                    if method == 'nearest':
+                        s_m = nearest_neighbor_sample(
+                            m.lon, m.lat, slice_m,
+                            coverage['lons'], coverage['lats'],
+                        )
+                    else:
+                        s_m = block_mean_sample(
+                            m.lon, m.lat, slice_m,
+                            coverage['lons'], coverage['lats'],
+                        )
+                    valid = valid & np.isfinite(s_m)
+                except Exception:
+                    continue
+
+        weights = latitude_weights(coverage['lats'], s1.shape)
+        buffer_px = int(self.config.masking.get('boundary_buffer_px', 0))
+        stat_mask = erode_mask(valid, buffer_px)
+        if not stat_mask.any():
+            stat_mask = valid
+        return valid, weights, stat_mask
+
+    def _matched_depths(
+        self,
+        m1: VelocityModelNetCDF,
+        m2: VelocityModelNetCDF,
+    ) -> List[Tuple[int, int, float]]:
+        """获取公共深度层，并按配置裁剪深度范围"""
+        matched = find_common_depth_indices(m1.depth, m2.depth)
+        d_min, d_max = self.config.analysis.get('depth_range_km', (0.0, 1000.0))
+        return [
+            (i1, i2, d) for i1, i2, d in matched
+            if d_min - 1e-6 <= d <= d_max + 1e-6
+        ]
 
     def _compute_cwssim_spatial_huang(
         self,
-        s1: np.ndarray, s2: np.ndarray,
+        s1: np.ndarray,
+        s2: np.ndarray,
         coverage: Dict[str, Any],
         depth_km: float,
+        valid: np.ndarray,
+        weights: np.ndarray,
+        stat_mask: np.ndarray,
     ) -> Tuple[float, np.ndarray]:
         """
-        Huang (2024) 空间滑窗法：每个网格点取 local_win_deg°×local_win_deg° patch，
-        单独计算该 patch 的 CW-SSIM。
+        Huang (2024) 空间滑窗法：每个网格点取 local_win_deg° patch 计算 CW-SSIM。
 
-        Returns:
-            (global_mean, cwssim_grid)
+        Sino@1° 时 patch 可能不足以支撑 DT-CWT，见 _warn_backend_if_needed。
         """
-        pair_res = coverage['pair_analysis_resolution_deg']
-        half = self._get_local_win_size(pair_res) // 2
-
+        res = coverage['resolution_deg']
+        half = self._get_local_win_size(res) // 2
         n_lon, n_lat = s1.shape
         cwssim_grid = np.full((n_lon, n_lat), np.nan, dtype=np.float64)
 
         ij_list = [
             (i, j) for i in range(half, n_lon - half)
             for j in range(half, n_lat - half)
+            if valid[i, j]
         ]
         for i, j in tqdm(ij_list, desc=f"  {depth_km:.0f} km", leave=False):
             patch1 = s1[i - half:i + half + 1, j - half:j + half + 1]
             patch2 = s2[i - half:i + half + 1, j - half:j + half + 1]
-            valid = np.isfinite(patch1) & np.isfinite(patch2)
-            if np.sum(valid) < 10:
+            pvalid = np.isfinite(patch1) & np.isfinite(patch2)
+            if np.sum(pvalid) < 10:
                 continue
-            p1 = np.where(valid, patch1, np.nanmean(patch1))
-            p2 = np.where(valid, patch2, np.nanmean(patch2))
-            cwssim_grid[i, j] = self.cwssim_calc.compute_global(p1, p2, depth_km=depth_km)
+            p1 = fill_invalid_nearest(patch1, pvalid)
+            p2 = fill_invalid_nearest(patch2, pvalid)
+            cwssim_grid[i, j] = self.cwssim_calc.compute_global(
+                p1, p2, depth_km=depth_km,
+            )
 
-        valid_vals = cwssim_grid[np.isfinite(cwssim_grid)]
-        global_mean = float(np.mean(valid_vals)) if len(valid_vals) > 0 else 0.0
+        # Huang: 有效 patch 的算术平均（不对面积再加权）
+        m = stat_mask & np.isfinite(cwssim_grid)
+        if not m.any():
+            return float('nan'), cwssim_grid
+        global_mean = float(np.mean(cwssim_grid[m]))
         return global_mean, cwssim_grid
 
-    # ---------- 降采样 ----------
-
-    def _downsample_for_cwssim(
-        self, s1: np.ndarray, s2: np.ndarray,
-        coverage: Dict[str, Any],
-    ) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        将深度切片降采样到模型对的分析分辨率。
-
-        按模型对使用最粗分辨率（pair_analysis_resolution_deg），确保公平比较：
-        - SinoScope (1°) vs EARA (0.25°) → 分析于 1°
-        - EARA (0.25°) vs FWEA23 (0.25°) → 分析于 0.25°
-        避免粗模型被上采样产生虚假细尺度结构。
-        """
-        from scipy.ndimage import zoom as nd_zoom
-
-        target_res = coverage['pair_analysis_resolution_deg']
-        src_res = coverage['grid_resolution']
-
-        if src_res >= target_res * 0.95:
-            return s1, s2
-
-        factor = src_res / target_res
-        s1_ds = nd_zoom(s1, factor, order=1)
-        s2_ds = nd_zoom(s2, factor, order=1)
-        return s1_ds, s2_ds
-
-    # ---------- 逐深度层三指标计算 ----------
+    # ---------- 逐深度层指标 ----------
 
     def compute_depth_wise_metrics(
         self,
-        m1_key: str, m2_key: str,
+        m1_key: str,
+        m2_key: str,
         feature: str,
     ) -> pd.DataFrame:
         """
-        逐深度层计算 CW-SSIM。
+        逐深度层计算 SSIM。整体相似性 = 本表 ssim 列的算术平均。
 
         Returns:
-            DataFrame with columns: depth_km, cwssim
+            DataFrame: depth_km, ssim, valid_frac；可选 cwssim / 伴随指标
         """
         m1 = self.models[m1_key]
         m2 = self.models[m2_key]
         coverage = self._get_common_coverage(m1, m2)
-        matched_depths = find_common_depth_indices(m1.depth, m2.depth)
+        matched_depths = self._matched_depths(m1, m2)
 
         if not matched_depths:
             self.logger.warning(f"  ⚠️ {m1.name} vs {m2.name}: 无匹配深度层")
-            return pd.DataFrame(columns=['depth_km', 'cwssim'])
+            return pd.DataFrame()
 
-        pair_res = coverage['pair_analysis_resolution_deg']
+        res = coverage['resolution_deg']
+        ssim_win = self._get_ssim_win_size(res)
+        cw_win = self._get_local_win_size(res)
         self.logger.info(
-            f"  📊 逐深度层分析: {m1.name} vs {m2.name}  "
-            f"({len(matched_depths)} 层, {feature.upper()}, 分析分辨率={pair_res}°)"
+            f"  📊 逐深度层 SSIM: {m1.name} vs {m2.name}  "
+            f"({len(matched_depths)} 层, {feature.upper()}, "
+            f"分辨率={res}°, 窗口={ssim_win}px)"
         )
 
         data1_3d = m1.get_parameter(feature)
         data2_3d = m2.get_parameter(feature)
+        do_cwssim = bool(self.config.analysis.get('compute_cwssim', False))
+        do_null = bool(self.config.null_test.get('enabled', False))
+        n_null = int(self.config.null_test.get('n_realizations', 20))
+        do_r = bool(self.config.companion.get('compute_signed_correlation', False))
+        do_sign = bool(self.config.companion.get('compute_sign_agreement', False))
+        sign_pct = float(self.config.companion.get('sign_threshold_percentile', 50.0))
+        use_area = bool(self.config.ssim.get('use_area_weights', True))
+        pert_mode = self.config.ssim.get('perturbation', 'layer_mean')
 
-        rows = []
+        rows: List[Dict[str, Any]] = []
         for d_idx1, d_idx2, depth_km in tqdm(matched_depths, desc="  深度层", leave=False):
-            s1 = self._sample_slice_to_coverage(m1, data1_3d, d_idx1, coverage)
-            s2 = self._sample_slice_to_coverage(m2, data2_3d, d_idx2, coverage)
+            s1 = self._resample_slice(m1, data1_3d, d_idx1, coverage)
+            s2 = self._resample_slice(m2, data2_3d, d_idx2, coverage)
+            valid, weights, stat_mask = self._build_masks(
+                s1, s2, feature, depth_km, coverage,
+            )
+            valid_frac = float(valid.mean()) if valid.size else 0.0
+            area_w = weights if use_area else None
 
-            s1_ds, s2_ds = self._downsample_for_cwssim(s1, s2, coverage)
-            cwssim_mean = self.cwssim_calc.compute_global(
-                s1_ds, s2_ds, depth_km=depth_km,
+            if pert_mode == 'layer_mean':
+                p1 = remove_layer_mean(s1, valid, weights)
+                p2 = remove_layer_mean(s2, valid, weights)
+            else:
+                p1, p2 = s1, s2
+
+            ssim_val, _ = self.ssim_calc.compute(
+                p1, p2,
+                valid=valid,
+                win_size=ssim_win,
+                weights=area_w,
+                stat_mask=stat_mask,
             )
 
-            rows.append({
+            row: Dict[str, Any] = {
                 'depth_km': depth_km,
-                'cwssim': cwssim_mean,
-            })
+                'ssim': ssim_val,
+                'valid_frac': valid_frac,
+                'analysis_resolution_deg': res,
+                'ssim_win_px': ssim_win,
+            }
+
+            if do_cwssim:
+                if valid.any():
+                    c1 = fill_invalid_nearest(s1, valid)
+                    c2 = fill_invalid_nearest(s2, valid)
+                else:
+                    c1, c2 = s1, s2
+                row['cwssim'] = self.cwssim_calc.compute_global(
+                    c1, c2, depth_km=depth_km,
+                )
+
+            if do_r:
+                row['r_signed'] = weighted_pearson(p1, p2, weights, valid)
+            if do_sign:
+                row['sign_agreement'] = sign_agreement(
+                    p1, p2, weights, valid, sign_pct,
+                )
+
+            if do_null and do_cwssim and np.isfinite(row.get('cwssim', np.nan)):
+                null_stats = self.cwssim_calc.null_distribution(
+                    s1, s2, cw_win, depth_km, valid, weights, stat_mask,
+                    n_null, self._rng,
+                )
+                row.update({
+                    'null_mean': null_stats['null_mean'],
+                    'null_std': null_stats['null_std'],
+                    'null_p95': null_stats['null_p95'],
+                })
+                if np.isfinite(null_stats['null_std']) and null_stats['null_std'] > 1e-12:
+                    row['z_score'] = (
+                        (row['cwssim'] - null_stats['null_mean']) / null_stats['null_std']
+                    )
+                else:
+                    row['z_score'] = float('nan')
+
+            rows.append(row)
 
         df = pd.DataFrame(rows)
-        self.logger.info(
-            f"    CW-SSIM: [{df['cwssim'].min():.3f}, {df['cwssim'].max():.3f}]"
-        )
+        if len(df) and 'ssim' in df.columns:
+            self.logger.info(
+                f"    SSIM: [{df['ssim'].min():.3f}, {df['ssim'].max():.3f}]  "
+                f"mean={df['ssim'].mean():.3f}  (整体)"
+            )
         return df
 
     # ---------- CW-SSIM 空间分布 ----------
 
     def compute_cwssim_spatial_pair(
         self,
-        m1_key: str, m2_key: str,
+        m1_key: str,
+        m2_key: str,
         feature: str,
         depths: Optional[List[float]] = None,
-    ) -> Dict[float, Tuple[float, np.ndarray, Dict]]:
+    ) -> Dict[float, Tuple[float, np.ndarray, Dict, np.ndarray]]:
         """
         计算指定深度的 CW-SSIM 局部空间分布图。
 
+        默认使用 compute_local（全图一次 DT-CWT + 系数域局部平均）。
+        可选 huang_patch（慢，且在 1° 下易回退 Gabor）。
+
         Returns:
-            {depth_km: (global_cwssim, local_map, coverage)}
+            {depth_km: (global_cwssim, local_map, coverage, valid_mask)}
         """
         if depths is None:
             depths = self.config.analysis['cwssim_spatial_depths']
@@ -993,20 +1827,24 @@ class VelocityModelSimilarity:
         m1 = self.models[m1_key]
         m2 = self.models[m2_key]
         coverage = self._get_common_coverage(m1, m2)
+        res = coverage['resolution_deg']
+        win_size = self._get_local_win_size(res)
+        method = self.config.cwssim.get('spatial_method', 'huang_patch')
+        pair_label = f"{m1.name} vs {m2.name}"
+        self._warn_backend_if_needed(pair_label, win_size)
 
-        pair_res = coverage['pair_analysis_resolution_deg']
-        win_deg = self.config.cwssim.get('local_win_deg') or 6.0
         self.logger.info(
-            f"  🗺️ CW-SSIM 空间分布 (Huang 方法): {m1.name} vs {m2.name}  "
-            f"(分辨率={pair_res}°, 滑窗={win_deg}°×{win_deg}°, 预计较慢)"
+            f"  🗺️ CW-SSIM 空间分布 ({method}/Huang): {pair_label}  "
+            f"(分辨率={res}°, 滑窗={self.config.cwssim.get('local_win_deg')}°="
+            f"{win_size}px)"
         )
 
-        results = {}
+        results: Dict[float, Tuple[float, np.ndarray, Dict, np.ndarray]] = {}
+        # 空间切片使用全部公共深度，不受 depth_range_km（仅约束逐层曲线）限制
         matched = find_common_depth_indices(m1.depth, m2.depth)
         depth_map = {d: (i1, i2) for i1, i2, d in matched}
-
         if not depth_map:
-            self.logger.warning(f"    ⚠️ 无匹配深度层")
+            self.logger.warning("    ⚠️ 无匹配深度层")
             return results
 
         data1_3d = m1.get_parameter(feature)
@@ -1017,24 +1855,29 @@ class VelocityModelSimilarity:
             if abs(closest_depth - target_depth) > 10.0:
                 continue
             d_idx1, d_idx2 = depth_map[closest_depth]
-            s1 = self._sample_slice_to_coverage(m1, data1_3d, d_idx1, coverage)
-            s2 = self._sample_slice_to_coverage(m2, data2_3d, d_idx2, coverage)
-
-            # 公空缺修复：仅在两模型均有有效数据的区域计算/显示 CW-SSIM
-            valid_mask = np.isfinite(s1) & np.isfinite(s2)
-
-            s1_ds, s2_ds = self._downsample_for_cwssim(s1, s2, coverage)
+            s1 = self._resample_slice(m1, data1_3d, d_idx1, coverage)
+            s2 = self._resample_slice(m2, data2_3d, d_idx2, coverage)
+            valid, weights, stat_mask = self._build_masks(
+                s1, s2, feature, closest_depth, coverage,
+            )
 
             try:
-                global_val, local_map = self._compute_cwssim_spatial_huang(
-                    s1_ds, s2_ds, coverage, closest_depth,
+                if method == 'local_filter':
+                    global_val, local_map = self.cwssim_calc.compute_local(
+                        s1, s2, win_size=win_size, depth_km=closest_depth,
+                        valid=valid, weights=weights, stat_mask=stat_mask,
+                    )
+                else:
+                    # 默认 Huang 6° 滑窗
+                    global_val, local_map = self._compute_cwssim_spatial_huang(
+                        s1, s2, coverage, closest_depth, valid, weights, stat_mask,
+                    )
+                    local_map = np.where(valid, local_map, np.nan)
+                results[closest_depth] = (global_val, local_map, coverage, valid)
+                self.logger.info(
+                    f"    ✅ {closest_depth:.0f} km: CW-SSIM = {global_val:.4f}  "
+                    f"(valid={valid.mean()*100:.1f}%)"
                 )
-                if local_map.shape != s1.shape:
-                    from scipy.ndimage import zoom as nd_zoom
-                    scale = np.array(s1.shape, dtype=float) / np.array(local_map.shape, dtype=float)
-                    local_map = nd_zoom(local_map, scale, order=1)
-                results[closest_depth] = (global_val, local_map, coverage, valid_mask)
-                self.logger.info(f"    ✅ {closest_depth:.0f} km: CW-SSIM = {global_val:.4f}")
             except Exception as e:
                 self.logger.warning(f"    ⚠️ {closest_depth:.0f} km 失败: {e}")
 
@@ -1042,7 +1885,7 @@ class VelocityModelSimilarity:
 
     # ---------- 批量分析 ----------
 
-    def compare_all_models(self, features: Optional[List[str]] = None):
+    def compare_all_models(self, features: Optional[List[str]] = None) -> None:
         """对所有模型对、所有特征执行完整相似性分析"""
         if features is None:
             features = self.config.analysis['target_features']
@@ -1059,7 +1902,9 @@ class VelocityModelSimilarity:
         self.logger.info("=" * 80)
 
         for feature in features:
-            models_with_feature = [k for k in model_keys if self.models[k].has_parameter(feature)]
+            models_with_feature = [
+                k for k in model_keys if self.models[k].has_parameter(feature)
+            ]
             if len(models_with_feature) < 2:
                 self.logger.warning(f"特征 {feature} 可用模型不足 2 个，跳过")
                 continue
@@ -1076,18 +1921,14 @@ class VelocityModelSimilarity:
 
             for m1_key, m2_key in feature_pairs:
                 pair_id = f"{m1_key}_vs_{m2_key}_{feature}"
-
                 try:
-                    # 逐深度层三指标
                     if self.config.analysis['compute_depth_wise']:
                         df = self.compute_depth_wise_metrics(m1_key, m2_key, feature)
                         self.results[f"{pair_id}_depth"] = df
 
-                    # CW-SSIM 空间分布
                     if self.config.analysis['compute_cwssim_spatial']:
                         cs = self.compute_cwssim_spatial_pair(m1_key, m2_key, feature)
                         self.results[f"{pair_id}_cwssim_spatial"] = cs
-
                 except Exception as e:
                     self.logger.error(f"❌ {m1_key} vs {m2_key} ({feature}): {e}")
                     import traceback
@@ -1097,8 +1938,8 @@ class VelocityModelSimilarity:
 
     # ---------- 结果保存 ----------
 
-    def save_results(self):
-        """保存分析结果"""
+    def save_results(self) -> None:
+        """保存分析结果与分析元数据"""
         self.logger.info("\n💾 保存分析结果...")
 
         features = set()
@@ -1111,10 +1952,16 @@ class VelocityModelSimilarity:
             feat_dir = self.output_dir / feature
             feat_dir.mkdir(parents=True, exist_ok=True)
 
-            # 保存深度指标 CSV
+            meta_file = feat_dir / f'analysis_metadata_{feature}.json'
+            meta = dict(self.analysis_metadata)
+            meta['feature'] = feature
+            with open(meta_file, 'w', encoding='utf-8') as f:
+                json.dump(meta, f, indent=2, ensure_ascii=False)
+            self.logger.info(f"  ✅ {meta_file.name}")
+
             suffix_depth = f'_{feature}_depth'
             depth_keys = [k for k in self.results if k.endswith(suffix_depth)]
-            all_summaries = []
+            all_summaries: List[Dict[str, Any]] = []
 
             for dk in depth_keys:
                 df = self.results[dk]
@@ -1123,11 +1970,29 @@ class VelocityModelSimilarity:
                 self.logger.info(f"  ✅ {csv_file.name}")
 
                 pair_name = dk[:-len(suffix_depth)]
-                all_summaries.append({
+                ssim_mean = float(df['ssim'].mean()) if 'ssim' in df.columns and len(df) else float('nan')
+                ssim_std = float(df['ssim'].std()) if 'ssim' in df.columns and len(df) else float('nan')
+                summary: Dict[str, Any] = {
                     'pair': pair_name,
                     'feature': feature,
-                    'cwssim_mean': df['cwssim'].mean(),
-                })
+                    'ssim_mean': ssim_mean,
+                    'ssim_std': ssim_std,
+                    'overall_ssim': ssim_mean,
+                }
+                if 'cwssim' in df.columns:
+                    summary['cwssim_mean'] = float(df['cwssim'].mean())
+                    summary['cwssim_std'] = float(df['cwssim'].std())
+                if 'r_signed' in df.columns:
+                    summary['r_signed_mean'] = float(df['r_signed'].mean())
+                if 'sign_agreement' in df.columns:
+                    summary['sign_agreement_mean'] = float(df['sign_agreement'].mean())
+                if 'z_score' in df.columns:
+                    summary['z_score_mean'] = float(df['z_score'].mean())
+                if 'null_mean' in df.columns:
+                    summary['null_mean_avg'] = float(df['null_mean'].mean())
+                if 'valid_frac' in df.columns:
+                    summary['valid_frac_mean'] = float(df['valid_frac'].mean())
+                all_summaries.append(summary)
 
             if all_summaries:
                 df_summary = pd.DataFrame(all_summaries)
@@ -1135,25 +2000,22 @@ class VelocityModelSimilarity:
                 df_summary.to_csv(summary_file, index=False, float_format='%.6f')
                 self.logger.info(f"  ✅ {summary_file.name}")
 
-            # 保存 JSON 摘要
-            json_data = {}
-            for s in all_summaries:
-                json_data[s['pair']] = {
-                    k: float(v) if isinstance(v, (np.floating, float)) else v
-                    for k, v in s.items()
-                }
-            json_file = feat_dir / f'similarity_summary_{feature}.json'
-            with open(json_file, 'w', encoding='utf-8') as f:
-                json.dump(json_data, f, indent=2, ensure_ascii=False)
-            self.logger.info(f"  ✅ {json_file.name}")
+                json_data = {}
+                for s in all_summaries:
+                    json_data[s['pair']] = {
+                        k: (float(v) if isinstance(v, (np.floating, float)) else v)
+                        for k, v in s.items()
+                    }
+                json_file = feat_dir / f'similarity_summary_{feature}.json'
+                with open(json_file, 'w', encoding='utf-8') as f:
+                    json.dump(json_data, f, indent=2, ensure_ascii=False)
+                self.logger.info(f"  ✅ {json_file.name}")
 
         self.logger.info("✅ 所有结果已保存")
 
 
-# ==================== 可视化系统 ====================
-
 class SimilarityVisualization:
-    """多尺度相似性分析可视化 (v10.0)"""
+    """结构相似性可视化 (v17.0 — SSIM 主路径)"""
 
     def __init__(self, analyzer: VelocityModelSimilarity):
         self.analyzer = analyzer
@@ -1183,28 +2045,17 @@ class SimilarityVisualization:
         return None, None
 
     def _get_plot_extent(self, pair_name: str) -> Tuple[float, float, float, float]:
-        """
-        获取 2-2 空间分布图的显示范围，与 2-1 一致：使用模型网格的 lon/lat 范围。
-        2-1 使用 model.get_horizontal_slice 返回的 lon_grid/lat_grid 的 min/max。
-        """
+        """获取空间分布图显示范围：模型对公共 lon/lat。"""
         parts = pair_name.split('_vs_')
-        if len(parts) >= 1 and parts[0] in self.analyzer.models:
-            m = self.analyzer.models[parts[0]]
+        if len(parts) == 2 and parts[0] in self.analyzer.models and parts[1] in self.analyzer.models:
+            m1 = self.analyzer.models[parts[0]]
+            m2 = self.analyzer.models[parts[1]]
             return (
-                float(m.lon.min()), float(m.lon.max()),
-                float(m.lat.min()), float(m.lat.max()),
+                float(max(m1.lon.min(), m2.lon.min())),
+                float(min(m1.lon.max(), m2.lon.max())),
+                float(max(m1.lat.min(), m2.lat.min())),
+                float(min(m1.lat.max(), m2.lat.max())),
             )
-        # 回退：从 valid_standardized_region.json 读取
-        region_path = self.analyzer.base_config.dirs['models'] / 'metadata' / 'valid_standardized_region.json'
-        if region_path.exists():
-            try:
-                with open(region_path, 'r', encoding='utf-8') as f:
-                    region = json.load(f)
-                lon = region.get('lon', [80.0, 150.0])
-                lat = region.get('lat', [10.0, 55.0])
-                return (float(lon[0]), float(lon[1]), float(lat[0]), float(lat[1]))
-            except Exception:
-                pass
         return (80.0, 150.0, 10.0, 55.0)
 
     def _save_figure(self, fig: plt.Figure, name: str):
@@ -1227,56 +2078,59 @@ class SimilarityVisualization:
             else:
                 ax.axvline(x=depth, color='gray', linestyle='--', alpha=0.5, linewidth=0.8)
 
-    # ---------- 1. CW-SSIM 深度曲线 ----------
+    # ---------- 1. SSIM 深度曲线 ----------
 
-    def plot_depth_cwssim(self, feature: str = 'vs') -> Optional[plt.Figure]:
-        """绘制所有模型对的 CW-SSIM(z) 深度曲线"""
+    def plot_depth_ssim(self, feature: str = 'vs') -> Optional[plt.Figure]:
+        """绘制 SSIM 随深度变化曲线"""
         suffix = f'_{feature}_depth'
         depth_keys = [k for k in self.analyzer.results if k.endswith(suffix)]
         if not depth_keys:
             return None
 
-        self.logger.info(f"\n🎨 CW-SSIM 深度曲线: {feature.upper()}")
+        self.logger.info(f"\n🎨 SSIM 深度曲线: {feature.upper()}")
 
         fig, ax = plt.subplots(figsize=self.config.visualization['figsize_depth_curve'])
-
         pair_colors = ['#E41A1C', '#377EB8', '#4DAF4A', '#984EA3', '#FF7F00']
-
-        # 排序确保图例顺序一致（SinoScope vs EARA, SinoScope vs FWEA, EARA vs FWEA）
         depth_keys = sorted(depth_keys)
 
         for idx, dk in enumerate(depth_keys):
             df = self.analyzer.results[dk]
-            pair_name = dk[:-len(suffix)]
-            label = self._pair_label(pair_name)
-
+            if 'ssim' not in df.columns:
+                continue
+            label = self._pair_label(dk[:-len(suffix)])
             color = pair_colors[idx % len(pair_colors)]
-            ax.plot(df['cwssim'], df['depth_km'], '-o', color=color, linewidth=2,
+            ax.plot(df['ssim'], df['depth_km'], '-o', color=color, linewidth=2,
                     markersize=3, label=label)
 
-        ax.set_xlabel('CW-SSIM', fontsize=14)
+        ax.set_xlabel('SSIM', fontsize=14)
         ax.set_ylabel('Depth (km)', fontsize=14)
-        ax.set_title(f'Complex Wavelet SSIM vs Depth — {feature.upper()}',
-                     fontsize=16, fontweight='bold')
+        ax.set_title(
+            f'Structural Similarity vs Depth — {feature.upper()}',
+            fontsize=14, fontweight='bold',
+        )
         ax.invert_yaxis()
-        ax.set_xlim(0, 1.05)
+        ax.set_xlim(-0.05, 1.05)
         self._add_discontinuities(ax, 'horizontal')
         ax.legend(fontsize=11, loc='lower left')
         ax.grid(True, alpha=0.3)
         plt.tight_layout()
-        self._save_figure(fig, f'depth_cwssim_{feature}')
+        self._save_figure(fig, f'depth_ssim_{feature}')
         return fig
 
-    # ---------- 2. CW-SSIM 热图矩阵 ----------
+    def plot_depth_cwssim(self, feature: str = 'vs') -> Optional[plt.Figure]:
+        """兼容旧入口，转发到 SSIM 深度曲线。"""
+        return self.plot_depth_ssim(feature)
 
-    def plot_cwssim_heatmap(self, feature: str = 'vs') -> Optional[plt.Figure]:
-        """绘制 N×N CW-SSIM 相似性热图"""
+    # ---------- 2. 整体 SSIM 热图矩阵 ----------
+
+    def plot_ssim_heatmap(self, feature: str = 'vs') -> Optional[plt.Figure]:
+        """绘制 N×N 整体 SSIM 热图（各深度算术平均）"""
         suffix = f'_{feature}_depth'
         depth_keys = [k for k in self.analyzer.results if k.endswith(suffix)]
         if not depth_keys:
             return None
 
-        self.logger.info(f"\n🎨 CW-SSIM 热图: {feature.upper()}")
+        self.logger.info(f"\n🎨 整体 SSIM 热图: {feature.upper()}")
 
         model_keys = list(self.analyzer.models.keys())
         n = len(model_keys)
@@ -1284,16 +2138,17 @@ class SimilarityVisualization:
 
         for dk in sorted(depth_keys):
             df = self.analyzer.results[dk]
+            if 'ssim' not in df.columns:
+                continue
             pair_name = dk[:-len(suffix)]
             i, j = self._parse_pair_indices(pair_name, model_keys)
             if i is not None:
-                mean_cwssim = df['cwssim'].mean()
-                matrix[i, j] = mean_cwssim
-                matrix[j, i] = mean_cwssim
+                mean_ssim = float(df['ssim'].mean())
+                matrix[i, j] = mean_ssim
+                matrix[j, i] = mean_ssim
 
         names = [self.analyzer.models[k].name for k in model_keys]
         df_matrix = pd.DataFrame(matrix, index=names, columns=names)
-        # 遮罩下三角，显示上三角+对角线（常规相似性矩阵约定）
         mask = np.tril(np.ones_like(matrix, dtype=bool), k=-1)
 
         hm_cfg = self.config.visualization['heatmap']
@@ -1302,12 +2157,12 @@ class SimilarityVisualization:
         sns.heatmap(
             df_matrix, mask=mask, annot=True, fmt='.3f',
             cmap=hm_cfg['cmap'],
-            vmin=hm_cfg['cwssim_vmin'], vmax=hm_cfg['cwssim_vmax'],
+            vmin=hm_cfg.get('ssim_vmin', 0.0), vmax=hm_cfg.get('ssim_vmax', 1.0),
             square=True,
             linewidths=hm_cfg['cell_linewidth'],
             linecolor=hm_cfg['cell_linecolor'],
             annot_kws={'fontsize': hm_cfg['annot_fontsize'], 'fontweight': 'bold'},
-            cbar_kws={'label': 'CW-SSIM Index', 'shrink': 0.8},
+            cbar_kws={'label': 'SSIM (depth-averaged)', 'shrink': 0.8},
             ax=ax,
         )
 
@@ -1318,18 +2173,24 @@ class SimilarityVisualization:
 
         cbar = ax.collections[0].colorbar
         cbar.ax.tick_params(labelsize=hm_cfg['cbar_fontsize'])
-        cbar.ax.set_ylabel('CW-SSIM Index', fontsize=hm_cfg['cbar_fontsize'] + 2,
-                           rotation=270, labelpad=20)
+        cbar.ax.set_ylabel(
+            'SSIM Index', fontsize=hm_cfg['cbar_fontsize'] + 2,
+            rotation=270, labelpad=20,
+        )
 
         ax.set_title(
             f'Model Similarity Matrix — {feature.upper()}\n'
-            f'Complex Wavelet SSIM (depth-averaged)',
+            f'SSIM (depth-averaged)',
             fontsize=hm_cfg['title_fontsize'], fontweight='bold', pad=15,
         )
 
         plt.tight_layout()
-        self._save_figure(fig, f'cwssim_heatmap_{feature}')
+        self._save_figure(fig, f'ssim_heatmap_{feature}')
         return fig
+
+    def plot_cwssim_heatmap(self, feature: str = 'vs') -> Optional[plt.Figure]:
+        """兼容旧入口，转发到整体 SSIM 热图。"""
+        return self.plot_ssim_heatmap(feature)
 
     # ---------- 4. CW-SSIM 空间分布图 ----------
 
@@ -1434,114 +2295,69 @@ class SimilarityVisualization:
     # ---------- 5. 综合概览面板 ----------
 
     def plot_similarity_overview(self, feature: str = 'vs') -> Optional[plt.Figure]:
-        """绘制 CW-SSIM 综合面板（2×1 布局）"""
+        """整体 SSIM 热图 + 随深度 SSIM 曲线（1×2）"""
         suffix_depth = f'_{feature}_depth'
         depth_keys = [k for k in self.analyzer.results if k.endswith(suffix_depth)]
-
         if not depth_keys:
             return None
 
         self.logger.info(f"\n🎨 综合概览面板: {feature.upper()}")
-
         depth_keys = sorted(depth_keys)
-
-        fig = plt.figure(figsize=(14, 10))
-        gs = fig.add_gridspec(2, 2, hspace=0.35, wspace=0.3)
-
         pair_colors = ['#E41A1C', '#377EB8', '#4DAF4A', '#984EA3', '#FF7F00']
 
-        def _get_label(dk):
-            if dk.endswith(suffix_depth):
-                return self._pair_label(dk[:-len(suffix_depth)])
-            return dk
+        def _get_label(dk: str) -> str:
+            return self._pair_label(dk[:-len(suffix_depth)])
 
-        # (0,0) CW-SSIM vs Depth
-        ax_cwssim = fig.add_subplot(gs[0, 0])
+        fig, (ax_depth, ax_heatmap) = plt.subplots(1, 2, figsize=(16, 7))
+
         for idx, dk in enumerate(depth_keys):
             df = self.analyzer.results[dk]
-            ax_cwssim.plot(df['cwssim'], df['depth_km'], '-o', color=pair_colors[idx % 5],
-                           linewidth=2, markersize=3, label=_get_label(dk))
-        ax_cwssim.set_xlabel('CW-SSIM', fontsize=12)
-        ax_cwssim.set_ylabel('Depth (km)', fontsize=12)
-        ax_cwssim.set_title('CW-SSIM vs Depth', fontsize=14, fontweight='bold')
-        ax_cwssim.invert_yaxis()
-        ax_cwssim.set_xlim(0, 1.05)
-        ax_cwssim.legend(fontsize=9)
-        ax_cwssim.grid(True, alpha=0.3)
-        self._add_discontinuities(ax_cwssim)
+            if 'ssim' not in df.columns:
+                continue
+            ax_depth.plot(
+                df['ssim'], df['depth_km'], '-o',
+                color=pair_colors[idx % len(pair_colors)],
+                linewidth=2, markersize=3, label=_get_label(dk),
+            )
+        ax_depth.set_xlabel('SSIM', fontsize=12)
+        ax_depth.set_ylabel('Depth (km)', fontsize=12)
+        ax_depth.set_title('SSIM vs Depth', fontsize=14, fontweight='bold')
+        ax_depth.invert_yaxis()
+        ax_depth.set_xlim(-0.05, 1.05)
+        ax_depth.legend(fontsize=9)
+        ax_depth.grid(True, alpha=0.3)
+        self._add_discontinuities(ax_depth)
 
-        # (0,1) CW-SSIM Heatmap
-        ax_heatmap = fig.add_subplot(gs[0, 1])
         model_keys = list(self.analyzer.models.keys())
         n = len(model_keys)
         matrix = np.ones((n, n))
         for dk in depth_keys:
             df = self.analyzer.results[dk]
+            if 'ssim' not in df.columns:
+                continue
             pair_name = dk[:-len(suffix_depth)]
             i, j = self._parse_pair_indices(pair_name, model_keys)
             if i is not None:
-                val = df['cwssim'].mean()
+                val = float(df['ssim'].mean())
                 matrix[i, j] = val
                 matrix[j, i] = val
 
         hm_cfg = self.config.visualization['heatmap']
         names = [self.analyzer.models[k].name for k in model_keys]
-        mask = np.triu(np.ones_like(matrix, dtype=bool), k=1)
-        sns.heatmap(pd.DataFrame(matrix, index=names, columns=names),
-                    mask=mask, annot=True, fmt='.3f', cmap=hm_cfg['cmap'],
-                    vmin=hm_cfg['cwssim_vmin'], vmax=hm_cfg['cwssim_vmax'],
-                    square=True,
-                    annot_kws={'fontsize': 16, 'fontweight': 'bold'},
-                    cbar_kws={'shrink': 0.8}, ax=ax_heatmap)
-        ax_heatmap.set_title('CW-SSIM Matrix', fontsize=14, fontweight='bold')
-
-        # (1,0) CW-SSIM 统计对比
-        ax_stats = fig.add_subplot(gs[1, 0])
-        stats_data = []
-        for idx, dk in enumerate(depth_keys):
-            df = self.analyzer.results[dk]
-            stats_data.append({
-                'pair': _get_label(dk),
-                'mean': df['cwssim'].mean(),
-                'std': df['cwssim'].std(),
-                'min': df['cwssim'].min(),
-                'max': df['cwssim'].max(),
-            })
-        df_stats = pd.DataFrame(stats_data)
-        x_pos = np.arange(len(df_stats))
-        bars = ax_stats.bar(x_pos, df_stats['mean'], color=pair_colors[:len(df_stats)],
-                           yerr=df_stats['std'], capsize=5, alpha=0.8)
-        ax_stats.set_xticks(x_pos)
-        ax_stats.set_xticklabels(df_stats['pair'], rotation=45, ha='right', fontsize=9)
-        ax_stats.set_ylabel('CW-SSIM', fontsize=12)
-        ax_stats.set_title('CW-SSIM Statistics', fontsize=14, fontweight='bold')
-        ax_stats.set_ylim(0, 1.1)
-        ax_stats.grid(True, alpha=0.3, axis='y')
-        for i, (mean, min_v, max_v) in enumerate(zip(df_stats['mean'], df_stats['min'], df_stats['max'])):
-            ax_stats.text(i, mean + 0.05, f'{mean:.3f}', ha='center', fontsize=9)
-            ax_stats.text(i, min_v - 0.05, f'{min_v:.3f}', ha='center', fontsize=8, alpha=0.7)
-            ax_stats.text(i, max_v + 0.05, f'{max_v:.3f}', ha='center', fontsize=8, alpha=0.7)
-
-        # (1,1) CW-SSIM 深度分布箱线图
-        ax_box = fig.add_subplot(gs[1, 1])
-        all_cwssim = []
-        all_labels = []
-        for dk in depth_keys:
-            df = self.analyzer.results[dk]
-            all_cwssim.append(df['cwssim'].values)
-            all_labels.append(_get_label(dk))
-        bp = ax_box.boxplot(all_cwssim, labels=all_labels, patch_artist=True)
-        for patch, color in zip(bp['boxes'], pair_colors[:len(all_cwssim)]):
-            patch.set_facecolor(color)
-            patch.set_alpha(0.6)
-        ax_box.set_ylabel('CW-SSIM', fontsize=12)
-        ax_box.set_title('CW-SSIM Distribution', fontsize=14, fontweight='bold')
-        ax_box.set_ylim(0, 1.1)
-        ax_box.grid(True, alpha=0.3, axis='y')
-        plt.setp(ax_box.xaxis.get_majorticklabels(), rotation=45, ha='right', fontsize=9)
+        mask = np.tril(np.ones_like(matrix, dtype=bool), k=-1)
+        sns.heatmap(
+            pd.DataFrame(matrix, index=names, columns=names),
+            mask=mask, annot=True, fmt='.3f', cmap=hm_cfg['cmap'],
+            vmin=hm_cfg.get('ssim_vmin', 0.0), vmax=hm_cfg.get('ssim_vmax', 1.0),
+            square=True,
+            annot_kws={'fontsize': 16, 'fontweight': 'bold'},
+            cbar_kws={'label': 'SSIM (depth-averaged)', 'shrink': 0.8},
+            ax=ax_heatmap,
+        )
+        ax_heatmap.set_title('Overall SSIM', fontsize=14, fontweight='bold')
 
         fig.suptitle(
-            f'Similarity Overview — {feature.upper()}',
+            f'Structural Similarity — {feature.upper()}',
             fontsize=18, fontweight='bold', y=1.01,
         )
         plt.tight_layout()
@@ -1552,35 +2368,32 @@ class SimilarityVisualization:
 # ==================== 主函数 ====================
 
 def main():
-    """主函数"""
+    """主函数 — Wang 2004 SSIM：整体 + 随深度"""
     print("\n" + "=" * 80)
-    print("🚀 EASTASIA-FWI 多尺度速度模型相似性分析 (v13.0)")
-    print("   CW-SSIM")
+    print("🚀 EASTASIA-FWI 速度模型结构相似性分析 (v17.0)")
+    print("   框架: Wang et al. (2004) SSIM")
     print("=" * 80)
-    print("\n🎯 核心指标:")
-    print("  • CW-SSIM — 复小波结构相似性 (抗畸变, 多尺度)")
-    print(f"\n🔧 CW-SSIM 后端: {'dtcwt (DT-CWT)' if HAS_DTCWT else 'Gabor 滤波器组'}")
+    print("\n🎯 主路径:")
+    print("  • 每层去横向平均后计算 SSIM")
+    print("  • 产品: 整体 SSIM（深度平均）+ 随深度 SSIM 曲线")
+    print("  • 分辨率: 按模型对最粗 (EARA–FWEA=0.25°, Sino对=1.0°)")
     print("=" * 80 + "\n")
 
+    analyzer = None
     try:
-        # 1. 初始化
         print("📋 步骤 1/5: 初始化配置...")
         config = ModelSimilarityConfig()
         analyzer = VelocityModelSimilarity(config)
 
-        # 2. 加载模型
         print("\n📦 步骤 2/5: 加载 NetCDF 模型...")
         analyzer.load_models()
 
-        # 3. 批量分析
         print("\n🔬 步骤 3/5: 批量相似性分析...")
         analyzer.compare_all_models()
 
-        # 4. 保存结果
         print("\n💾 步骤 4/5: 保存结果...")
         analyzer.save_results()
 
-        # 5. 可视化
         print("\n🎨 步骤 5/5: 生成可视化...")
         visualizer = SimilarityVisualization(analyzer)
 
@@ -1592,25 +2405,16 @@ def main():
 
         for feature in features_done:
             print(f"\n  📊 {feature.upper()}...")
-            visualizer.plot_depth_cwssim(feature)
-            visualizer.plot_cwssim_heatmap(feature)
-            visualizer.plot_cwssim_spatial(feature)
+            visualizer.plot_depth_ssim(feature)
+            visualizer.plot_ssim_heatmap(feature)
             visualizer.plot_similarity_overview(feature)
+            if analyzer.config.analysis.get('compute_cwssim_spatial'):
+                visualizer.plot_cwssim_spatial(feature)
 
         print("\n" + "=" * 80)
-        print("✅ 多尺度相似性分析完成!")
+        print("✅ 分析完成 (SSIM 主路径)")
         print(f"📁 结果: {analyzer.output_dir}")
         print(f"📁 图表: {analyzer.figures_dir}")
-        print("\n📊 输出文件:")
-        for feature in features_done:
-            print(f"\n  {feature.upper()}:")
-            print(f"    • 2-2_depth_cwssim_{feature}        — CW-SSIM 深度曲线")
-            print(f"    • 2-2_cwssim_heatmap_{feature}      — CW-SSIM 热图矩阵")
-            print(f"    • 2-2_cwssim_spatial_*_{feature}    — CW-SSIM 空间分布")
-            print(f"    • 2-2_similarity_overview_{feature} — 综合概览面板")
-        print("\n🎯 下一步:")
-        print("  • 基于相似性结果进行模型选择与融合 (4_Assembly/)")
-        print("  • 选择代表性模型进行 SPECFEM3D 正演 (3_Data_space_simulation/)")
         print("=" * 80 + "\n")
 
     except KeyboardInterrupt:
@@ -1619,6 +2423,9 @@ def main():
         print(f"\n❌ 分析失败: {e}")
         import traceback
         traceback.print_exc()
+    finally:
+        if analyzer is not None:
+            analyzer.close()
 
 
 if __name__ == "__main__":
