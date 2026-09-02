@@ -135,14 +135,25 @@ class ModelSimilarityConfig:
 
         # ============ 2D SSIM 参数（逐深度切片的横向结构）============
         self.ssim_2d = {
-            # 横向高斯窗口（度）；1D 背景已由 ssim 段负责，此处只看横向结构
-            'win_deg': 6.0,
-            'win_size': 11,
-            'gaussian_sigma_per_pixel': 1.5 / 11.0,
+            # 所有模型对共用同一分析网格与同一区域。若按模型对各取最粗分辨率，
+            # 0.25° 的对会保留 1° 以下短波长内容（分歧最大的部分），而 1.0° 的对
+            # 已被块平均掉，两者的分数不是同一个量，矩阵不可比。
+            'resolution_mode': 'global_coarsest',   # 'pair_coarsest' 为旧行为
+            'region_mode': 'all_models',            # 'pair' 为旧行为
+            # 高斯窗口的物理尺度。σ=2.0° ≈ 220 km，与被比模型的横向分辨率同量级；
+            # 更小的窗口是在噪声尺度上比结构，会系统性压低分数。
+            'sigma_deg': 2.0,
+            'truncate_sigma': 3.0,
             'K1': 0.01,
             'K2': 0.03,
-            # 去掉该层横向平均，避免 1D 背景把分数抬到 0.9 以上
-            'perturbation': 'layer_mean',
+            # 'relative': δlnV = (V - V̄_layer)/V̄_layer，去掉 1D 背景且无量纲；
+            # 'absolute': km/s 残差，深部背景速度高会把对比度项抬高（旧行为）
+            'perturbation': 'relative',
+            # 逐层用两模型合并 RMS 归一，再按 ±clip_sigma 映射到非负区间。
+            # 等价于把两张图用完全相同的对称色标出图后再比较，
+            # 消除"平移量任取"的随意性，且各深度处于同一尺度。
+            'normalize': 'pooled_rms',
+            'clip_sigma': 3.0,
             'use_area_weights': True,
         }
 

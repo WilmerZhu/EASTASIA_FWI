@@ -2266,13 +2266,10 @@ class BasicClusteringVisualizer:
         if lead_geo_map:
             ax0 = axes[0, 0]
             try:
-                # .../moho_4band/<model>/visualizations → scheme 根下共享缓存
+                # output_dir 是叶子图件目录（figures/model_clustering/<scheme>/<model>），
+                # 其父目录即 scheme 根，各模型共享同一份地质底图缓存避免重复渲染
                 out_res = Path(output_dir).resolve()
-                cache_dir = (
-                    out_res.parents[1] / '_geology_basemap_cache'
-                    if out_res.name == 'visualizations'
-                    else out_res / '_geology_basemap_cache'
-                )
+                cache_dir = out_res.parent / '_geology_basemap_cache'
                 geo_png = self._ensure_geology_basemap_png(
                     map_extent, cache_dir=cache_dir, dpi=220
                 )

@@ -149,11 +149,18 @@ class FaciesVotingAnalyzer:
         self.input_root = (
             self.base_config.dirs['results'] / 'model_clustering' / scheme
         )
+        # 数据与图件分置：NetCDF/CSV 留在 results/，图件集中到 figures/
         if output_dir:
             self.output_dir = Path(output_dir)
+            self.figure_dir = self.output_dir
         else:
             self.output_dir = self.input_root / 'voting'
+            self.figure_dir = (
+                self.base_config.dirs['figures'] / 'model_clustering'
+                / scheme / 'voting'
+            )
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.figure_dir.mkdir(parents=True, exist_ok=True)
         # 4. 日志
         self.logger = self.base_config.setup_logger(
             'EASTASIA-FWI.FaciesVoting', self.config.logging['level']
@@ -167,7 +174,8 @@ class FaciesVotingAnalyzer:
 
         self.logger.info("🎯 跨模型速度相投票模块初始化完成")
         self.logger.info(f"  输入: {self.input_root}")
-        self.logger.info(f"  输出: {self.output_dir}")
+        self.logger.info(f"  数据输出: {self.output_dir}")
+        self.logger.info(f"  图件输出: {self.figure_dir}")
         self.logger.info(f"  模型: {', '.join(self.config.models)}")
 
     # ------------------------------------------------------------------
@@ -449,7 +457,7 @@ class FaciesVotingAnalyzer:
 
         out = None
         for fmt in viz['figure_format']:
-            out_path = self.output_dir / f'2-4_facies_voting_map.{fmt}'
+            out_path = self.figure_dir / f'2-4_facies_voting_map.{fmt}'
             fig.savefig(out_path, dpi=viz['dpi'])
             if fmt == 'jpg':
                 out = out_path
@@ -580,7 +588,7 @@ class FaciesVotingAnalyzer:
 
         out = None
         for fmt in viz['figure_format']:
-            p = self.output_dir / f'2-4-2_voting_sections.{fmt}'
+            p = self.figure_dir / f'2-4-2_voting_sections.{fmt}'
             fig.savefig(p, dpi=viz['dpi'])
             if fmt == 'jpg':
                 out = p
@@ -690,7 +698,7 @@ class FaciesVotingAnalyzer:
 
         out = None
         for fmt in viz['figure_format']:
-            p = self.output_dir / f'2-4-3_class_mean_profiles.{fmt}'
+            p = self.figure_dir / f'2-4-3_class_mean_profiles.{fmt}'
             fig.savefig(p, dpi=viz['dpi'])
             if fmt == 'jpg':
                 out = p
@@ -815,7 +823,7 @@ class FaciesVotingAnalyzer:
 
         out = None
         for fmt in viz['figure_format']:
-            p = self.output_dir / f'2-4-4_dissent_attribution.{fmt}'
+            p = self.figure_dir / f'2-4-4_dissent_attribution.{fmt}'
             fig.savefig(p, dpi=viz['dpi'])
             if fmt == 'jpg':
                 out = p

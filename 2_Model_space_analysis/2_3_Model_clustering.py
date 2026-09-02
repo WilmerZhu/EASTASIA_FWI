@@ -2298,9 +2298,17 @@ class SmartClusteringPipeline:
         self.all_results: Dict[str, Any] = {}
 
     def _scheme_output_root(self) -> Path:
-        """结果根目录：results/model_clustering/{scheme}/"""
+        """数据根目录：results/model_clustering/{scheme}/（标签、概率、NetCDF、统计）"""
         scheme = str(self.config.depth_stratified.get('scheme', 'fixed_3band'))
         return self.base_config.dirs['results'] / 'model_clustering' / scheme
+
+    def _scheme_figure_root(self) -> Path:
+        """图件根目录：figures/model_clustering/{scheme}/
+
+        图件与数据分置：图件集中在 figures/ 便于取用与投稿，数据留在 results/。
+        """
+        scheme = str(self.config.depth_stratified.get('scheme', 'fixed_3band'))
+        return self.base_config.dirs['figures'] / 'model_clustering' / scheme
 
     def _setup_logger(self) -> logging.Logger:
         """回退日志初始化"""
@@ -2468,7 +2476,7 @@ class SmartClusteringPipeline:
 
     def _visualize_all_results(self, results: Dict[str, Any], model_name: str) -> None:
         """生成可视化"""
-        viz_dir = self._scheme_output_root() / model_name / 'visualizations'
+        viz_dir = self._scheme_figure_root() / model_name
         viz_dir.mkdir(parents=True, exist_ok=True)
 
         gmm_results = results['gmm_results']
