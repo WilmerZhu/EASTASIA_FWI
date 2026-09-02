@@ -24,7 +24,7 @@ EASTASIA-FWI 单模型速度相聚类模块 (v7.6)
 6. 聚类剖面图按 δlnVp/δlnVs 特征自动标注 facies 推测解释名
 
 作者：EASTASIA-FWI Team
-日期：2026-08-05
+日期：2026-09-02
 版本：v7.6
 """
 
@@ -271,7 +271,7 @@ class ClusteringConfig:
         # "K* 是真实簇数"，不如证明结论在一段 K 区间内不变。复用 BIC 扫描已
         # 缓存的各 K 模型，边际开销仅为逐 K 的一次 predict。
         'k_robustness': {
-            'enabled': False,
+            'enabled': True,
             'neutral_threshold': 0.01,  # 快/慢三分类的中性带半宽（物理 δlnVs）
         },
         # 簇编号排序：GMM 组分索引由 EM 初始化随机决定，未排序时 C0 在不同
@@ -293,7 +293,7 @@ class ClusteringConfig:
         # ⚠️ 跨模型投票前提：三个模型必须用同一组 (beta, 邻域定义)，否则有效
         # 平滑量不同，一致性不可比。
         'hmrf': {
-            'enabled': False,
+            'enabled': True,
             'beta': 1.0,        # Potts 耦合强度（相对于对数似然的量纲）
             'max_iter': 8,      # 均场外迭代上限
             'tol': 1e-3,        # 标签变动比例收敛阈值
