@@ -133,6 +133,40 @@ class ClusteringConfig:
             'method': 'dln',  # 'dln' | 'relative'=(V-Vref)/Vref
             'reference': 'horizontal_mean',  # 与 2_1 一致
         },
+        # 扰动域上的特征基变换：
+        #   'none'             — (δlnVp, δlnVs)，原始特征对
+        #   'vs_ratio'         — (δlnVs, δln(Vp/Vs))，解相关基
+        #   'append_ratio'     — (δlnVp, δlnVs, δln(Vp/Vs))，严格秩亏，仅对照
+        #   'append_abs_ratio' — (δlnVp, δlnVs, Vp/Vs 绝对值)
+        #
+        # 'append_abs_ratio' 的第三特征相对前两者的独有信息恰为 ln R_ref(z)，
+        # 即纯深度项。实测该项占带内 ln(Vp/Vs) 方差：地壳带仅 0.4%~4.6%
+        # （三特征条件数 35~72，接近共线）；岩石圈 15%~47%、下地幔 18%~38%
+        # （条件数 4~6.5）。即在碎片问题最重的地壳带它几乎不带新信息，而在
+        # 深部带新增的信息本质上是深度——而深度已由分带处理。
+        #
+        # ── FWEA23 三种设置实测（2026-09-03）──
+        # 带内相邻体元标签跳变率（横向 / 垂向）：
+        #   地壳    基线 0.103/0.638 ｜ vs_ratio 0.084/0.545 ｜ abs 0.067/0.658
+        #   过渡带  基线 0.069/0.121 ｜ vs_ratio 0.141/0.157 ｜ abs 0.034/0.216
+        # 'append_abs_ratio' 的横向跳变下降并非横向结构改善，而是簇退化为深度
+        # 壳层（地壳带 4 个簇仅占单一深度层），过渡带垂/横比由 1.75 升至 6.35，
+        # 600 km 滞留板片在切片图上完全消失。
+        # 'vs_ratio' 仅在地壳带小幅改善，深部因 Vp 与 Vs near-collinear、其差
+        # 主要为噪声，放大后过渡带横向跳变翻倍（0.069→0.141）。
+        # 结论：保持 'none'。上述两项仅供论文敏感性测试复现。
+        #
+        # δlnVp 与 δlnVs 在本区高度相关（EARA2024 各带 0.76~0.98，
+        # SinoScope 0.35~0.73）。两者近乎共线时 GMM 实际只沿一个方向切分，
+        # 表现为按振幅分档、缺乏地理局部性的碎片类。改用 (δlnVs,
+        # δln(Vp/Vs)) 这组基后信息总量不变，但标准化会把幅度更小的比值项
+        # 放大到同等权重，等价于让"热主导"与"成分/熔融/流体主导"两个方向
+        # 各占一半，而非两个轴都在测同一件事。
+        #
+        # ⚠️ δln(Vp/Vs) = δlnVp − δlnVs 是前两者的线性组合，因此
+        # 'append_ratio' 的三维特征秩仍为 2，协方差奇异、只能靠 reg_covar
+        # 撑住，结果不可用于科学解释，仅作对照。
+        'feature_transform': 'none',
         'normalization': {
             'enabled': True,
             'method': 'standard',
@@ -668,6 +702,18 @@ class DataCube3DProcessor:
             )
             self.logger.info(f"  特征空间: {prep_info['feature_space']}")
 
+        # 特征基变换（须在标准化之前，在扰动域上进行）
+        tf_mode = str(self.config.preprocessing.get('feature_transform', 'none'))
+        if tf_mode != 'none':
+            working_cube, eff_names, disp_names = self._apply_feature_transform(
+                working_cube, list(metadata['features']), tf_mode,
+                raw_cube=data_cube,
+            )
+            prep_info['feature_names'] = disp_names
+            prep_info['features_effective'] = eff_names
+            prep_info['feature_transform'] = tf_mode
+            prep_info['preprocessing_steps'].append(f'特征基变换({tf_mode})')
+
         # 缓存未标准化的 3D 特征立方体（供剖面叠图：δlnVp/δlnVs）
         self.last_feature_cube = np.asarray(working_cube, dtype=np.float32)
 
@@ -689,6 +735,86 @@ class DataCube3DProcessor:
             f"✅ 数据准备完成: {prep_info['original_shape']} → {prep_info['final_shape']}"
         )
         return X, spatial_indices, prep_info
+
+    def _apply_feature_transform(
+        self,
+        cube: np.ndarray,
+        features: List[str],
+        mode: str,
+        raw_cube: Optional[np.ndarray] = None,
+    ) -> Tuple[np.ndarray, List[str], List[str]]:
+        """
+        在扰动域上做特征基变换，用 Vp/Vs 相关量替代或补充原始特征对。
+
+        Args:
+            cube: 扰动域特征立方体 (n_lat, n_lon, n_dep, n_feat)
+            features: 原始特征名（须含 vp 与 vs）
+            mode: 'vs_ratio' | 'append_ratio' | 'append_abs_ratio'
+            raw_cube: 绝对速度立方体，'append_abs_ratio' 必需
+
+        Returns:
+            (变换后立方体, 有效特征名, 展示用特征名)
+
+        Raises:
+            ValueError: 特征中缺少 vp 或 vs，或缺少 raw_cube
+        """
+        low = [str(f).lower() for f in features]
+        if 'vp' not in low or 'vs' not in low:
+            raise ValueError(
+                f"特征基变换 '{mode}' 需要 vp 与 vs，当前特征: {features}"
+            )
+        i_p, i_s = low.index('vp'), low.index('vs')
+        dln_p = cube[:, :, :, i_p]
+        dln_s = cube[:, :, :, i_s]
+        # δln(Vp/Vs) = δlnVp − δlnVs
+        dln_r = dln_p - dln_s
+
+        if mode == 'vs_ratio':
+            out = np.stack([dln_s, dln_r], axis=-1)
+            eff = ['vs', 'vp_vs']
+            disp = [r'dln_vs', r'dln_vp_vs']
+        elif mode == 'append_ratio':
+            self.logger.warning(
+                "  ⚠️ 'append_ratio' 的第三个特征是前两者的线性组合，"
+                "协方差秩亏（3 维空间中秩为 2），仅作对照实验使用"
+            )
+            out = np.stack([dln_p, dln_s, dln_r], axis=-1)
+            eff = ['vp', 'vs', 'vp_vs']
+            disp = ['dln_vp', 'dln_vs', 'dln_vp_vs']
+        elif mode == 'append_abs_ratio':
+            if raw_cube is None:
+                raise ValueError("'append_abs_ratio' 需要绝对速度立方体 raw_cube")
+            with np.errstate(divide='ignore', invalid='ignore'):
+                ratio = raw_cube[:, :, :, i_p] / raw_cube[:, :, :, i_s]
+                ratio[~np.isfinite(ratio)] = np.nan
+            # 绝对比值相对扰动对的独有信息恰为 ln R_ref(z)，即纯深度项；
+            # 该项在带内占比小时三特征接近共线，须监控条件数。
+            out = np.stack([dln_p, dln_s, ratio], axis=-1)
+            eff = ['vp', 'vs', 'vp_vs_abs']
+            disp = ['dln_vp', 'dln_vs', 'Vp/Vs']
+            r_fin = ratio[np.isfinite(ratio)]
+            if r_fin.size:
+                self.logger.info(
+                    f"  🔄 特征基变换 [{mode}]: Vp/Vs 绝对值范围 "
+                    f"[{np.nanpercentile(r_fin, 1):.3f}, "
+                    f"{np.nanpercentile(r_fin, 99):.3f}]"
+                )
+            return out.astype(np.float32), eff, disp
+        else:
+            raise ValueError(f"未知的 feature_transform: {mode}")
+
+        finite = dln_r[np.isfinite(dln_r)]
+        if finite.size:
+            # 与 δlnVs 的幅度对比：解释标准化后比值项被放大的倍数
+            s_fin = dln_s[np.isfinite(dln_s)]
+            self.logger.info(
+                f"  🔄 特征基变换 [{mode}]: δln(Vp/Vs) 范围 "
+                f"[{np.nanpercentile(finite, 1):.4f}, "
+                f"{np.nanpercentile(finite, 99):.4f}], "
+                f"std 比 δlnVs 小 {np.nanstd(s_fin) / max(np.nanstd(finite), 1e-12):.1f}×"
+                f"（标准化后被等比放大）"
+            )
+        return out.astype(np.float32), eff, disp
 
     def _to_perturbation(
         self,
@@ -2432,6 +2558,11 @@ class SmartClusteringPipeline:
                     if prep_info.get('feature_names'):
                         metadata = dict(metadata)
                         metadata['feature_display_names'] = prep_info['feature_names']
+                    # 基变换会改变特征列的构成与顺序，簇排序（按 δlnVs 列）
+                    # 与剖面叠图都依赖 metadata['features']，须同步覆盖
+                    if prep_info.get('features_effective'):
+                        metadata = dict(metadata)
+                        metadata['features'] = list(prep_info['features_effective'])
 
                     results: Dict[str, Any] = {
                         'model_name': model_name,
