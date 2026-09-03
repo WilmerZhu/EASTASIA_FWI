@@ -1405,14 +1405,29 @@ class EnhancedClusteringVisualizer:
             ax.plot(xf, yf, 'o-', color=C_BIC, lw=2.0, ms=5, zorder=3,
                     label='BIC (normalized)')
 
+            is_fixed = rule == 'fixed_k'
+            # 先验固定 K 时，拐点仍绘出但降为诊断标记，星号标在实际采用的 K
+            k_knee = int(ba.get('knee_n', k_sel))
+            if is_fixed and k_knee in ks:
+                jk = int(np.where(ks == k_knee)[0][0])
+                if finite[jk]:
+                    jkf = int(np.where(xf == x[jk])[0][0])
+                    ax.vlines(x[jk], yf[jkf], chord[jkf], color=C_CHORD,
+                              lw=1.4, ls=':', zorder=4)
+                    ax.plot([x[jk]], [yf[jkf]], 'D', color='none',
+                            mec=C_CHORD, mew=1.6, ms=8, zorder=5,
+                            label='BIC knee (diagnostic only)')
+
             j = int(np.where(ks == k_sel)[0][0])
             if finite[j]:
                 jf = int(np.where(xf == x[j])[0][0])
-                ax.vlines(x[j], yf[jf], chord[jf], color=C_SEL, lw=1.6,
-                          ls=':', zorder=4)
+                if not is_fixed:
+                    ax.vlines(x[j], yf[jf], chord[jf], color=C_SEL, lw=1.6,
+                              ls=':', zorder=4)
                 ax.plot([x[j]], [yf[jf]], '*', color=C_SEL, ms=19, mec='k',
-                        mew=0.6, zorder=5,
-                        label='Selected K (max distance to chord)')
+                        mew=0.6, zorder=6,
+                        label=('Prescribed K (prior)' if is_fixed
+                               else 'Selected K (max distance to chord)'))
 
             ax.set_xticks(x)
             ax.set_xticklabels([str(k) for k in ks])
@@ -1422,7 +1437,10 @@ class EnhancedClusteringVisualizer:
             ax.set_ylabel('Normalized BIC', fontsize=10)
             ax.grid(alpha=0.25, ls=':')
 
-            note = 'BIC knee' if rule == 'bic_knee' else rule
+            if is_fixed:
+                note = f'prescribed; BIC knee = {k_knee}'
+            else:
+                note = 'BIC knee' if rule == 'bic_knee' else rule
             k_argmin = ba.get('argmin_n')
             note += f'; argmin BIC = {k_argmin}' if k_argmin is not None else ''
             ax.set_title(

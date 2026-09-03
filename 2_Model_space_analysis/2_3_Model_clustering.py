@@ -191,7 +191,11 @@ class ClusteringConfig:
                         'depth_cap': 410,
                         'min_clusters': 2,
                         'max_clusters': 10,
-                        'fixed_k': None,
+                        # 地质先验：研究区内 Hasterok et al. (2022) 地质省
+                        # prov_type 面积占比 ≥1% 的类别恰为 10 种（火山弧、
+                        # 增生杂岩、造山带、洋壳、陆缘/洋内弧后盆地、克拉通、
+                        # 地盾、被动陆缘、窄裂谷）
+                        'fixed_k': 10,
                     },
                     {
                         'name': 'lithosphere',
@@ -199,7 +203,8 @@ class ClusteringConfig:
                         'depth_range': [None, 410],
                         'min_clusters': 2,
                         'max_clusters': 10,
-                        'fixed_k': None,
+                        # 分辨率上界：动态范围 / 模型间 RMS 差异 = 5.0
+                        'fixed_k': 5,
                     },
                     {
                         'name': 'transition_zone',
@@ -207,7 +212,8 @@ class ClusteringConfig:
                         'depth_range': [410, 660],
                         'min_clusters': 2,
                         'max_clusters': 10,
-                        'fixed_k': None,
+                        # 分辨率上界 3.9；取 5 以容纳滞留板片的内部分异
+                        'fixed_k': 5,
                     },
                     {
                         'name': 'lower_mantle',
@@ -215,7 +221,8 @@ class ClusteringConfig:
                         'depth_range': [660, 1000],
                         'min_clusters': 2,
                         'max_clusters': 10,
-                        'fixed_k': None,
+                        # 分辨率上界 3.2；取 5 与上覆各带保持可比
+                        'fixed_k': 5,
                     },
                 ],
             },
@@ -270,6 +277,10 @@ class ClusteringConfig:
         # K 扫描稳健性（论文主证据，默认关闭以免拖慢常规运行）：与其论证
         # "K* 是真实簇数"，不如证明结论在一段 K 区间内不变。复用 BIC 扫描已
         # 缓存的各 K 模型，边际开销仅为逐 K 的一次 predict。
+        # 先验固定 K 时是否仍执行 BIC 扫描。开启后 BIC 曲线仅作诊断进附录，
+        # 且其缓存模型可供 K 扫描稳健性复用（k_robustness 开启时本就要拟合
+        # 各 K，故此项几乎不增加额外开销）。
+        'bic_diagnostic_when_fixed': True,
         'k_robustness': {
             'enabled': True,
             'neutral_threshold': 0.01,  # 快/慢三分类的中性带半宽（物理 δlnVs）
@@ -1816,16 +1827,38 @@ class GMMAutoClusteringOptimizer:
             X_band = X[mask]
             fixed_k = band.get('fixed_k')
             if fixed_k:
-                # 先验固定 K：跳过 BIC 扫描（清空缓存避免复用旧带的模型）
                 optimal_n = int(fixed_k)
-                self._cached_gmms = {}
-                bic_analysis = {
-                    'band_name': name,
-                    'optimal_n': optimal_n,
-                    'optimal_bic': float('nan'),
-                    'selection_rule': 'fixed_k',
-                }
-                self.logger.info(f"  📌 [{name}] 先验固定 K={optimal_n}（跳过 BIC 扫描）")
+                keep_bic = self.config.auto_gmm.get('bic_diagnostic_when_fixed', True)
+                if keep_bic:
+                    # 仍执行扫描，但只作诊断：BIC 曲线进附录，缓存模型供 K 扫描
+                    # 稳健性复用；选 K 由先验决定，不受曲线影响。
+                    _knee_n, bic_analysis = self.find_optimal_clusters(
+                        X_band,
+                        min_clusters=int(band['min_clusters']),
+                        max_clusters=int(band['max_clusters']),
+                        band_name=name,
+                        spatial_indices=spatial_indices[mask],
+                        dims=dims,
+                    )
+                    bic_analysis['knee_n'] = int(_knee_n)
+                    bic_analysis['optimal_n'] = optimal_n
+                    bic_analysis['selection_rule'] = 'fixed_k'
+                    self.logger.info(
+                        f"  📌 [{name}] 先验固定 K={optimal_n}"
+                        f"（BIC 拐点 K={_knee_n} 仅作诊断，不参与选 K）"
+                    )
+                else:
+                    # 跳过扫描（清空缓存避免复用旧带的模型）
+                    self._cached_gmms = {}
+                    bic_analysis = {
+                        'band_name': name,
+                        'optimal_n': optimal_n,
+                        'optimal_bic': float('nan'),
+                        'selection_rule': 'fixed_k',
+                    }
+                    self.logger.info(
+                        f"  📌 [{name}] 先验固定 K={optimal_n}（跳过 BIC 扫描）"
+                    )
             else:
                 optimal_n, bic_analysis = self.find_optimal_clusters(
                     X_band,
@@ -2918,12 +2951,12 @@ def main() -> int:
         # 四带统一上界便于跨带与跨模型比较。
         for band in config.depth_stratified['schemes']['moho_4band']['bands']:
             band['max_clusters'] = 10
-        # 如需基于构造先验直接固定每带 K（跳过 BIC 扫描），取消下面注释：
-        # for band, k in zip(
-        #     config.depth_stratified['schemes']['moho_4band']['bands'],
-        #     [5, 5, 4, 3],  # crust / lithosphere / transition_zone / lower_mantle
-        # ):
-        #     band['fixed_k'] = k
+        # 每带 K 已在 ClusteringConfig 中按先验固定为 10/5/5/5（地壳取研究区
+        # prov_type 面积占比 ≥1% 的 10 类地质省；其余带取分辨率上界）。BIC 扫描
+        # 仍执行但仅作诊断，见 auto_gmm['bic_diagnostic_when_fixed']。
+        # 如需回到自动选 K，把各带 'fixed_k' 置 None：
+        # for band in config.depth_stratified['schemes']['moho_4band']['bands']:
+        #     band['fixed_k'] = None
         config.auto_gmm['covariance_type'] = 'full'
         config.kmeans_comparison['enabled'] = False
         config.visualization['enabled'] = True
