@@ -203,8 +203,11 @@ class ClusteringConfig:
                         'depth_range': [None, 410],
                         'min_clusters': 2,
                         'max_clusters': 10,
-                        # 分辨率上界：动态范围 / 模型间 RMS 差异 = 5.0
-                        'fixed_k': 5,
+                        # 与地壳带取同一 K，便于跨带比较岩石圈—软流圈过渡。
+                        # 注意：该值高于本带分辨率上界（动态范围/模型间 RMS
+                        # 差异 = 5.0），属可解释性优先的选择，跨模型稳健的
+                        # 类别数仍以约 5 类为准，须在方法学中声明。
+                        'fixed_k': 10,
                     },
                     {
                         'name': 'transition_zone',
@@ -303,8 +306,18 @@ class ClusteringConfig:
         #
         # ⚠️ 跨模型投票前提：三个模型必须用同一组 (beta, 邻域定义)，否则有效
         # 平滑量不同，一致性不可比。
+        #
+        # ── 默认关闭（2026-09-03）──
+        # FWEA23 三设置 A/B 实测（带内相邻体元标签跳变率，相对纯 GMM）：
+        #   地壳带   各向同性 横向-21% 垂向-10% ；物理间距 横向-20% 垂向-24%
+        #   过渡带   各向同性 横向-17% 垂向-18% ；物理间距 横向-15% 垂向-33%
+        # 物理间距加权在横向上并未多去噪，却把垂向平滑放大约一倍，垂/横跳变
+        # 比从 6.18 降到 5.84（地壳）、1.75 降到 1.39（过渡带），即压平了模型
+        # 真实的成层性。根因是 w = d_ref/d 用采样间距代替了分辨率长度：本区
+        # 模型深度采样 10 km、横向约 28 km，而面波主导下垂向分辨率反而更差。
+        # 在权重判据确定前默认关闭，保留实现供后续启用。
         'hmrf': {
-            'enabled': True,
+            'enabled': False,
             'beta': 1.0,        # Potts 耦合强度（相对于对数似然的量纲）
             'max_iter': 8,      # 均场外迭代上限
             'tol': 1e-3,        # 标签变动比例收敛阈值
@@ -2951,9 +2964,10 @@ def main() -> int:
         # 四带统一上界便于跨带与跨模型比较。
         for band in config.depth_stratified['schemes']['moho_4band']['bands']:
             band['max_clusters'] = 10
-        # 每带 K 已在 ClusteringConfig 中按先验固定为 10/5/5/5（地壳取研究区
-        # prov_type 面积占比 ≥1% 的 10 类地质省；其余带取分辨率上界）。BIC 扫描
-        # 仍执行但仅作诊断，见 auto_gmm['bic_diagnostic_when_fixed']。
+        # 每带 K 已在 ClusteringConfig 中按先验固定为 10/10/5/5：地壳取研究区
+        # prov_type 面积占比 ≥1% 的 10 类地质省，岩石圈与之取齐便于跨带比较，
+        # 过渡带与下地幔取分辨率上界。BIC 扫描仍执行但仅作诊断，见
+        # auto_gmm['bic_diagnostic_when_fixed']。
         # 如需回到自动选 K，把各带 'fixed_k' 置 None：
         # for band in config.depth_stratified['schemes']['moho_4band']['bands']:
         #     band['fixed_k'] = None
