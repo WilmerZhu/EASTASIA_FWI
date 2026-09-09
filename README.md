@@ -12,71 +12,77 @@ EASTASIA-FWI 东亚地区全波形成像项目，通过模型空间的智能分�
 ```
 EASTASIA-FWI/
 ├── 1_Data_preparation/             # 数据准备模块
-│   ├── 1_1_Query_stations.py           # 台站查询与筛选 ⭐
-│   ├── 1_2_Process_GCMT_catlogs.py     # GCMT事件处理 ⭐
-│   ├── 1_3_Download_wa.py            # 数据下载管理 ⭐
-│   ├── 1_4_Preprocessing.py            # 波形预处理 ⭐
-│   ├── 1_5_Process_models.py           # 速度模型处理 ⭐
-│   ├── 1_6_Quality_control.py          # 数据质量控制
-│   └── utils/                          # 数据处理工具
+│   ├── 1_1_Query_stations.py           # 台站查询与筛选
+│   ├── 1_2_Process_GCMT_catalogs.py    # GCMT 事件目录处理
+│   ├── 1_3_Download_waveforms.py       # 波形数据下载
+│   ├── 1_4_Preprocess_waveforms.py     # 波形预处理
+│   ├── 1_5_Process_velocity_models.py  # 速度模型标准化
+│   ├── 1_5b_Extract_subregion.py       # 子区域提取
+│   ├── 1_6_Split_CSRM_resolution.py    # CSRM 模型分辨率拆分
+│   ├── 1_7_Build_test_database.py      # 正演测试数据库构建
+│   └── 1_8_Select_quality_stations.py  # 高质量台站筛选
 ├── 2_Model_space_analysis/         # 模型空间分析
-│   ├── 2_1_Model_clustering.py         # 聚类分析 ⭐
-│   ├── 2_2_Model_similarity.py         # 相似性分析 ⭐
-│   ├── 2_3_Model_fusion.py             # 模型融合 ？
-│   ├── 2_4_Representative_selection.py  # 代表性模型选择
-│   └── utils/                          # 模型分析工具
+│   ├── 2_1_Model_compare.py            # 模型对比（1D 剖面/水平切片/垂直剖面）
+│   ├── 2_2_Model_similarity.py         # CW-SSIM 多尺度结构相似性
+│   ├── 2_3_Model_clustering.py         # 速度簇聚类（GMM/WKMeans/HDBSCAN/层次）
+│   ├── 2_4_Facies_voting.py            # 相投票
+│   ├── 2_3_Model_clustering_methods.md # 聚类方法说明
+│   └── cwssim_index/                   # CW-SSIM MATLAB 参考实现
 ├── 3_Data_space_simulation/        # 数据空间模拟
-│   ├── 3_1_Setup_specfem.py           # SPECFEM3D参数设置 ⭐
-│   ├── 3_2_Model_converter.py         # 模型格式转换
-│   ├── 3_3_Run_simulation.py          # 正演计算管理
-│   ├── 3_4_Batch_manager.py           # 批量任务管理
-│   ├── templates/                     # SPECFEM3D模板文件
-│   └── utils/                         # 模拟工具
-├── 4_Evaluation/                   # 波形评估模块
-│   ├── 4_1_Waveform_metrics.py        # 波形拟合指标
-│   ├── 4_2_Model_ranking.py           # 模型评估排序
-│   ├── 4_3_Statistical_analysis.py    # 统计分析
-│   ├── 4_4_Uncertainty_analysis.py    # 不确定性分析
-│   └── utils/                         # 评估工具
+│   ├── 3_1_Setup_specfem3d_globe.py    # SPECFEM3D Globe 参数设置
+│   └── templates/                      # Par_file / STATIONS / CMTSOLUTION 模板
+├── 4_Fusion/                       # 初始模型融合
+│   ├── 4_1_Voting_map.py               # 投票图（Voting Map）
+│   ├── 4_2_BMA.py                      # 贝叶斯模型平均（BMA）
+│   └── 4_3_SDL_Fusion_v4.py            # SDL 稀疏字典学习融合（当前主线）
 ├── 5_Visualization/                # 可视化模块
-│   ├── 5_1_Basemap_plotting.py        # 地图绘制 ⭐
-│   ├── 5_2_GCMT_plotting.py          # GCMT事件可视化 ⭐
-│   ├── 5_3_Station_plotting.py        # 台站分布可视化 ⭐
-│   ├── 5_4_Event_Station_Selection.py # 事件台站选择可视化 ⭐
-│   ├── 5_5_Waveform_plotting.py       # 波形可视化 ⭐
-│   ├── 5_4_Clustering_visualization.py # 聚类结果可视化
-│   ├── 5_5_Similarity_visualization.py # 相似性分析可视化
-│   └── utils/                         # 绘图工具
+│   ├── 5_1_Basemap.py                  # 底图
+│   ├── 5_2_GCMT.py                     # GCMT 事件
+│   ├── 5_3_All_Stations.py             # 全部台站
+│   ├── 5_4_Station_Comparison.py       # 台站对比
+│   ├── 5_5_Permanent_Stations.py       # 固定台站
+│   ├── 5_6_Event_Sampling.py           # 事件采样
+│   ├── 5_7_Moho_LAB.py                 # Moho / LAB 界面
+│   ├── 5_8_Velocity_Slices.py          # 速度切片
+│   ├── 5_9_Geology.py                  # 地质背景
+│   ├── 5_10_Clustering_visualization.py# 聚类结果可视化
+│   └── utils/                          # 绘图工具
 ├── config/                         # 配置管理
-│   ├── config.py                      # 全局配置
-│   ├── model_configs.py               # 模型配置
-│   ├── clustering_config.py           # 聚类分析配置 ⭐
-│   └── region_configs.py              # 区域配置
-├── data/                           # 数据目录
-│   ├── models/                        # 速度模型数据
-│   ├── events/                        # 地震事件数据
-│   ├── stations/                      # 台站数据
-│   └── waveforms/                     # 波形数据
-├── results/                        # 结果输出
-│   ├── clustering/                    # 聚类分析结果
-│   ├── similarity/                    # 相似性分析结果
-│   ├── fusion/                        # 模型融合结果
-│   └── evaluation/                    # 波形评估结果
-├── backup/                         # 开发中的工具
-│   ├── Seis_Model_Clustering/         # K-means聚类工具
-│   └── Seis_Model_Similarity/         # SSIM相似性工具
-├── specfem3d_globe/               # SPECFEM3D Global
-├── output/                        # 模拟输出
-├── figures/                       # 图表输出
-├── logs/                          # 日志文件
-└── docs/                          # 项目文档
+│   └── base_config.py                  # 全局配置与研究区域定义
+├── scripts/                        # 实验与工作流脚本（聚类实验/图表重生成/正演）
+├── archive/                        # 归档的历史版本（留档，不参与主管线）
+├── mermaid/                        # 技术流程图（.mmd / .md / .svg）
+├── web/                            # 纯静态项目展示网站
+├── paper/                          # 论文文稿源码（仅 .md/.py 入库，二进制不入库）
+├── data/                           # 数据目录（不入库）
+├── results/                        # 结果输出（不入库）
+├── figures/                        # 图表输出（不入库）
+├── output/                         # 正演二进制输出（不入库）
+├── logs/                           # 日志文件（不入库）
+└── specfem3d_globe/                # SPECFEM3D Globe 源码（需单独安装，不入库）
 ```
 
 ## 🚀 环境要求
 
-# 创建环境: conda env create -f environment.yml
+```bash
+# 创建环境
+conda env create -f environment.yml
+conda activate eastasia_fwi
+```
 
-# 激活环境: conda activate eastasia_fwi
+### SPECFEM3D Globe（正演模拟必需）
+
+项目使用 SPECFEM3D Globe v8.1.0 进行地震波正演。**不纳入 Git 仓库**，需单独安装：
+
+```bash
+# 克隆源码（v8.1.0）
+git clone --depth 1 --branch v8.1.0 https://github.com/SPECFEM/specfem3d_globe.git specfem3d_globe
+
+# 编译（需 MPI + Fortran 环境）
+cd specfem3d_globe && ./configure && make -j
+```
+
+详见 [docs/SPECFEM3D_globe_GUIDE.md](docs/SPECFEM3D_globe_GUIDE.md)
 
 ## 🌐 Web 展示界面
 
@@ -131,23 +137,26 @@ Collection continuing...
 
 ### 已完成 ✅
 
-- **数据准备** (1_1~1_5): 台站查询、GCMT 处理、波形下载/预处理、速度模型标准化
+- **数据准备** (1_1~1_8): 台站查询、GCMT 处理、波形下载/预处理、速度模型标准化、子区域提取、CSRM 分辨率拆分、测试数据库构建、质量台站筛选
 - **模型对比** (2_1): 双区域 1D 对比、水平切片、垂直剖面
-- **相似性分析** (2_2_Model_similarity): CW-SSIM 多尺度结构相似性、热力图、空间分布
-- **模型融合** (4_1, 4_2): Voting Map 投票图、BMA 贝叶斯模型平均
-- **SPECFEM3D 设置** (3_1): 正演参数配置
-- **可视化** (5_1~5_3): 基础地图、GCMT、台站分布
+- **相似性分析** (2_2): CW-SSIM 多尺度结构相似性、热力图、空间分布
+- **速度簇聚类** (2_3): GMM / WKMeans / HDBSCAN / 层次聚类、Moho 深度分带、HMRF 空间正则化、K 扫描稳健性
+- **相投票** (2_4): Facies voting
+- **模型融合** (4_1, 4_2, 4_3): Voting Map 投票图、BMA 贝叶斯模型平均、SDL 稀疏字典学习融合（v4 主线）
+- **SPECFEM3D 设置** (3_1): SPECFEM3D Globe 正演参数配置
+- **可视化** (5_1~5_10): 底图、GCMT、台站、事件采样、Moho/LAB、速度切片、地质背景、聚类结果
 - **Web 展示**: 纯静态展示界面（速度模型对比、Huang2024、相似性分析）
+- **论文工作流** (paper/): 《东亚地震学模型对比与检验》文稿源码与构建脚本
 
-### Phase 1: 模型空间分析 ⭐ (当前重点)
+### Phase 1: 模型空间分析与融合 ⭐ (当前重点)
 
-- [ ] 新建 `2_3_Model_clustering.py`：速度模型聚类分析（K-means 等）
-- [ ] 聚类结果可视化（5_Visualization 专项模块）
-- [ ] 高级融合算法：SDL、PGM 等
+- [x] `2_3_Model_clustering.py`：速度簇聚类分析（GMM/WKMeans/HDBSCAN/层次）
+- [x] 聚类结果可视化（5_10 专项模块）
+- [ ] 高级融合算法完善：SDL v4 全深度验证、PGM 等
 
 ### Phase 2: 数据空间模拟与评估
 
-- [ ] 完善 `3_Data_space_simulation`：模型格式转换、正演计算、批量管理
+- [ ] 完善 `3_Data_space_simulation`：模型格式转换（GLL）、批量正演管理
 - [ ] 波形拟合指标计算
 - [ ] 模型评估与排序系统
 
@@ -155,22 +164,15 @@ Collection continuing...
 
 - [ ] 端到端工作流集成
 - [ ] 性能优化与并行化
+- [ ] 单元测试与 CI（环境已含 pytest，测试待补）
 
 ## 📋 近期目标
 
-**本周任务**:
-
-1. 开发 `2_3_Model_clustering.py`，读取 standardized NetCDF 进行聚类
-2. 实现聚类结果可视化（热力图、空间分布）
-3. 补充 5_Visualization 聚类/速度模型专项图表
-
-**下周任务**:
-
-1. 推进 SPECFEM3D 批量正演流程（3_2~3_4）
-2. 探索 SDL/PGM 等高级融合算法
-3. 建立模型评估基准
+1. 推进 SPECFEM3D 批量正演流程（模型格式转换 + 批量管理）
+2. SDL v4 融合结果的全深度验证与 Paper I 图表产出
+3. 建立模型评估基准（波形拟合指标 + 模型排序）
 
 ---
 
 **版本**: v1.0.0
-**最后更新**: 2026年3月8日
+**最后更新**: 2026年9月9日
