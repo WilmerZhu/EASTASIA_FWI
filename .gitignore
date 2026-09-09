@@ -26,6 +26,7 @@ wheels/
 
 # ============ cursor ============
 .cursor/
+.github/
 
 # ============ 虚拟环境 ============
 .env
@@ -58,11 +59,24 @@ docs/
 backup/
 logs/
 temp/
+# 正演模拟二进制输出（GLL .bin 等，仅根目录 output/）
+/output/
 
 # ============ SPECFEM3D Globe ============
 # SPECFEM 需要单独下载/编译
 specfem3d_globe/
+specfem3d_globe_new/
+specfem/
+specfem3d_globe-EMC/
 
+# ============ paper 论文目录 ============
+# 仅追踪文稿源码（.md）与构建脚本（.py），大型二进制不入库
+paper/**/*.docx
+paper/**/*.doc
+paper/**/*.pdf
+paper/figures/
+paper/materials/
+paper/**/backup/
 # ============ 地理数据 (5_Visualization) ============
 # 这些数据文件需要单独下载
 5_Visualization/data_EastAsia/
