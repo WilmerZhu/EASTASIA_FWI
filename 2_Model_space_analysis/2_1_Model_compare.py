@@ -266,15 +266,24 @@ class ModelCompareConfig:
             }
         }
         
-        # ============ 论文主图参数（1D 剖面 + 三深度 dlnVs）============
+        # ============ 论文主图参数（模型 × 深度 的 dlnVs 切片矩阵）============
         self.paper_figure = {
-            'depths': [100, 200, 500],      # km；取最近层
+            # 行=模型，列=深度。当前 3 模型 × 4 深度 = 3×4
+            'depths': [100, 200, 500, 800],  # km；取最近层
             'param': 'vs',
             'cmap': 'seis',                 # GMT seis：红(低速)→黄→绿→蓝(高速)
-            'dlnv_limit': 6.0,              # 与参考图一致 ±6%
-            'figsize': (13.2, 8.2),         # 英寸：左 1D + 右三列地图
+            # 色标范围模式：
+            #   'per_depth' — 每个深度按自身振幅取对称范围，各列一条 colorbar。
+            #     扰动振幅随深度衰减一个量级（100 km 可达 ±6%，800 km 仅 ±1-2%），
+            #     全图共用一个范围会让深部两列几乎全是零色，看不出任何结构。
+            #     代价是不同列的颜色深浅不可跨深度比较，需在图注说明。
+            #   'fixed' — 全图共用 dlnv_limit，可跨深度比较振幅
+            'dlnv_limit_mode': 'per_depth',
+            'dlnv_limit': 6.0,              # 'fixed' 模式下的 ±范围
+            'dlnv_percentile': 98.0,        # 'per_depth' 模式下取该分位数定范围
+            'figsize': (11.8, 7.4),         # 英寸：3×4 地图 + 底部 colorbar 行
             'panel_letters': True,
-            'include_1d': True,             # 左侧融合全深度 1D VS 剖面
+            'include_1d': False,            # True 则左侧再加一栏全深度 1D 剖面
             '1d_sigma': 1.0,                # 1D 阴影为 ±N σ
             '1d_xlim': (3.0, 7.0),          # VS (km/s)
             '1d_params': ('vs',),           # 同轴绘制的 1D 参数
@@ -1883,11 +1892,13 @@ class ModelComparator:
     
     def plot_paper_dlnv_maps(self, param: Optional[str] = None) -> Figure:
         """
-        绘制论文主图：左侧全深度 1D VS 剖面 + 右侧三模型 × 三深度 dlnVs。
+        绘制论文主图：模型（行）× 深度（列）的 dlnVs 水平切片矩阵。
         
-        左栏三模型 1D 平均 VS（0–1000 km），并在切片深度处画水平参考线，
-        与右栏地图对齐。右栏各模型保持原生网格，SinoScope 的 1° 块状
-        分辨率不加平滑。色标 GMT seis（红=低速，蓝=高速，±6%）。
+        默认 3 模型 × 4 深度（100/200/500/800 km）。各模型保持原生网格，
+        SinoScope 的 1° 块状分辨率不加平滑，以便直观看出分辨率差异。
+        色标 GMT seis（红=低速，蓝=高速），范围按 dlnv_limit_mode 逐深度
+        或全图统一。paper_figure['include_1d'] 置 True 可在左侧再加一栏
+        全深度 1D 平均剖面。
         
         Args:
             param: 速度参数，默认 vs
@@ -1902,8 +1913,10 @@ class ModelComparator:
         cmap = self._resolve_paper_cmap(cmap_name)
         include_1d = bool(paper_cfg.get('include_1d', True))
         
-        self.logger.info("📄 绘制论文主图: 1D VS + 三深度 dlnVs")
-        self.logger.info(f"  深度: {depths} km  |  参数: {param_name.upper()}  |  色标: {cmap_name}")
+        self.logger.info("📄 绘制论文主图: 模型 × 深度 dlnV 切片矩阵")
+        self.logger.info(
+            f"  深度: {depths} km  |  参数: {param_name.upper()}  |  色标: {cmap_name}"
+        )
         
         model_items = [
             (key, model) for key, model in self.models.items()
@@ -1917,7 +1930,7 @@ class ModelComparator:
         
         slices: List[List[Tuple[np.ndarray, np.ndarray, np.ndarray]]] = []
         actual_depths: List[float] = []
-        all_dlnv: List[np.ndarray] = []
+        col_dlnv: List[List[np.ndarray]] = []
         
         lon_mins: List[float] = []
         lon_maxs: List[float] = []
@@ -1927,6 +1940,7 @@ class ModelComparator:
         for depth in depths:
             actual_this_col: List[float] = []
             col_slices: List[Tuple[np.ndarray, np.ndarray, np.ndarray]] = []
+            this_col_values: List[np.ndarray] = []
             for _, model in model_items:
                 lon_grid, lat_grid, dlnv = model.get_horizontal_slice_dlnv(param_name, depth)
                 depth_idx = int(np.argmin(np.abs(model._depth - depth)))
@@ -1934,12 +1948,13 @@ class ModelComparator:
                 col_slices.append((lon_grid, lat_grid, dlnv))
                 valid = dlnv[np.isfinite(dlnv)]
                 if valid.size > 0:
-                    all_dlnv.append(valid)
+                    this_col_values.append(valid)
                 lon_mins.append(float(lon_grid.min()))
                 lon_maxs.append(float(lon_grid.max()))
                 lat_mins.append(float(lat_grid.min()))
                 lat_maxs.append(float(lat_grid.max()))
             slices.append(col_slices)
+            col_dlnv.append(this_col_values)
             actual_depths.append(float(np.median(actual_this_col)))
         
         slices_rc: List[List[Tuple[np.ndarray, np.ndarray, np.ndarray]]] = [
@@ -1948,22 +1963,21 @@ class ModelComparator:
         
         extent = [max(lon_mins), min(lon_maxs), max(lat_mins), min(lat_maxs)]
         
-        configured_limit = paper_cfg.get('dlnv_limit')
-        if configured_limit is not None:
-            dlnv_lim = float(configured_limit)
-        elif len(all_dlnv) > 0:
-            p95 = float(np.percentile(np.abs(np.concatenate(all_dlnv)), 95))
-            dlnv_lim = max(3.0, float(np.ceil(p95)))
-        else:
-            dlnv_lim = 5.0
-        vmin, vmax = -dlnv_lim, dlnv_lim
+        col_limits = self._resolve_paper_dlnv_limits(col_dlnv)
+        limit_mode = str(paper_cfg.get('dlnv_limit_mode', 'per_depth'))
         self.logger.info(
-            f"  共用色标范围: ±{dlnv_lim:.1f}%  |  地图范围: "
-            f"{extent[0]:.1f}–{extent[1]:.1f}°E, {extent[2]:.1f}–{extent[3]:.1f}°N"
+            f"  色标模式: {limit_mode}  |  各列范围: "
+            + ', '.join(f'{d:.0f}km ±{v:.1f}%'
+                        for d, v in zip(actual_depths, col_limits))
+        )
+        self.logger.info(
+            f"  地图范围: {extent[0]:.1f}–{extent[1]:.1f}°E, "
+            f"{extent[2]:.1f}–{extent[3]:.1f}°N"
         )
         
         fig = plt.figure(figsize=tuple(paper_cfg['figsize']))
         
+        # 底部留一行放 colorbar：逐深度色标时每列一条，共用色标时整行一条
         if include_1d:
             outer = GridSpec(
                 1, 2,
@@ -1976,25 +1990,24 @@ class ModelComparator:
                 bottom=0.08,
             )
             ax_1d = fig.add_subplot(outer[0, 0])
-            inner = outer[0, 1].subgridspec(
-                n_rows, n_cols + 1,
-                width_ratios=[1] * n_cols + [0.055],
+            map_gs = outer[0, 1].subgridspec(
+                n_rows + 1, n_cols,
+                height_ratios=[1] * n_rows + [0.05],
                 wspace=0.08,
-                hspace=0.10,
+                hspace=0.12,
             )
-            map_gs = inner
         else:
             ax_1d = None
             map_gs = GridSpec(
-                n_rows, n_cols + 1,
+                n_rows + 1, n_cols,
                 figure=fig,
-                width_ratios=[1] * n_cols + [0.045],
-                wspace=0.06,
-                hspace=0.08,
-                left=0.07,
-                right=0.93,
-                top=0.96,
-                bottom=0.08,
+                height_ratios=[1] * n_rows + [0.05],
+                wspace=0.07,
+                hspace=0.12,
+                left=0.055,
+                right=0.985,
+                top=0.955,
+                bottom=0.085,
             )
         
         letters = 'abcdefghijklmnopqrstuvwxyz'
@@ -2013,10 +2026,12 @@ class ModelComparator:
                 )
             letter_idx += 1
         
-        last_im = None
+        col_images: List[Any] = [None] * n_cols
         for row, (_model_key, model) in enumerate(model_items):
             for col in range(n_cols):
                 lon_grid, lat_grid, dlnv = slices_rc[row][col]
+                vmax = col_limits[col]
+                vmin = -vmax
                 ax: GeoAxes = fig.add_subplot(
                     map_gs[row, col], projection=ccrs.PlateCarree()
                 )  # type: ignore[assignment]
@@ -2038,7 +2053,7 @@ class ModelComparator:
                         zorder=4,
                     )
                 
-                last_im = ax.pcolormesh(
+                col_images[col] = ax.pcolormesh(
                     lon_grid, lat_grid, dlnv,
                     cmap=cmap,
                     vmin=vmin,
@@ -2094,12 +2109,9 @@ class ModelComparator:
                         fontweight='bold',
                     )
         
-        cax = fig.add_subplot(map_gs[:, -1])
-        if last_im is not None:
-            cbar = fig.colorbar(last_im, cax=cax)
-            cbar.set_label(r'dlnV (%)', fontsize=10)
-            cbar.ax.tick_params(labelsize=8)
-            cbar.set_ticks(np.arange(-dlnv_lim, dlnv_lim + 1e-6, 2.0))
+        self._draw_paper_colorbars(
+            fig, map_gs, col_images, col_limits, n_rows, n_cols, param_name
+        )
         
         self.logger.info("  ✅ 论文主图绘制完成")
         
@@ -2120,6 +2132,106 @@ class ModelComparator:
             self.logger.info(f"  ✅ {fp.name}")
         
         return fig
+    
+    def _resolve_paper_dlnv_limits(
+        self, col_dlnv: List[List[np.ndarray]]
+    ) -> List[float]:
+        """
+        给论文主图每一列（每个深度）定对称色标范围。
+        
+        'per_depth' 模式下取该深度所有模型 |dlnV| 的指定分位数并向上取整到
+        0.5% 的整数倍，避免出现 ±3.7% 这种读不出来的刻度。扰动振幅从
+        100 km 到 800 km 衰减约一个量级，共用范围会把深部结构压成一片零色。
+        
+        Args:
+            col_dlnv: 逐列（深度）收集的各模型有效 dlnV 数组
+            
+        Returns:
+            每列的 ±范围（%），长度与 col_dlnv 一致
+        """
+        paper_cfg = self.config.paper_figure
+        mode = str(paper_cfg.get('dlnv_limit_mode', 'per_depth'))
+        fixed = float(paper_cfg.get('dlnv_limit') or 6.0)
+        
+        if mode != 'per_depth':
+            return [fixed] * len(col_dlnv)
+        
+        pct = float(paper_cfg.get('dlnv_percentile', 98.0))
+        limits: List[float] = []
+        for values in col_dlnv:
+            if len(values) == 0:
+                limits.append(fixed)
+                continue
+            p = float(np.percentile(np.abs(np.concatenate(values)), pct))
+            # 向上取整到 0.5 的倍数，最低 1.0%
+            limits.append(max(1.0, float(np.ceil(p * 2.0) / 2.0)))
+        return limits
+    
+    def _draw_paper_colorbars(
+        self,
+        fig: Figure,
+        map_gs: Any,
+        col_images: List[Any],
+        col_limits: List[float],
+        n_rows: int,
+        n_cols: int,
+        param_name: str,
+    ) -> None:
+        """
+        在地图矩阵下方画 colorbar。
+        
+        逐深度色标时每列一条（各列范围不同，必须分开标）；共用色标时整行
+        合成一条。colorbar 横放在底部而非右侧，是为了让 3×4 的地图矩阵占满
+        画幅宽度，右侧竖放会挤掉一列地图的宽度。
+        
+        Args:
+            fig: 目标 Figure
+            map_gs: 地图矩阵所用的 GridSpec（最后一行预留给 colorbar）
+            col_images: 各列的 QuadMesh（取该列最后绘制的一个即可）
+            col_limits: 各列的 ±范围（%）
+            n_rows: 地图行数（模型数）
+            n_cols: 地图列数（深度数）
+            param_name: 速度参数名，用于色标标签
+        """
+        label = rf'$\delta\ln V_{param_name[-1].upper()}$ (%)'
+        per_depth = len({round(v, 6) for v in col_limits}) > 1 or \
+            str(self.config.paper_figure.get('dlnv_limit_mode')) == 'per_depth'
+        
+        def _shrink(cax: Any, frac: float = 0.62) -> None:
+            """居中收窄，满格的细长条会显得比地图还抢眼"""
+            pos = cax.get_position()
+            cax.set_position([
+                pos.x0 + pos.width * (1 - frac) / 2.0,
+                pos.y0, pos.width * frac, pos.height,
+            ])
+        
+        if per_depth:
+            for col in range(n_cols):
+                if col_images[col] is None:
+                    continue
+                cax = fig.add_subplot(map_gs[n_rows, col])
+                _shrink(cax)
+                cbar = fig.colorbar(col_images[col], cax=cax,
+                                    orientation='horizontal')
+                lim = col_limits[col]
+                cbar.set_ticks([-lim, 0.0, lim])
+                cbar.set_ticklabels([f'−{lim:g}', '0', f'+{lim:g}'])
+                cbar.ax.tick_params(labelsize=7.5, length=2, pad=1.5)
+                cbar.outline.set_linewidth(0.5)
+                if col == n_cols - 1:
+                    cbar.set_label(label, fontsize=9, labelpad=2)
+        else:
+            image = next((im for im in col_images if im is not None), None)
+            if image is None:
+                return
+            cax = fig.add_subplot(map_gs[n_rows, :])
+            _shrink(cax, frac=0.45)
+            cbar = fig.colorbar(image, cax=cax, orientation='horizontal')
+            lim = col_limits[0]
+            cbar.set_ticks(np.arange(-lim, lim + 1e-6, 2.0))
+            cbar.ax.tick_params(labelsize=8, length=2, pad=1.5)
+            cbar.outline.set_linewidth(0.5)
+            cbar.set_label(label, fontsize=9, labelpad=2)
     
     def _draw_paper_1d_profile(
         self,
@@ -2581,8 +2693,14 @@ class ModelComparator:
                                 self.output_dir / f"{prefix}vertical_profile_{i+1}")
                 plt.close(fig)
             
-            # 10. 生成统计报告
-            self.logger.info("\n📋 10. 生成统计报告...")
+            # 10. 论文主图（模型 × 深度 的 dlnV 切片矩阵，自带 jpg + pdf 保存）
+            paper_depths = self.config.paper_figure['depths']
+            self.logger.info(f"\n📄 10. 论文主图（深度 {paper_depths} km）...")
+            fig_paper = self.plot_paper_dlnv_maps()
+            plt.close(fig_paper)
+            
+            # 11. 生成统计报告
+            self.logger.info("\n📋 11. 生成统计报告...")
             report = self.generate_comparison_report()
             
             report_file = self.output_dir / f"{prefix}comparison_report.json"
@@ -2590,6 +2708,7 @@ class ModelComparator:
                 json.dump(report, f, indent=2, ensure_ascii=False, default=str)
             
             self._save_text_report(report, self.output_dir / f"{prefix}comparison_summary.txt")
+            self._save_markdown_report(report, self.output_dir / f"{prefix}model_comparison.md")
             
             self.logger.info("\n" + "="*80)
             self.logger.info(f"✅ 所有结果已保存到: {self.output_dir}")
@@ -2740,6 +2859,316 @@ class ModelComparator:
                     f.write(f"    有效数据: {vs_stats['valid_percentage']:.1f}%\n")
         
         self.logger.info(f"  ✅ {filepath.name}")
+    
+    def _dlnv_rms_by_depth(
+        self, depths: List[float], param: str = 'vs'
+    ) -> Dict[str, Dict[float, float]]:
+        """
+        逐深度统计各模型 dlnV 的面积加权 RMS（%）。
+        
+        用 cos(lat) 做面积权重，否则高纬格点会被过度计权。这张表量化了
+        "扰动振幅随深度衰减"，也是论文主图逐深度色标的依据。
+        
+        Args:
+            depths: 目标深度列表（km，取最近层）
+            param: 速度参数
+            
+        Returns:
+            {model_key: {depth: rms_percent}}，取不到值时该项缺省
+        """
+        result: Dict[str, Dict[float, float]] = {}
+        for model_key, model in self.models.items():
+            if not model.has_parameter(param):
+                continue
+            per_depth: Dict[float, float] = {}
+            for depth in depths:
+                try:
+                    _, lat_grid, dlnv = model.get_horizontal_slice_dlnv(param, depth)
+                except Exception as e:
+                    self.logger.debug(f"    {model_key} @{depth}km dlnV 取值失败: {e}")
+                    continue
+                valid = np.isfinite(dlnv)
+                if not np.any(valid):
+                    continue
+                weights = np.cos(np.deg2rad(lat_grid))[valid]
+                values = dlnv[valid]
+                rms = float(np.sqrt(np.sum(weights * values ** 2) / np.sum(weights)))
+                per_depth[float(depth)] = rms
+            if per_depth:
+                result[model_key] = per_depth
+        return result
+    
+    def _save_markdown_report(self, report: Dict[str, Any], filepath: Path) -> None:
+        """
+        保存 Markdown 直观对比报告。
+        
+        报告与图片同目录，因此图片用纯文件名相对引用，GitHub / VSCode /
+        Typora 都能直接渲染。只嵌入实际存在的文件，避免死链。
+        
+        Args:
+            report: generate_comparison_report() 的输出
+            filepath: 目标 .md 路径
+        """
+        prefix = str(self.config.output_params['figure_prefix'])
+        fig_dir = filepath.parent
+        paper_depths = [float(d) for d in self.config.paper_figure['depths']]
+        all_depths = list(self.config.slice_params['horizontal_depths'])
+        
+        def find(stem: str) -> Optional[str]:
+            """按 jpg → png → pdf 优先级找已生成的图"""
+            for ext in ('jpg', 'png', 'pdf'):
+                if (fig_dir / f'{stem}.{ext}').exists():
+                    return f'{stem}.{ext}'
+            return None
+        
+        def embed(stem: str, caption: str) -> List[str]:
+            """可嵌入的位图直接展示，pdf 只给链接"""
+            name = find(stem)
+            if name is None:
+                return []
+            if name.endswith('.pdf'):
+                return [f'[{caption}（PDF）]({name})', '']
+            return [f'![{caption}]({name})', '', f'*{caption}*', '']
+        
+        lines: List[str] = []
+        model_items = list(self.models.items())
+        names = ' / '.join(m.metadata.full_name for _, m in model_items)
+        
+        # ---------- 标题 ----------
+        lines += [
+            f'# East Asia Velocity Model Comparison — {names}',
+            '',
+            f'> 由 `2_Model_space_analysis/2_1_Model_compare.py` 自动生成  ',
+            f'> 生成时间: {report["metadata"]["generation_time"][:19].replace("T", " ")}  ',
+            f'> 分析版本: {report["metadata"]["analysis_version"]}  ',
+            f'> 对比模型: {report["metadata"]["n_models"]} 个',
+            '',
+            '**约定**',
+            '',
+            f'- 速度扰动: `{report["metadata"]["perturbation_definition"]}`'
+            '，参考剖面为各模型自身的水平平均 1D 剖面',
+            f'- 模型差异: `{report["metadata"]["difference_definition"]}`',
+            '- 多模型对比统一在 **standardized**（模型交集区域）上进行；'
+            '单模型剖面用 **original**（模型完整覆盖）',
+            '',
+        ]
+        
+        # ---------- 1. 模型一览 ----------
+        lines += [
+            '## 1. 模型一览',
+            '',
+            '分辨率为各模型**原生网格间距**；空间与深度范围来自 standardized 文件，'
+            '三者已被 `1_5_Process_velocity_models.py` 裁剪到同一公共区域，'
+            '故此列一致，不代表各模型的原始覆盖。',
+            '',
+            '| 模型 | 年份 | 反演方法 | 原生分辨率 | 深度范围 (km) | '
+            '公共区域范围 | 径向各向异性 (S / P) | 参考文献 |',
+            '|---|---|---|---|---|---|---|---|',
+        ]
+        for model_key, model in model_items:
+            info = report['models'].get(model_key, {})
+            meta = model.metadata
+            dr = info.get('depth_range') or (np.nan, np.nan)
+            sr = info.get('spatial_range')
+            if sr:
+                span = (f'{sr["lat"][0]:.1f}–{sr["lat"][1]:.1f}°N, '
+                        f'{sr["lon"][0]:.1f}–{sr["lon"][1]:.1f}°E')
+            else:
+                span = '—'
+            aniso = ('✓' if info.get('has_s_wave_anisotropy') else '✗') + ' / ' + \
+                    ('✓' if info.get('has_p_wave_anisotropy') else '✗')
+            lines.append(
+                f'| **{meta.full_name}** | {meta.year} | {meta.method} | '
+                f'{info.get("resolution", "—")} | {dr[0]:.0f}–{dr[1]:.0f} | '
+                f'{span} | {aniso} | {meta.reference} |'
+            )
+        lines += ['']
+        
+        # ---------- 2. VS 统计 ----------
+        lines += [
+            '## 2. VS 统计（共同区域）',
+            '',
+            '| 模型 | 最小 (km/s) | 最大 (km/s) | 平均 ± 标准差 (km/s) | 有效格点 |',
+            '|---|---|---|---|---|',
+        ]
+        for model_key, model in model_items:
+            s = (report['models'].get(model_key) or {}).get('vs_statistics')
+            if not s:
+                continue
+            lines.append(
+                f'| **{model.metadata.full_name}** | {s["min"]:.3f} | '
+                f'{s["max"]:.3f} | {s["mean"]:.3f} ± {s["std"]:.3f} | '
+                f'{s["valid_percentage"]:.1f}% |'
+            )
+        lines += [
+            '',
+            '极小值（< 2 km/s）来自最浅层的水体与沉积层格点，'
+            '不参与地幔结构讨论；有效格点比例差异反映各模型在公共区域内的覆盖缺口。',
+            '',
+        ]
+        
+        # ---------- 3. 扰动振幅随深度衰减 ----------
+        self.logger.info("  统计逐深度 dlnV 面积加权 RMS...")
+        rms_table = self._dlnv_rms_by_depth(paper_depths, 'vs')
+        if rms_table:
+            header = ' | '.join(f'{d:.0f} km' for d in paper_depths)
+            lines += [
+                '## 3. dlnVS 扰动振幅随深度衰减',
+                '',
+                '面积加权（cos φ）RMS，单位 %。振幅从上地幔顶部到 800 km '
+                '衰减近一个量级，这是论文主图按深度分别定色标的原因。',
+                '',
+                f'| 模型 | {header} |',
+                '|---' * (len(paper_depths) + 1) + '|',
+            ]
+            for model_key, model in model_items:
+                per_depth = rms_table.get(model_key)
+                if not per_depth:
+                    continue
+                cells = ' | '.join(
+                    f'{per_depth[d]:.2f}' if d in per_depth else '—'
+                    for d in paper_depths
+                )
+                lines.append(f'| **{model.metadata.full_name}** | {cells} |')
+            lines += ['']
+            
+            # 最深一层的模型间振幅离散度：影响后续加权融合与波形拟合的可比性
+            z_deep = paper_depths[-1]
+            deep = {
+                self.models[k].metadata.full_name: v[z_deep]
+                for k, v in rms_table.items() if z_deep in v
+            }
+            if len(deep) >= 2:
+                hi = max(deep, key=lambda k: deep[k])
+                lo = min(deep, key=lambda k: deep[k])
+                lines += [
+                    f'{z_deep:.0f} km 处 **{hi}** 的扰动振幅是 **{lo}** 的 '
+                    f'{deep[hi] / max(deep[lo], 1e-6):.1f} 倍。'
+                    '深部振幅差异既可能来自真实结构，也可能来自阻尼/正则化强度不同，'
+                    '融合加权时不能仅按振幅取舍。',
+                    '',
+                ]
+        
+        # ---------- 4. 论文主图 ----------
+        depth_str = ' / '.join(f'{d:.0f}' for d in paper_depths)
+        paper_block = embed(
+            f'{prefix}paper_dlnv_maps',
+            f'Paper figure: dlnVS at {depth_str} km '
+            f'({len(model_items)} models × {len(paper_depths)} depths)'
+        )
+        if paper_block:
+            mode = str(self.config.paper_figure.get('dlnv_limit_mode', 'per_depth'))
+            note = ('每列（深度）按自身振幅取对称色标，故**不同深度之间颜色深浅不可比**'
+                    if mode == 'per_depth'
+                    else f'全图共用 ±{self.config.paper_figure["dlnv_limit"]:.1f}% 色标，'
+                         '深度之间可直接比较振幅')
+            lines += [
+                '## 4. 论文主图：dlnVS 深度切片矩阵',
+                '',
+                f'行 = 模型，列 = 深度（{depth_str} km）。各模型保持**原生网格**，'
+                'SinoScope1.0 的 1° 块状特征未作平滑，可直接看出分辨率差异。',
+                f'色标 GMT `seis`（红 = 低速，蓝 = 高速）；{note}。'
+                '**同一列内三模型共用色标**，因此列内的颜色深浅可直接比较模型间振幅强弱。',
+                '',
+            ] + paper_block
+            pdf = fig_dir / f'{prefix}paper_dlnv_maps.pdf'
+            if pdf.exists():
+                lines += [f'矢量版本: [{pdf.name}]({pdf.name})', '']
+        
+        # ---------- 5. 1D 剖面与各向异性 ----------
+        block: List[str] = []
+        block += embed(f'{prefix}velocity_comparison',
+                       'Horizontally averaged 1-D VS and VP profiles')
+        block += embed(f'{prefix}s_wave_anisotropy',
+                       'S-wave radial anisotropy: VSV (solid) vs VSH (dashed)')
+        block += embed(f'{prefix}p_wave_anisotropy',
+                       'P-wave radial anisotropy: VPV (solid) vs VPH (dashed)')
+        if block:
+            lines += ['## 5. 一维平均剖面与径向各向异性', ''] + block
+        
+        # 单模型完整剖面
+        indiv: List[str] = []
+        for _, model in model_items:
+            safe = model.metadata.name.replace(' ', '_').replace('.', '_')
+            indiv += embed(f'{prefix}profile_{safe}',
+                           f'{model.metadata.full_name}: full-coverage 1-D profile')
+        if indiv:
+            lines += ['### 5.1 单模型完整覆盖剖面（original 区域）', ''] + indiv
+        
+        # ---------- 6. 水平切片 ----------
+        lines += ['## 6. 水平切片逐深度对比', '']
+        loc = embed(f'{prefix}slice_locations',
+                    'Locations of all horizontal slices and vertical profiles')
+        if loc:
+            lines += loc
+        for depth in paper_depths:
+            d = int(round(depth))
+            sub: List[str] = []
+            sub += embed(f'{prefix}absolute_vs_{d}km',
+                         f'Absolute VS at {d} km')
+            sub += embed(f'{prefix}horizontal_slice_vs_{d}km',
+                         f'VS slice at {d} km (absolute + perturbation)')
+            sub += embed(f'{prefix}difference_vs_{d}km',
+                         f'Pairwise VS difference at {d} km')
+            if sub:
+                lines += [f'### 6.{paper_depths.index(depth) + 1} {d} km', ''] + sub
+        
+        others = [d for d in all_depths if float(d) not in paper_depths]
+        if others:
+            links = []
+            for d in others:
+                for stem, tag in (
+                    (f'{prefix}absolute_vs_{d}km', 'abs'),
+                    (f'{prefix}horizontal_slice_vs_{d}km', 'slice'),
+                    (f'{prefix}difference_vs_{d}km', 'diff'),
+                ):
+                    name = find(stem)
+                    if name:
+                        links.append(f'[{d} km {tag}]({name})')
+            if links:
+                lines += [f'### 6.{len(paper_depths) + 1} 其余深度（仅链接）', '',
+                          ' · '.join(links), '']
+        
+        # ---------- 7. 垂直剖面 ----------
+        vert: List[str] = []
+        for i in range(1, len(self.config.slice_params['vertical_profiles']['longitude'])
+                       + len(self.config.slice_params['vertical_profiles']['latitude']) + 1):
+            name = find(f'{prefix}vertical_profile_{i}')
+            if name is None:
+                continue
+            if i <= 2:
+                vert += embed(f'{prefix}vertical_profile_{i}',
+                              f'Vertical cross-section #{i}')
+            else:
+                vert.append(f'- [Vertical cross-section #{i}]({name})')
+        if vert:
+            lines += ['## 7. 垂直剖面', ''] + vert + ['']
+        
+        # ---------- 8. 阅读提示 ----------
+        lines += [
+            '## 8. 阅读提示',
+            '',
+            '- **不要跨深度比较颜色深浅**（逐深度色标模式下），'
+            '振幅对比请看第 3 节的 RMS 表',
+            '- 各模型参考 1D 剖面不同（PREM / ak135 系列），'
+            '扰动图之间的零点因此不完全等价；跨模型融合前需统一到同一参考模型',
+            '- 分辨率差异会直接体现为切片的"块状"程度，'
+            '不代表结构本身的差异；定量的结构相似性见 `2_2_Model_similarity.py`',
+            '- 深度参照面（地表 vs 海平面）在各原始模型中定义不同，'
+            '浅部（< 40 km）对比需谨慎',
+            '',
+            '---',
+            '',
+            f'完整数值见 [`{prefix}comparison_report.json`]'
+            f'({prefix}comparison_report.json)、'
+            f'[`{prefix}comparison_summary.txt`]({prefix}comparison_summary.txt)。',
+            '',
+        ]
+        
+        with open(filepath, 'w', encoding='utf-8') as f:
+            f.write('\n'.join(lines))
+        
+        self.logger.info(f"  ✅ {filepath.name}")
 
 
 # ==================== 主函数 ====================
@@ -2821,7 +3250,11 @@ def main():
             print(f"    - 2-1_horizontal_slice_vs_{depth}km.png")
         print(f"\n  垂直剖面（模式: {comparator.config.plot_mode['vertical_profiles']}）:")
         print("    - 2-1_vertical_profile_*.png")
+        paper_depths = comparator.config.paper_figure['depths']
+        print(f"\n  论文主图（{len(comparator.models)}模型 × {len(paper_depths)}深度）:")
+        print(f"    - 2-1_paper_dlnv_maps.jpg / .pdf  ({paper_depths} km)")
         print("\n  报告:")
+        print("    - 2-1_model_comparison.md  ← 直观对比（含图表，可直接浏览）")
         print("    - 2-1_comparison_report.json")
         print("    - 2-1_comparison_summary.txt")
         

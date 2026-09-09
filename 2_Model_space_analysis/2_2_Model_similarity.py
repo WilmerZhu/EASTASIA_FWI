@@ -14,9 +14,22 @@
 4. 反映 410/660 等间断面形态与绝对速度水平的一致性
 
 **2D SSIM(z)** — 逐深度横向结构一致性
-1. 每个公共深度层重采样到该模型对的最粗分辨率
-2. 去掉该层横向平均（扰动场），排除 1D 背景对分数的贡献
-3. 在 6° 横向高斯窗口下求 SSIM，得到 SSIM 随深度的曲线
+1. 所有模型对重采样到同一区域、同一分辨率（本模型库为 1.0°）。
+   若按模型对各取最粗分辨率，0.25° 的对会保留 1° 以下短波长内容
+   （分歧最大的部分），与 1.0° 的对不是同一个量，矩阵不可比。
+2. δlnV = (V - V̄_layer)/V̄_layer。用无量纲扰动而非 km/s 残差，
+   否则深部背景速度更高会把深度趋势混进 SSIM 的对比度项。
+3. 逐层按两模型合并 RMS 归一并截断到 ±3σ 后映射为非负图像——
+   等价于把两张图用完全相同的对称色标出图再比较，避免"平移量任取"
+   导致分数不可复现。仅消去两模型共有的振幅随深度衰减趋势，
+   模型间的振幅差异仍由对比度项惩罚。
+4. 高斯窗口 σ = 2.0° (≈220 km)，与被比模型的横向分辨率同量级；
+   更小的窗口是在噪声尺度上比结构，会系统性压低分数。
+5. 深度平均按层厚（梯形）加权，避免采样更密的深度段权重偏高。
+6. 相位随机化 surrogate 给出零假设基线，用于判断得分是否显著。
+
+同时输出结构项 (σ₁₂+C₃)/(σ₁σ₂+C₃)，把"图案是否一致"与
+"振幅是否一致"分开：振幅减半时 SSIM≈0.79 而结构项≈1.00。
 
 两者分工明确：1D 量背景，2D 量同一深度的横向异常图案。
 均为模型空间先验指标，不能直接用于 FWI 初始模型排序。
@@ -34,11 +47,12 @@ analyzer.save_results()
 参考文献:
 ----
 - Wang, Z. et al. (2004) IEEE TIP 13(4): 600-612. SSIM
+- Theiler, J. et al. (1992) Physica D 58: 77-94. 相位随机化 surrogate
 - 1D 剖面定义对齐 2_1_Model_compare.py
 
 作者: EASTASIA-FWI Team
 日期: 2026-09
-版本: v19.0 (1D SSIM + 2D SSIM(z))
+版本: v20.0 (1D SSIM + 2D SSIM(z)，统一网格 + 零假设基线)
 """
 
 import sys
@@ -52,6 +66,10 @@ import numpy as np
 import pandas as pd
 import xarray as xr
 import matplotlib.pyplot as plt
+import matplotlib.patheffects as pe
+from matplotlib.lines import Line2D
+from matplotlib.patches import Patch
+from matplotlib.ticker import AutoMinorLocator, MultipleLocator
 import seaborn as sns
 from scipy.interpolate import RegularGridInterpolator
 from scipy.ndimage import uniform_filter, gaussian_filter, gaussian_filter1d
@@ -185,16 +203,16 @@ class ModelSimilarityConfig:
 
         # ============ 掩膜与采样 ============
         self.masking = {
-            # 仅当前模型对有效交集（Huang）
-            'use_all_model_common_mask': False,
+            # 取全部模型的有效交集，保证每个模型对在同一批格点上打分
+            'use_all_model_common_mask': True,
             'fill_method': 'nearest',  # 避免 nanmean 假高分
             'boundary_buffer_px': 0,
             'downsample_method': 'block_mean',
         }
 
-        # ============ 零假设基线（附录，默认关）============
+        # ============ 零假设基线（相位随机化，给出"随机水平"参考）============
         self.null_test = {
-            'enabled': False,
+            'enabled': True,
             'n_realizations': 20,
             'random_seed': 42,
         }
@@ -209,6 +227,8 @@ class ModelSimilarityConfig:
         # ============ 可视化配置 ============
         self.visualization = {
             'dpi': 300,
+            # 论文图左侧马赛克显示哪个指标: '1d' 或 '2d'（深度平均）
+            'matrix_metric': '1d',
             'figsize_depth_curve': (12, 10),
             'figsize_heatmap': (10, 9),
             'figsize_cwssim_spatial': (16, 10),
@@ -226,13 +246,21 @@ class ModelSimilarityConfig:
                 'cell_linewidth': 2,
                 'cell_linecolor': 'white',
             },
+            # SSIM(z) 曲线的深度向高斯平滑尺度 (km, σ)，设 0 关闭。
+            # 只做圆角级平滑（半个采样间隔），基本不改变曲线形态
+            'ssim_smooth_km': 10.0,
+            # SSIM(z) 曲线上标记点的深度间隔 (km)，设 0 则每个采样层都标
+            'marker_interval_km': 20.0,
+            # 相位随机化零假设带。数值仍写入 similarity_summary_{feature}.csv
+            # 的 ssim_2d_null_mean，需要时置 True 即可重新画出
+            'show_null_band': False,
             'cmap_ssim': 'RdYlGn',
             'cmap_cwssim': 'RdYlGn',
             'discontinuities': [
                 ('Moho', 40),
                 ('LAB', 100),
-                ('410km', 410),
-                ('660km', 660),
+                ('410 km', 410),
+                ('660 km', 660),
             ],
             'add_coastlines': True,
             'coastline_color': 'black',
@@ -242,7 +270,7 @@ class ModelSimilarityConfig:
         # ============ 输出参数 ============
         self.output = {
             # 项目规范: 同时保存 jpg + pdf，均 300 dpi
-            'save_formats': ['jpg'],
+            'save_formats': ['jpg', 'pdf'],
             'save_dpi': 300,
             'figure_prefix': '2-2_',
         }
@@ -635,16 +663,27 @@ def phase_randomize(img: np.ndarray, rng: np.random.Generator) -> np.ndarray:
     return np.real(np.fft.ifft2(np.abs(spec) * np.exp(1j * phase))) + mean_val
 
 
-def remove_layer_mean(
+def layer_perturbation(
     data: np.ndarray,
     valid: np.ndarray,
     weights: np.ndarray,
+    relative: bool = True,
 ) -> np.ndarray:
     """
-    去掉面积加权横向平均，得到该深度的相对扰动。
+    去掉面积加权横向平均，得到该深度的横向扰动。
 
     绝对速度的 SSIM 会被 1D 背景主导（两模型都像 PREM，分数虚高）。
-    对每个模型各自去该层均值，等价于相对横向平均的 δV 对比。
+    relative=True 时进一步除以该层均值得到无量纲的 δlnV——km/s 残差在深部
+    会因背景速度更高而系统性偏大，把深度趋势混进 SSIM 的对比度项。
+
+    Args:
+        data: 该深度层的绝对速度 (km/s)
+        valid: 有效掩膜
+        weights: 面积权重
+        relative: True 返回 (V - V̄)/V̄；False 返回 V - V̄
+
+    Returns:
+        扰动场；无效点保持原值（后续由掩膜排除）
     """
     out = np.array(data, dtype=np.float64, copy=True)
     m = valid & np.isfinite(data)
@@ -655,8 +694,45 @@ def remove_layer_mean(
     if wsum <= 0.0:
         return out
     mean_val = float((w * data[m]).sum() / wsum)
-    out[m] = data[m] - mean_val
+    if relative:
+        if abs(mean_val) < 1e-9:
+            return out
+        out[m] = (data[m] - mean_val) / mean_val
+    else:
+        out[m] = data[m] - mean_val
     return out
+
+
+def pooled_rms(
+    p1: np.ndarray,
+    p2: np.ndarray,
+    valid: np.ndarray,
+    weights: np.ndarray,
+) -> float:
+    """
+    两个扰动场合并后的面积加权 RMS，作为该深度层的共同归一化尺度。
+
+    用合并尺度（而非各自 RMS）归一，是为了保留两模型之间的振幅差异——
+    那是 SSIM 对比度项该捕捉的真实分歧；被消去的只是"扰动幅度随深度衰减"
+    这一两模型共有的趋势，否则深部会因振幅小而分数虚低。
+
+    Args:
+        p1, p2: 两个扰动场
+        valid: 有效掩膜
+        weights: 面积权重
+
+    Returns:
+        RMS 标量；有效点不足或退化时返回 nan
+    """
+    m = valid & np.isfinite(p1) & np.isfinite(p2)
+    if m.sum() < 10:
+        return float('nan')
+    w = weights[m]
+    wsum = float(w.sum())
+    if wsum <= 0.0:
+        return float('nan')
+    ms = float((w * (p1[m] ** 2 + p2[m] ** 2)).sum() / (2.0 * wsum))
+    return float(np.sqrt(ms)) if ms > 0 else float('nan')
 
 
 class SSIMCalculator:
@@ -677,29 +753,51 @@ class SSIMCalculator:
         self.k2 = float(k2)
         self.gaussian_sigma_per_pixel = float(gaussian_sigma_per_pixel)
 
+    @staticmethod
+    def _masked_average(
+        field: np.ndarray,
+        mask: np.ndarray,
+        weights: Optional[np.ndarray],
+    ) -> float:
+        """掩膜内的（面积加权）平均"""
+        m = mask & np.isfinite(field)
+        if not m.any():
+            return float('nan')
+        if weights is None:
+            return float(np.mean(field[m]))
+        w = weights[m]
+        wsum = float(w.sum())
+        return float((w * field[m]).sum() / wsum) if wsum > 0 else float('nan')
+
     def compute(
         self,
         img1: np.ndarray,
         img2: np.ndarray,
         valid: np.ndarray,
-        win_size: int,
+        sigma_px: float,
+        data_range: float,
         weights: Optional[np.ndarray] = None,
         stat_mask: Optional[np.ndarray] = None,
-        data_range: Optional[float] = None,
-    ) -> Tuple[float, np.ndarray]:
+    ) -> Tuple[float, np.ndarray, float]:
         """
-        计算两张 2D 场的 SSIM。
+        计算两张 2D 场的 SSIM（Wang et al. 2004 完整三项式）。
+
+        输入必须已经归一化到给定动态范围内的非负区间——归一化是调用方的
+        职责，本函数不再从数据里估计平移量或 L。用数据相关的分位数做平移会
+        让 SSIM 的绝对值依赖于该分位数的取值，无法在不同深度/模型对之间比较。
 
         Args:
-            img1, img2: 同形状的 2D 场（建议已去横向平均）
+            img1, img2: 同形状 2D 场，已归一化（建议区间 [0, data_range]）
             valid: 有效掩膜
-            win_size: 高斯窗口像素数（奇数）
+            sigma_px: 高斯窗口标准差（像素）
+            data_range: 动态范围 L，决定稳定化常数 C1=(K1·L)², C2=(K2·L)²
             weights: 面积权重；None 时等权
-            stat_mask: 参与全局平均的掩膜
-            data_range: 动态范围 L；None 时用有效区 2–98 百分位跨度
+            stat_mask: 参与全局平均的掩膜；None 时用 valid
 
         Returns:
-            (全局 SSIM, 局部 SSIM 图)；无效区为 NaN
+            (全局 SSIM, 局部 SSIM 图, 全局结构项)
+            结构项 = 局部相关系数 (σ₁₂+C3)/(σ₁σ₂+C3)，用于把
+            "图案是否一致"与"振幅是否一致"分开诊断。无效区为 NaN。
         """
         img1 = np.asarray(img1, dtype=np.float64)
         img2 = np.asarray(img2, dtype=np.float64)
@@ -707,51 +805,23 @@ class SSIMCalculator:
 
         if img1.shape != img2.shape:
             raise ValueError(f"输入形状不一致: {img1.shape} vs {img2.shape}")
-        if not valid.any():
-            return float('nan'), np.full(img1.shape, np.nan)
+        if not valid.any() or min(img1.shape) < 3:
+            return float('nan'), np.full(img1.shape, np.nan), float('nan')
+        if not np.isfinite(data_range) or data_range <= 0:
+            return float('nan'), np.full(img1.shape, np.nan), float('nan')
 
+        # 无效区用最近邻外延，避免常数填充在掩膜边界制造人工阶跃
         x = fill_invalid_nearest(img1, valid)
         y = fill_invalid_nearest(img2, valid)
 
-        win_size = int(win_size)
-        if win_size % 2 == 0:
-            win_size += 1
-        min_dim = int(min(img1.shape))
-        if min_dim < 3:
-            return float('nan'), np.full(img1.shape, np.nan)
-        if win_size > min_dim:
-            win_size = min_dim if min_dim % 2 == 1 else min_dim - 1
-            win_size = max(3, win_size)
-
-        sigma = max(0.5, self.gaussian_sigma_per_pixel * win_size)
-
-        # Wang SSIM 按非负图像设计。扰动场若零均值，反相时亮度项与结构项
-        # 同号为负，乘积变正，会把反相关误判为相似。两场共用同一平移到
-        # 正值区间，极性只留在结构项（协方差）里。
-        vals = np.concatenate([img1[valid], img2[valid]])
-        vals = vals[np.isfinite(vals)]
-        if vals.size < 10:
-            return float('nan'), np.full(img1.shape, np.nan)
-        lo, hi = np.percentile(vals, [2.0, 98.0])
-        span = float(hi - lo)
-        if span < 1e-12:
-            span = float(np.ptp(vals))
-        if span < 1e-12:
-            return 1.0, np.ones(img1.shape, dtype=np.float64)
-
-        if data_range is None:
-            data_range = span
-        x = x - float(lo)
-        y = y - float(lo)
-
+        sigma = max(0.5, float(sigma_px))
         c1 = (self.k1 * data_range) ** 2
         c2 = (self.k2 * data_range) ** 2
+        c3 = c2 / 2.0
 
         mu1 = gaussian_filter(x, sigma=sigma, mode='reflect')
         mu2 = gaussian_filter(y, sigma=sigma, mode='reflect')
-        mu1_sq = mu1 ** 2
-        mu2_sq = mu2 ** 2
-        mu12 = mu1 * mu2
+        mu1_sq, mu2_sq, mu12 = mu1 ** 2, mu2 ** 2, mu1 * mu2
 
         sigma1_sq = gaussian_filter(x * x, sigma=sigma, mode='reflect') - mu1_sq
         sigma2_sq = gaussian_filter(y * y, sigma=sigma, mode='reflect') - mu2_sq
@@ -763,22 +833,18 @@ class SSIMCalculator:
         den = (mu1_sq + mu2_sq + c1) * (sigma1_sq + sigma2_sq + c2)
         ssim_map = np.divide(num, den, out=np.zeros_like(num), where=den > 0)
 
+        struct_den = np.sqrt(sigma1_sq * sigma2_sq) + c3
+        struct_map = np.divide(
+            sigma12 + c3, struct_den,
+            out=np.zeros_like(sigma12), where=struct_den > 0,
+        )
+
         if stat_mask is None:
             stat_mask = valid
-        m = stat_mask & np.isfinite(ssim_map)
-        if not m.any():
-            global_val = float('nan')
-        elif weights is None:
-            global_val = float(np.mean(ssim_map[m]))
-        else:
-            w = weights[m]
-            wsum = float(w.sum())
-            global_val = (
-                float((w * ssim_map[m]).sum() / wsum) if wsum > 0 else float('nan')
-            )
+        global_val = self._masked_average(ssim_map, stat_mask, weights)
+        global_struct = self._masked_average(struct_map, stat_mask, weights)
 
-        ssim_map = np.where(valid, ssim_map, np.nan)
-        return global_val, ssim_map
+        return global_val, np.where(valid, ssim_map, np.nan), global_struct
 
     def compute_1d(
         self,
@@ -1423,7 +1489,7 @@ class VelocityModelSimilarity:
         self._backend_warned_pairs: set = set()
 
         self.logger.info("=" * 80)
-        self.logger.info("🚀 速度模型结构相似性分析器 v19.0 (1D SSIM + 2D SSIM(z))")
+        self.logger.info("🚀 速度模型结构相似性分析器 v20.0 (1D SSIM + 2D SSIM(z))")
         self.logger.info("=" * 80)
         self._print_config_summary()
 
@@ -1431,7 +1497,7 @@ class VelocityModelSimilarity:
         """打印配置摘要"""
         ss = self.config.ssim
         s2 = self.config.ssim_2d
-        print("\n📋 相似性分析配置 (v19.0 — 1D SSIM + 2D SSIM(z))")
+        print("\n📋 相似性分析配置 (v20.0 — 1D SSIM + 2D SSIM(z))")
         print("-" * 60)
         print(f"目标模型: {len(self.config.models)} 个")
         for info in self.config.models.values():
@@ -1440,8 +1506,11 @@ class VelocityModelSimilarity:
         print("  场: 原始绝对 Vs / Vp 的横向面积加权平均 V(z)")
         print(f"  深度窗口: {ss.get('win_km')} km  → 整体 1D SSIM + 局部 SSIM(z)")
         print("\n🔬 2D SSIM(z)（逐深度切片）:")
-        print(f"  场: 去横向平均后的扰动 | 横向窗口: {s2.get('win_deg')}°")
-        print("  分辨率: 按模型对最粗 (EARA–FWEA→0.25°, Sino对→1.0°)")
+        print(f"  场: δlnV = (V-V̄)/V̄，逐层按合并 RMS 归一至 ±{s2.get('clip_sigma')}σ")
+        print(f"  窗口: 高斯 σ = {s2.get('sigma_deg')}° (≈220 km)")
+        print(f"  网格: {s2.get('region_mode')} 区域 + {s2.get('resolution_mode')} 分辨率")
+        print(f"  零假设: 相位随机化 × {self.config.null_test.get('n_realizations')}"
+              f" ({'开' if self.config.null_test.get('enabled') else '关'})")
         print(f"\n📊 分析特征: {', '.join(self.config.analysis['target_features'])}")
         print(f"📁 输出: {self.figures_dir}")
         print("-" * 60)
@@ -1467,17 +1536,23 @@ class VelocityModelSimilarity:
         if len(self.models) < 2:
             raise RuntimeError("至少需要 2 个模型才能进行相似性分析")
 
+        cfg2d = self.config.ssim_2d
         self.analysis_metadata = {
-            'version': 'v19.0-1D+2D-SSIM',
+            'version': 'v20.0-1D+2D-SSIM',
             'metrics': ['ssim_1d', 'ssim_2d'],
             'ssim_1d': {
                 'field': 'raw absolute V(z), area-weighted lateral mean',
                 'win_km': self.config.ssim.get('win_km'),
             },
             'ssim_2d': {
-                'field': f"depth slice, perturbation={self.config.ssim_2d.get('perturbation')}",
-                'win_deg': self.config.ssim_2d.get('win_deg'),
-                'resolution_mode': self.config.cwssim.get('resolution_mode', 'pair_coarsest'),
+                'field': f"depth slice, perturbation={cfg2d.get('perturbation')}",
+                'normalize': cfg2d.get('normalize'),
+                'clip_sigma': cfg2d.get('clip_sigma'),
+                'sigma_deg': cfg2d.get('sigma_deg'),
+                'region_mode': cfg2d.get('region_mode'),
+                'resolution_mode': cfg2d.get('resolution_mode'),
+                'depth_average': 'trapezoidal (layer-thickness weighted)',
+                'null_test': dict(self.config.null_test),
             },
             'models': list(self.models.keys()),
             'pair_resolutions_deg': {},
@@ -1510,19 +1585,33 @@ class VelocityModelSimilarity:
         m2: VelocityModelNetCDF,
     ) -> Dict[str, Any]:
         """
-        模型对公共覆盖 + 按最粗分辨率构建分析网格（Huang/公平对比）。
+        构建分析网格。
 
-        - EARA vs FWEA → 0.25°
-        - SinoScope vs * → 1.0°
+        默认 region_mode='all_models' + resolution_mode='global_coarsest'：
+        所有模型对共用同一区域与同一分辨率（本模型库为 1.0°），
+        这样 N×N 矩阵里的每个数才是同一个量。
+        旧行为（按模型对各取公共区域与最粗分辨率）保留在
+        region_mode='pair' / resolution_mode='pair_coarsest'。
         """
-        lon_min = max(float(m1.lon.min()), float(m2.lon.min()))
-        lon_max = min(float(m1.lon.max()), float(m2.lon.max()))
-        lat_min = max(float(m1.lat.min()), float(m2.lat.min()))
-        lat_max = min(float(m1.lat.max()), float(m2.lat.max()))
+        cfg = self.config.ssim_2d
+        if cfg.get('region_mode', 'all_models') == 'all_models':
+            bbox = self._common_geographic_bbox()
+            lon_min, lon_max = bbox['lon_min'], bbox['lon_max']
+            lat_min, lat_max = bbox['lat_min'], bbox['lat_max']
+        else:
+            lon_min = max(float(m1.lon.min()), float(m2.lon.min()))
+            lon_max = min(float(m1.lon.max()), float(m2.lon.max()))
+            lat_min = max(float(m1.lat.min()), float(m2.lat.min()))
+            lat_max = min(float(m1.lat.max()), float(m2.lat.max()))
 
-        res1 = m1.estimate_resolution()
-        res2 = m2.estimate_resolution()
-        pair_res = float(max(res1['lon'], res2['lon'], res1['lat'], res2['lat']))
+        if cfg.get('resolution_mode', 'global_coarsest') == 'global_coarsest':
+            candidates = list(self.models.values()) or [m1, m2]
+        else:
+            candidates = [m1, m2]
+        pair_res = float(max(
+            v for m in candidates
+            for v in m.estimate_resolution().values()
+        ))
 
         # 若两模型分辨率相同且等于 pair_res，优先用较细原生网格（对齐模型节点）
         fine = m1 if (len(m1.lon) * len(m1.lat) >= len(m2.lon) * len(m2.lat)) else m2
@@ -1592,21 +1681,16 @@ class VelocityModelSimilarity:
             model.lon, model.lat, src, coverage['lons'], coverage['lats'],
         )
 
-    def _get_ssim_win_size(self, resolution_deg: Optional[float] = None) -> int:
+    def _get_ssim_sigma_px(self, resolution_deg: float) -> float:
         """
-        2D SSIM 的横向高斯窗口像素数。
+        2D SSIM 高斯窗口的像素标准差。
 
-        用 win_deg 保证不同分辨率模型对的物理窗口一致：
-        6° @ 0.25° → 25 px；6° @ 1.0° → 7 px。SSIM 在 7 px 仍稳定，
-        不像 DT-CWT 那样需要 2^nlevels 的最小尺寸。
+        以物理尺度 sigma_deg 定义（默认 2.0° ≈ 220 km），保证不同分辨率下
+        比较的是同一空间尺度上的结构。1.0° 网格 → 2 px；0.25° → 8 px。
         """
-        ss = self.config.ssim_2d
-        res = resolution_deg or 1.0
-        if ss.get('win_deg') is not None:
-            size = int(np.ceil(float(ss['win_deg']) / res))
-        else:
-            size = int(ss.get('win_size', 11))
-        return max(3, size | 1)
+        sigma_deg = float(self.config.ssim_2d.get('sigma_deg', 2.0))
+        res = float(resolution_deg) if resolution_deg else 1.0
+        return max(0.5, sigma_deg / res)
 
     def _get_local_win_size(self, resolution_deg: Optional[float] = None) -> int:
         """
@@ -1702,17 +1786,22 @@ class VelocityModelSimilarity:
         model: VelocityModelNetCDF,
         feature: str,
         bbox: Dict[str, float],
-    ) -> Tuple[np.ndarray, np.ndarray]:
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
         在共同地理范围内对原始绝对速度做面积加权横向平均，得到 V(z)。
 
         与 2_1_Model_compare.calculate_1d_profile 同一物理定义，
-        仅将 nanmean 改为 cos(lat) 面积加权。
+        仅将 nanmean 改为 cos(lat) 面积加权。同时返回加权标准差，
+        用于在剖面图上标出该深度的横向变化幅度。
+
+        Returns:
+            (depth, mean, std)，均为模型原生深度网格上的 1D 数组
         """
         lon_m = (model.lon >= bbox['lon_min'] - 1e-6) & (model.lon <= bbox['lon_max'] + 1e-6)
         lat_m = (model.lat >= bbox['lat_min'] - 1e-6) & (model.lat <= bbox['lat_max'] + 1e-6)
         if not lon_m.any() or not lat_m.any():
-            return model.depth.copy(), np.full(model.depth.shape, np.nan)
+            nan_like = np.full(model.depth.shape, np.nan)
+            return model.depth.copy(), nan_like, nan_like.copy()
 
         data = model.get_parameter(feature)
         depth_m = np.ones(data.shape[2], dtype=bool)
@@ -1727,7 +1816,14 @@ class VelocityModelSimilarity:
         num = np.sum(np.where(valid, sub, 0.0) * ww, axis=(0, 1))
         den = np.sum(ww, axis=(0, 1))
         mean = np.divide(num, den, out=np.full(num.shape, np.nan), where=den > 0)
-        return np.asarray(model.depth, dtype=np.float64), mean
+
+        dev2 = np.where(valid, (sub - mean[np.newaxis, np.newaxis, :]) ** 2, 0.0)
+        var = np.divide(
+            np.sum(dev2 * ww, axis=(0, 1)), den,
+            out=np.full(den.shape, np.nan), where=den > 0,
+        )
+        std = np.sqrt(np.maximum(var, 0.0))
+        return np.asarray(model.depth, dtype=np.float64), mean, std
 
     def _ensure_1d_profiles(self, feature: str) -> None:
         """提取并缓存所有模型在共同区域、统一深度网格上的 1D 剖面。"""
@@ -1744,15 +1840,25 @@ class VelocityModelSimilarity:
         for key, model in self.models.items():
             if not model.has_parameter(feature):
                 continue
-            z_src, v_src = self._extract_1d_profile(model, feature, bbox)
+            z_src, v_src, s_src = self._extract_1d_profile(model, feature, bbox)
             m = np.isfinite(z_src) & np.isfinite(v_src)
             if m.sum() < 3:
                 self.logger.warning(f"  ⚠️ {model.name} {feature} 1D 剖面有效点不足")
                 continue
+            out_of_range = (
+                (target_z < float(z_src[m].min()) - 1e-6)
+                | (target_z > float(z_src[m].max()) + 1e-6)
+            )
             v_grid = np.interp(target_z, z_src[m], v_src[m], left=np.nan, right=np.nan)
-            z_min, z_max = float(z_src[m].min()), float(z_src[m].max())
-            v_grid[(target_z < z_min - 1e-6) | (target_z > z_max + 1e-6)] = np.nan
-            self.profiles[feature][key] = {'depth': target_z, 'value': v_grid}
+            v_grid[out_of_range] = np.nan
+            s_grid = np.interp(
+                target_z, z_src[m], np.nan_to_num(s_src[m], nan=0.0),
+                left=np.nan, right=np.nan,
+            )
+            s_grid[out_of_range] = np.nan
+            self.profiles[feature][key] = {
+                'depth': target_z, 'value': v_grid, 'std': s_grid,
+            }
             self.logger.info(
                 f"    {model.name} {feature.upper()}: "
                 f"[{np.nanmin(v_grid):.3f}, {np.nanmax(v_grid):.3f}] km/s"
@@ -1827,12 +1933,18 @@ class VelocityModelSimilarity:
         feature: str,
     ) -> pd.DataFrame:
         """
-        2D SSIM(z)：逐深度切片在去横向平均的扰动场上计算 SSIM。
+        2D SSIM(z)：逐深度切片在归一化的横向扰动场上计算 SSIM。
 
         与 1D SSIM 分工明确——1D 量背景剖面，本指标量同一深度的横向结构。
+        每层流程：
+        1. 重采样到全局统一分析网格（所有模型对一致）
+        2. δlnV = (V - V̄_layer)/V̄_layer
+        3. 逐层用两模型合并 RMS 归一，按 ±clip_sigma 映射到非负区间
+        4. σ = sigma_deg 的高斯窗口下算 SSIM，面积加权平均
+        5. 若开启零假设，用相位随机化 surrogate 给出随机水平
 
         Returns:
-            DataFrame: depth_km, ssim, valid_frac, analysis_resolution_deg, ssim_win_px
+            DataFrame: depth_km, ssim, ssim_struct, ssim_null, rms1, rms2, ...
         """
         m1 = self.models[m1_key]
         m2 = self.models[m2_key]
@@ -1843,21 +1955,31 @@ class VelocityModelSimilarity:
             self.logger.warning(f"  ⚠️ {m1.name} vs {m2.name}: 无匹配深度层")
             return pd.DataFrame()
 
-        res = coverage['resolution_deg']
-        ssim_win = self._get_ssim_win_size(res)
+        cfg2d = self.config.ssim_2d
+        res = float(coverage['resolution_deg'])
+        sigma_px = self._get_ssim_sigma_px(res)
+        clip_sigma = float(cfg2d.get('clip_sigma', 3.0))
+        data_range = 2.0 * clip_sigma
+        use_area = bool(cfg2d.get('use_area_weights', True))
+        relative = cfg2d.get('perturbation', 'relative') == 'relative'
+        normalize = cfg2d.get('normalize', 'pooled_rms')
+
+        n_null = (
+            int(self.config.null_test.get('n_realizations', 20))
+            if self.config.null_test.get('enabled', False) else 0
+        )
+        do_r = bool(self.config.companion.get('compute_signed_correlation', False))
+        do_sign = bool(self.config.companion.get('compute_sign_agreement', False))
+        sign_pct = float(self.config.companion.get('sign_threshold_percentile', 50.0))
+
         self.logger.info(
             f"  🗺️ 2D SSIM(z): {m1.name} vs {m2.name}  {feature.upper()}  "
-            f"({len(matched_depths)} 层, 分辨率={res}°, 窗口={ssim_win}px)"
+            f"({len(matched_depths)} 层, {res:.2f}°, σ={sigma_px:.1f}px"
+            f"{f', null×{n_null}' if n_null else ''})"
         )
 
         data1_3d = m1.get_parameter(feature)
         data2_3d = m2.get_parameter(feature)
-        cfg2d = self.config.ssim_2d
-        use_area = bool(cfg2d.get('use_area_weights', True))
-        pert_mode = cfg2d.get('perturbation', 'layer_mean')
-        do_r = bool(self.config.companion.get('compute_signed_correlation', False))
-        do_sign = bool(self.config.companion.get('compute_sign_agreement', False))
-        sign_pct = float(self.config.companion.get('sign_threshold_percentile', 50.0))
 
         rows: List[Dict[str, Any]] = []
         for d_idx1, d_idx2, depth_km in tqdm(matched_depths, desc="  深度层", leave=False):
@@ -1868,27 +1990,50 @@ class VelocityModelSimilarity:
             )
             area_w = weights if use_area else None
 
-            if pert_mode == 'layer_mean':
-                p1 = remove_layer_mean(s1, valid, weights)
-                p2 = remove_layer_mean(s2, valid, weights)
-            else:
-                p1, p2 = s1, s2
+            p1 = layer_perturbation(s1, valid, weights, relative=relative)
+            p2 = layer_perturbation(s2, valid, weights, relative=relative)
 
-            ssim_val, _ = self.ssim2d_calc.compute(
-                p1, p2,
-                valid=valid,
-                win_size=ssim_win,
-                weights=area_w,
-                stat_mask=stat_mask,
+            # 归一化到统一的无量纲尺度，等价于用同一对称色标出两张图
+            if normalize == 'pooled_rms':
+                scale = pooled_rms(p1, p2, valid, weights)
+            else:
+                scale = 1.0
+            if not np.isfinite(scale) or scale <= 0:
+                continue
+            u1 = np.clip(p1 / scale, -clip_sigma, clip_sigma) + clip_sigma
+            u2 = np.clip(p2 / scale, -clip_sigma, clip_sigma) + clip_sigma
+
+            ssim_val, _, struct_val = self.ssim2d_calc.compute(
+                u1, u2, valid=valid, sigma_px=sigma_px, data_range=data_range,
+                weights=area_w, stat_mask=stat_mask,
             )
 
             row: Dict[str, Any] = {
                 'depth_km': depth_km,
                 'ssim': ssim_val,
+                'ssim_struct': struct_val,
+                'rms1': float(np.sqrt(np.nanmean(p1[valid] ** 2))) if valid.any() else np.nan,
+                'rms2': float(np.sqrt(np.nanmean(p2[valid] ** 2))) if valid.any() else np.nan,
                 'valid_frac': float(valid.mean()) if valid.size else 0.0,
                 'analysis_resolution_deg': res,
-                'ssim_win_px': ssim_win,
+                'ssim_sigma_px': sigma_px,
             }
+
+            if n_null:
+                base = fill_invalid_nearest(u2 - clip_sigma, valid)
+                null_vals = []
+                for _ in range(n_null):
+                    surrogate = phase_randomize(base, self._rng) + clip_sigma
+                    nv, _, _ = self.ssim2d_calc.compute(
+                        u1, surrogate, valid=valid, sigma_px=sigma_px,
+                        data_range=data_range, weights=area_w, stat_mask=stat_mask,
+                    )
+                    if np.isfinite(nv):
+                        null_vals.append(nv)
+                if null_vals:
+                    row['ssim_null'] = float(np.mean(null_vals))
+                    row['ssim_null_std'] = float(np.std(null_vals))
+
             if do_r:
                 row['r_signed'] = weighted_pearson(p1, p2, weights, valid)
             if do_sign:
@@ -1899,11 +2044,37 @@ class VelocityModelSimilarity:
 
         df = pd.DataFrame(rows)
         if len(df):
-            self.logger.info(
+            msg = (
                 f"      2D SSIM: [{df['ssim'].min():.3f}, {df['ssim'].max():.3f}]  "
-                f"mean={df['ssim'].mean():.3f}"
+                f"mean={self._depth_average(df, 'ssim'):.3f}"
             )
+            if 'ssim_null' in df.columns:
+                msg += f"  (null≈{df['ssim_null'].mean():.3f})"
+            self.logger.info(msg)
         return df
+
+    @staticmethod
+    def _depth_average(df: pd.DataFrame, column: str) -> float:
+        """
+        按层厚（梯形）加权的深度平均。
+
+        不同模型对的公共深度层数与间隔不同（51 层 @20 km vs 101 层 @10 km），
+        算术平均会让采样更密的深度段获得更高权重。
+        """
+        if column not in df.columns or not len(df):
+            return float('nan')
+        z = df['depth_km'].to_numpy(dtype=float)
+        v = df[column].to_numpy(dtype=float)
+        m = np.isfinite(z) & np.isfinite(v)
+        if m.sum() < 2:
+            return float(np.nanmean(v)) if m.any() else float('nan')
+        z, v = z[m], v[m]
+        order = np.argsort(z)
+        z, v = z[order], v[order]
+        span = z[-1] - z[0]
+        if span <= 0:
+            return float(np.mean(v))
+        return float(np.trapz(v, z) / span)
 
     def _compute_cwssim_spatial_huang(
         self,
@@ -2128,14 +2299,18 @@ class VelocityModelSimilarity:
                 self.logger.info(f"  ✅ {csv_file.name}")
 
                 pair_name = dk[:-len(suffix_depth)]
-                ssim_mean = float(df['ssim'].mean()) if 'ssim' in df.columns and len(df) else float('nan')
-                ssim_std = float(df['ssim'].std()) if 'ssim' in df.columns and len(df) else float('nan')
                 summary: Dict[str, Any] = {
                     'pair': pair_name,
                     'feature': feature,
-                    'ssim_2d_mean': ssim_mean,
-                    'ssim_2d_std': ssim_std,
+                    'ssim_2d_mean': self._depth_average(df, 'ssim'),
+                    'ssim_2d_std': (
+                        float(df['ssim'].std()) if 'ssim' in df.columns and len(df)
+                        else float('nan')
+                    ),
+                    'ssim_2d_struct_mean': self._depth_average(df, 'ssim_struct'),
                 }
+                if 'ssim_null' in df.columns:
+                    summary['ssim_2d_null_mean'] = self._depth_average(df, 'ssim_null')
                 df_1d = self.results.get(f"{pair_name}{suffix_1d}")
                 if df_1d is not None and len(df_1d):
                     summary['ssim_1d_overall'] = float(df_1d['ssim_1d_overall'].iloc[0])
@@ -2175,10 +2350,13 @@ class VelocityModelSimilarity:
                 prof_rows = []
                 for key, prof in self.profiles[feature].items():
                     name = self.models[key].name if key in self.models else key
-                    for z, v in zip(prof['depth'], prof['value']):
+                    std = prof.get('std', np.full_like(prof['value'], np.nan))
+                    for z, v, s in zip(prof['depth'], prof['value'], std):
                         prof_rows.append({
                             'model': name, 'model_key': key,
-                            'depth_km': float(z), feature: float(v) if np.isfinite(v) else np.nan,
+                            'depth_km': float(z),
+                            feature: float(v) if np.isfinite(v) else np.nan,
+                            f'{feature}_std': float(s) if np.isfinite(s) else np.nan,
                         })
                 if prof_rows:
                     prof_file = feat_dir / f'1d_profiles_{feature}.csv'
@@ -2191,7 +2369,22 @@ class VelocityModelSimilarity:
 
 
 class SimilarityVisualization:
-    """结构相似性可视化 (v18.0 — 1D SSIM 主路径)"""
+    """
+    结构相似性可视化 (v20.0)。
+
+    产出论文图：单参数版 (a) 1D 平均剖面 + (b) 2D SSIM(z)；
+    以及 Vs/Vp 合并版（线型区分参数，SSIM(z) 按参数分栏）。
+
+    两个面板共用 config.models 的配色，SSIM(z) 曲线按模型对顺序取用同一组色，
+    并各配一种标记形状。注意色号在 (a) 指模型、在 SSIM(z) 指模型对，二者不构成
+    对应关系，模型对的身份只由图例给出。
+    """
+
+    # 仅在模型配色不可用时兜底
+    _PAIR_COLORS = ['#D1495B', '#00798C', '#EDAE49', '#8E7DBE', '#66A182']
+    # 模型对的标记形状，曲线重叠时不靠颜色也能区分
+    _PAIR_MARKERS = ['o', 's', '^', 'D', 'v']
+    _FEAT_STYLES = {'vs': '-', 'vp': (0, (5, 2))}
 
     def __init__(self, analyzer: VelocityModelSimilarity):
         self.analyzer = analyzer
@@ -2201,6 +2394,86 @@ class SimilarityVisualization:
 
         plt.style.use('seaborn-v0_8-whitegrid')
         sns.set_context("paper", font_scale=1.4)
+
+    @staticmethod
+    def _feat_label(feature: str) -> str:
+        """特征名转地震学惯用写法: vs → Vs, vp → Vp"""
+        return {'vs': 'Vs', 'vp': 'Vp'}.get(feature.lower(), feature.upper())
+
+    @staticmethod
+    def _feat_math(feature: str) -> str:
+        """特征名转数学排版: vs → $V_S$"""
+        sub = feature[1].upper() if len(feature) > 1 else feature.upper()
+        return rf'$V_{sub}$'
+
+    def _model_label(self, model_key: str) -> str:
+        """模型名附原生网格间距，如 'SinoScope1.0  (1.0°)'"""
+        model = self.analyzer.models.get(model_key)
+        if model is None:
+            return model_key
+        try:
+            res = model.estimate_resolution()
+            r_lon, r_lat = float(res['lon']), float(res['lat'])
+        except Exception:
+            return model.name
+
+        def fmt(r: float) -> str:
+            """至少保留一位小数，让 1.0° 与 0.25° 在图例里对齐"""
+            s = f'{r:.2f}'.rstrip('0')
+            return f'{s}0' if s.endswith('.') else s
+
+        grid = (f'{fmt(r_lon)}°' if abs(r_lon - r_lat) < 1e-6
+                else f'{fmt(r_lon)}°×{fmt(r_lat)}°')
+        return f'{model.name}  ({grid})'
+
+    def _marker_step(self, depth: np.ndarray) -> int:
+        """
+        标记间隔换算成采样点步长，由 visualization['marker_interval_km'] 给定。
+
+        当前深度采样即 20 km，故步长为 1（每层一个标记）；若把
+        analysis['depth_grid_step_km'] 调细，标记密度不会跟着膨胀。
+        """
+        want_km = float(self.config.visualization.get('marker_interval_km', 0.0))
+        if want_km <= 0 or len(depth) < 2:
+            return 1
+        dz = float(np.median(np.diff(depth)))
+        if not np.isfinite(dz) or dz <= 0:
+            return 1
+        return max(1, int(round(want_km / dz)))
+
+    def _smooth_depth(self, depth: np.ndarray, values: np.ndarray) -> np.ndarray:
+        """
+        沿深度做高斯平滑，σ 由 visualization['ssim_smooth_km'] 给定。
+
+        逐层独立打分含估计噪声，而相邻深度的横向结构本身是相关的，因此平滑
+        是合理的展示方式。用掩膜归一化实现：无效层不参与加权，也不被填补，
+        原有的深度缺口在图上仍然保持为断开。
+
+        Args:
+            depth: 深度序列 (km)，需单调
+            values: 同长度的待平滑值，允许含 NaN
+
+        Returns:
+            平滑后的序列；σ<=0 或采样不足时原样返回
+        """
+        sigma_km = float(self.config.visualization.get('ssim_smooth_km', 0.0))
+        valid = np.isfinite(values)
+        if sigma_km <= 0 or valid.sum() < 3 or len(depth) < 3:
+            return values
+
+        dz = float(np.median(np.diff(depth)))
+        if not np.isfinite(dz) or dz <= 0:
+            return values
+        sigma_px = sigma_km / dz
+        if sigma_px < 0.3:
+            return values
+
+        num = gaussian_filter1d(np.where(valid, values, 0.0), sigma_px,
+                                mode='nearest')
+        den = gaussian_filter1d(valid.astype(float), sigma_px, mode='nearest')
+        out = np.where(den > 1e-3, num / np.maximum(den, 1e-12), np.nan)
+        out[~valid] = np.nan
+        return out
 
     def _pair_label(self, pair_name: str) -> str:
         """将 '{m1_key}_vs_{m2_key}' 转为 'Name1 vs Name2' 可读标签"""
@@ -2254,89 +2527,21 @@ class SimilarityVisualization:
             else:
                 ax.axvline(x=depth, color='gray', linestyle='--', alpha=0.5, linewidth=0.8)
 
-    # ---------- 1. SSIM 深度曲线 ----------
-
-    def _plot_depth_curve(
-        self,
-        ax,
-        suffix: str,
-        column: str,
-        feature: str,
-    ) -> int:
-        """在给定坐标轴上绘制各模型对的 SSIM(z) 曲线，返回绘制条数。"""
-        keys = sorted(k for k in self.analyzer.results if k.endswith(suffix))
-        pair_colors = ['#E41A1C', '#377EB8', '#4DAF4A', '#984EA3', '#FF7F00']
-        n_plotted = 0
-        for idx, key in enumerate(keys):
-            df = self.analyzer.results[key]
-            if column not in df.columns or not len(df):
-                continue
-            ax.plot(
-                df[column], df['depth_km'], '-o',
-                color=pair_colors[idx % len(pair_colors)],
-                linewidth=2, markersize=3,
-                label=self._pair_label(key[:-len(suffix)]),
-            )
-            n_plotted += 1
-        if n_plotted:
-            ax.set_ylabel('Depth (km)', fontsize=12)
-            ax.invert_yaxis()
-            ax.set_xlim(-0.05, 1.05)
-            ax.grid(True, alpha=0.3)
-            self._add_discontinuities(ax, 'horizontal')
-        return n_plotted
-
-    def plot_depth_ssim(self, feature: str = 'vs') -> Optional[plt.Figure]:
-        """绘制 1D SSIM(z) 与 2D SSIM(z) 随深度变化曲线（并排）"""
-        has_1d = any(k.endswith(f'_{feature}_1d') for k in self.analyzer.results)
-        has_2d = any(k.endswith(f'_{feature}_depth') for k in self.analyzer.results)
-        if not (has_1d or has_2d):
-            return None
-
-        self.logger.info(f"\n🎨 SSIM 深度曲线: {feature.upper()}")
-
-        fig, (ax_1d, ax_2d) = plt.subplots(1, 2, figsize=(14, 9))
-
-        self._plot_depth_curve(ax_1d, f'_{feature}_1d', 'ssim_1d', feature)
-        ax_1d.set_xlabel('1D SSIM', fontsize=13)
-        ax_1d.set_title(
-            '1D SSIM(z)\nraw mean V(z) profiles',
-            fontsize=13, fontweight='bold',
-        )
-        ax_1d.legend(fontsize=10, loc='lower left')
-
-        self._plot_depth_curve(ax_2d, f'_{feature}_depth', 'ssim', feature)
-        ax_2d.set_xlabel('2D SSIM', fontsize=13)
-        ax_2d.set_title(
-            '2D SSIM(z)\nlateral structure per depth slice',
-            fontsize=13, fontweight='bold',
-        )
-        ax_2d.legend(fontsize=10, loc='lower right')
-
-        fig.suptitle(
-            f'Structural Similarity vs Depth — {feature.upper()}',
-            fontsize=16, fontweight='bold', y=1.00,
-        )
-        plt.tight_layout()
-        self._save_figure(fig, f'depth_ssim_{feature}')
-        return fig
-
-    def plot_depth_cwssim(self, feature: str = 'vs') -> Optional[plt.Figure]:
-        """兼容旧入口，转发到 SSIM 深度曲线。"""
-        return self.plot_depth_ssim(feature)
-
-    # ---------- 2. 整体 SSIM 热图矩阵 ----------
+    # ---------- 论文图: 1D SSIM 矩阵 + 2D SSIM(z) 曲线 ----------
 
     def _build_matrix(self, feature: str, metric: str) -> Optional[np.ndarray]:
         """
         构建 N×N 相似性矩阵。
 
         Args:
-            metric: '1d' 取整体 1D SSIM；'2d' 取 2D SSIM(z) 的深度平均
+            feature: 'vs' / 'vp'
+            metric: '1d' 取整体 1D SSIM；'2d' 取 2D SSIM(z) 的层厚加权深度平均
+
+        Returns:
+            对称矩阵（对角为 1）；无可用结果时返回 None
         """
         model_keys = list(self.analyzer.models.keys())
-        n = len(model_keys)
-        matrix = np.ones((n, n))
+        matrix = np.ones((len(model_keys), len(model_keys)))
         found = False
 
         suffix = f'_{feature}_1d' if metric == '1d' else f'_{feature}_depth'
@@ -2352,68 +2557,510 @@ class SimilarityVisualization:
                     continue
                 val = float(df['ssim_1d_overall'].iloc[0])
             else:
-                if 'ssim' not in df.columns:
-                    continue
-                val = float(np.nanmean(df['ssim']))
+                val = self.analyzer._depth_average(df, 'ssim')
+            if not np.isfinite(val):
+                continue
             matrix[i, j] = val
             matrix[j, i] = val
             found = True
 
         return matrix if found else None
 
-    def _draw_heatmap(self, ax, matrix: np.ndarray, label: str) -> None:
-        """在给定坐标轴绘制上三角相似性热图。"""
-        hm_cfg = self.config.visualization['heatmap']
-        names = [self.analyzer.models[k].name for k in self.analyzer.models]
-        mask = np.tril(np.ones_like(matrix, dtype=bool), k=-1)
-        sns.heatmap(
-            pd.DataFrame(matrix, index=names, columns=names),
-            mask=mask, annot=True, fmt='.3f', cmap=hm_cfg['cmap'],
-            vmin=hm_cfg.get('ssim_vmin', 0.0), vmax=hm_cfg.get('ssim_vmax', 1.0),
-            square=True,
-            linewidths=hm_cfg['cell_linewidth'],
-            linecolor=hm_cfg['cell_linecolor'],
-            annot_kws={'fontsize': 18, 'fontweight': 'bold'},
-            cbar_kws={'label': label, 'shrink': 0.8},
-            ax=ax,
-        )
-        ax.set_xticklabels(ax.get_xticklabels(), rotation=45, ha='right',
-                           fontsize=12, fontweight='bold')
-        ax.set_yticklabels(ax.get_yticklabels(), rotation=0,
-                           fontsize=12, fontweight='bold')
+    def _draw_matrix(
+        self,
+        ax,
+        matrix: np.ndarray,
+        cbar_label: str,
+        cmap: str = 'YlGnBu',
+    ) -> None:
+        """
+        绘制上三角相似性马赛克图。
 
-    def plot_ssim_heatmap(self, feature: str = 'vs') -> Optional[plt.Figure]:
-        """绘制 N×N 相似性矩阵：整体 1D SSIM 与深度平均 2D SSIM 并排"""
-        m_1d = self._build_matrix(feature, '1d')
-        m_2d = self._build_matrix(feature, '2d')
-        if m_1d is None and m_2d is None:
+        矩阵对称，只画上三角即可无损呈现全部模型对；对角线为自比较恒等于 1，
+        留空——若参与配色会占据色标高端，把关心的差异压缩到几乎同色。
+        进一步去掉全空的首列与末行，使每个坐标标签都对应到实际单元格。
+        色标横放在空出的左下角三角区。
+        """
+        names = [self.analyzer.models[k].name for k in self.analyzer.models]
+        n = len(names)
+        if n < 2:
+            return
+
+        # 紧凑上三角: 行取 names[:-1]，列取 names[1:]，保留 i <= j 的单元
+        sub = matrix[:-1, 1:]
+        m = n - 1
+        keep = np.triu(np.ones((m, m), dtype=bool), k=0)
+        vmin = np.floor(np.nanmin(sub[keep]) * 20.0) / 20.0
+        vmax = 1.0
+
+        cmap_obj = plt.get_cmap(cmap).copy()
+        cmap_obj.set_bad(alpha=0.0)
+        im = ax.imshow(
+            np.ma.masked_array(sub, mask=~keep),
+            cmap=cmap_obj, vmin=vmin, vmax=vmax, origin='upper', aspect='auto',
+        )
+
+        norm = plt.Normalize(vmin=vmin, vmax=vmax)
+        for i in range(m):
+            for j in range(i, m):
+                val = sub[i, j]
+                # 深色底用白字，保证标注在任何色阶上都可读
+                txt_color = 'white' if norm(val) > 0.55 else '#1A1A1A'
+                ax.text(j, i, f'{val:.3f}', ha='center', va='center',
+                        fontsize=15, fontweight='bold', color=txt_color)
+                ax.add_patch(plt.Rectangle(
+                    (j - 0.5, i - 0.5), 1, 1, fill=False,
+                    edgecolor='white', linewidth=2.5, zorder=3,
+                ))
+
+        ax.set_xticks(np.arange(m))
+        ax.set_yticks(np.arange(m))
+        ax.set_xticklabels(names[1:], rotation=25, ha='left', fontsize=11)
+        ax.set_yticklabels(names[:-1], fontsize=11)
+        ax.xaxis.set_ticks_position('top')
+        ax.tick_params(which='both', length=0)
+        ax.grid(False)
+        for spine in ax.spines.values():
+            spine.set_visible(False)
+
+        # 色标用 inset 承载（不抢占父轴空间，轴框才能与相邻面板严格对齐），
+        # 横放在左下角的空白三角区
+        cax = ax.inset_axes([0.03, 0.15, 0.40, 0.045])
+        cbar = ax.figure.colorbar(im, cax=cax, orientation='horizontal')
+        cbar.set_label(cbar_label, fontsize=10.5, labelpad=2)
+        cbar.ax.tick_params(labelsize=9)
+        cbar.ax.xaxis.set_label_position('bottom')
+        cbar.outline.set_visible(False)
+
+    def _decorate_depth_axis(self, ax) -> None:
+        """统一各面板的深度轴：反向、间断面虚线、次刻度、网格与边框。"""
+        ax.set_ylim(
+            float(self.config.analysis['depth_range_km'][1]),
+            float(self.config.analysis['depth_range_km'][0]),
+        )
+        for _, depth in self.config.visualization['discontinuities']:
+            ax.axhline(depth, color='#9A9A9A', linestyle=(0, (4, 3)),
+                       linewidth=0.8, zorder=2)
+
+        ax.yaxis.set_minor_locator(MultipleLocator(100))
+        ax.xaxis.set_minor_locator(AutoMinorLocator(2))
+        ax.grid(True, axis='x', alpha=0.25, linestyle='-', linewidth=0.6)
+        ax.grid(False, axis='y')
+        ax.grid(False, which='minor')
+        for side in ('top', 'right'):
+            ax.spines[side].set_visible(False)
+        ax.tick_params(labelsize=10)
+        ax.tick_params(which='minor', length=2.5)
+
+    def _add_discontinuity_labels(self, ax) -> None:
+        """
+        在最右面板外侧挂一根只带间断面刻度的深度轴。
+
+        名称放在图外，各面板内部就不必再写文字——原先挤在最左面板左缘的
+        Moho/LAB 标签紧贴顶边且会压到剖面曲线。所有面板共享同一深度轴，
+        标注一次即可。
+        """
+        z_lo, z_hi = ax.get_ylim()
+        ax_r = ax.twinx()
+        ax_r.set_ylim(z_lo, z_hi)
+        depths = [d for _, d in self.config.visualization['discontinuities']]
+        names = [n for n, _ in self.config.visualization['discontinuities']]
+        ax_r.set_yticks(depths)
+        ax_r.set_yticklabels(names, fontsize=9, color='#6E6E6E')
+        ax_r.tick_params(axis='y', length=3, color='#9A9A9A', pad=2)
+        ax_r.grid(False)
+        for side in ('top', 'bottom', 'left', 'right'):
+            ax_r.spines[side].set_visible(False)
+
+    def _draw_profiles(self, ax, feature: str) -> int:
+        """
+        绘制共同区域的 1D 平均速度剖面 V(z) 与 ±1σ 横向变化带。
+
+        剖面定义与 2_1_Model_compare.calculate_1d_profile 一致（仅横向平均
+        改为 cos(lat) 面积加权）。阴影是该深度层的横向标准差——它与 1D SSIM
+        高、2D SSIM 低这一组合互为印证：平均剖面几乎重合，但各自的横向
+        变化范围很宽，说明分歧藏在横向图案里而非背景。
+
+        图例带各模型的原生网格间距：SinoScope1.0 的 1.0° 决定了 2D SSIM 的
+        公共分析网格，也是它的两个模型对得分偏低的一部分原因，标出来读者才
+        不会把分辨率差异误读成结构分歧。
+
+        Returns:
+            绘制的模型数量
+        """
+        profs = self.analyzer.profiles.get(feature, {})
+        n_plotted = 0
+        for key, prof in profs.items():
+            model = self.analyzer.models.get(key)
+            name = self._model_label(key)
+            color = model.color if model else '#333333'
+            z = np.asarray(prof['depth'], dtype=float)
+            v = np.asarray(prof['value'], dtype=float)
+            m = np.isfinite(z) & np.isfinite(v)
+            if not m.any():
+                continue
+            ax.plot(v[m], z[m], color=color, linewidth=1.2,
+                    label=name, zorder=3)
+
+            std = np.asarray(prof.get('std', np.full_like(v, np.nan)), dtype=float)
+            ms = m & np.isfinite(std)
+            if ms.any():
+                ax.fill_betweenx(
+                    z[ms], v[ms] - std[ms], v[ms] + std[ms],
+                    color=color, alpha=0.20, linewidth=0, zorder=1,
+                )
+            n_plotted += 1
+
+        if not n_plotted:
+            return 0
+
+        sub = feature[1].upper() if len(feature) > 1 else feature.upper()
+        ax.set_xlabel(rf'$V_{sub}$ (km/s)', fontsize=12)
+        ax.set_ylabel('Depth (km)', fontsize=12)
+        self._decorate_depth_axis(ax)
+        ax.legend(fontsize=9.5, loc='lower left', handlelength=1.6)
+        return n_plotted
+
+    def _draw_ssim_curves(self, ax, feature: str) -> int:
+        """
+        绘制 2D SSIM(z)：逐深度横向结构相似性曲线与相位随机化零假设带。
+
+        不画 1D 剖面的局部 SSIM(z)：V(z) 是单调光滑曲线，没有可供结构项
+        发挥的图案，局部统计量退化——亮度项恒为 1（对绝对速度差异不敏感），
+        梯度平缓的深度段又被稳定化常数 C₂ 支配而机械趋于 1，曲线不可解读。
+        整体 1D SSIM 仍保留在 similarity_summary_{feature}.csv 中。
+
+        Returns:
+            绘制的模型对数量
+        """
+        suffix = f'_{feature}_depth'
+        keys = sorted(k for k in self.analyzer.results if k.endswith(suffix))
+
+        # 直接取 (a) 的模型配色，两个面板色系统一
+        model_colors = [m.color for m in self.analyzer.models.values()]
+        if not model_colors:
+            model_colors = self._PAIR_COLORS
+
+        show_null = bool(self.config.visualization.get('show_null_band', False))
+        null_depth: List[np.ndarray] = []
+        null_value: List[np.ndarray] = []
+        handles: List[Any] = []
+        labels: List[str] = []
+        n_plotted = 0
+        v_max = 0.0
+
+        for idx, key in enumerate(keys):
+            df = self.analyzer.results[key]
+            if 'ssim' not in df.columns or not len(df):
+                continue
+            pair = key[:-len(suffix)]
+            color = model_colors[idx % len(model_colors)]
+            marker = self._PAIR_MARKERS[idx % len(self._PAIR_MARKERS)]
+            z = df['depth_km'].to_numpy(dtype=float)
+            s_raw = df['ssim'].to_numpy(dtype=float)
+            s = self._smooth_depth(z, s_raw)
+
+            # 白色描边让曲线在交叉处仍可分辨
+            ax.plot(s, z, color=color, linewidth=1.4, zorder=3, path_effects=[
+                pe.Stroke(linewidth=2.8, foreground='white'), pe.Normal(),
+            ])
+            # 标记取平滑后的同一组值，严格落在曲线上——画在原始值上会与曲线
+            # 错开，读者无从判断该信哪一个。标记形状按模型对区分，
+            # 曲线重叠段不靠颜色也能分开
+            step = self._marker_step(z)
+            ax.plot(s[::step], z[::step], linestyle='none', marker=marker,
+                    markersize=2.8, color=color, markeredgecolor='white',
+                    markeredgewidth=0.35, zorder=5)
+
+            agg = self.analyzer._depth_average(df, 'ssim')
+            handles.append(Line2D(
+                [], [], color=color, linewidth=1.4, marker=marker,
+                markersize=4.0, markeredgecolor='white', markeredgewidth=0.4,
+            ))
+            labels.append(
+                f'{self._pair_label(pair)}'
+                + (f'  ({agg:.2f})' if np.isfinite(agg) else '')
+            )
+            v_max = max(v_max, float(np.nanmax(s_raw)))
+            if show_null and 'ssim_null' in df.columns:
+                null_depth.append(z)
+                null_value.append(df['ssim_null'].to_numpy(dtype=float))
+            n_plotted += 1
+
+        if not n_plotted:
+            return 0
+
+        ax.set_xlim(0.0, min(1.0, max(0.7, np.ceil(v_max * 10.0) / 10.0 + 0.05)))
+
+        # 零假设包络：保留功率谱、随机化相位的 surrogate 得分上界。
+        # 落在带内即与"结构无关但粗糙度相同"不可区分。
+        if null_depth:
+            z_ref = max(null_depth, key=len)
+            stack = np.vstack([
+                np.interp(z_ref, z, v) for z, v in zip(null_depth, null_value)
+            ])
+            ax.fill_betweenx(
+                z_ref, ax.get_xlim()[0], np.nanmax(stack, axis=0),
+                color='#B0B0B0', alpha=0.35, linewidth=0, zorder=1,
+            )
+            handles.append(Patch(facecolor='#B0B0B0', alpha=0.35))
+            labels.append('Null (phase-randomized)')
+
+        # 不写成 "Depth-wise SSIM"：1D 剖面 SSIM 恰恰是沿深度方向算的，
+        # 只说 depth-wise 会与它混淆，保留 2D 才点明每个测量做在一张水平切片上
+        ax.set_xlabel(
+            f'Depth-wise 2D SSIM  ({self._feat_math(feature)})',
+            fontsize=12,
+        )
+        self._decorate_depth_axis(ax)
+
+        # 括号内是层厚加权深度平均值，平滑尺度见 ssim_smooth_km——两者都由
+        # 图注说明，图内不再放标题文字
+        leg = ax.legend(
+            handles=handles, labels=labels, fontsize=9.5, loc='lower right',
+            handlelength=2.2, handletextpad=0.7,
+        )
+        leg.set_frame_on(True)
+        leg.get_frame().set_facecolor('white')
+        leg.get_frame().set_alpha(0.82)
+        leg.get_frame().set_linewidth(0)
+        return n_plotted
+
+    def plot_ssim_figure(self, feature: str = 'vs') -> Optional[plt.Figure]:
+        """
+        论文用单幅图，两个面板共享深度轴：
+
+        (a) 共同区域 1D 平均剖面 V(z) 与 ±1σ 横向变化带
+        (b) 2D SSIM(z)——逐深度横向结构相似性，图例括号内为深度平均值
+
+        整体 1D SSIM 只进 similarity_summary_{feature}.csv，不进图：3 个模型
+        只有 3 个数，与 (a) 的"剖面几乎重合"是同一件事的两种表述，画成矩阵
+        反而容易与 (b) 的逐层横向得分混读。
+        """
+        has_prof = bool(self.analyzer.profiles.get(feature))
+        has_2d = any(k.endswith(f'_{feature}_depth') for k in self.analyzer.results)
+        if not (has_prof or has_2d):
             return None
 
-        self.logger.info(f"\n🎨 整体 SSIM 热图: {feature.upper()}")
-        hm_cfg = self.config.visualization['heatmap']
-        panels = [(m, lab) for m, lab in
-                  ((m_1d, '1D SSIM'), (m_2d, '2D SSIM (depth-averaged)'))
-                  if m is not None]
+        self.logger.info(f"\n🎨 论文图 (剖面 + 2D SSIM): {feature.upper()}")
 
-        fig, axes = plt.subplots(1, len(panels), figsize=(9 * len(panels), 8))
-        if len(panels) == 1:
-            axes = [axes]
+        rc = {
+            'font.size': 11,
+            'axes.linewidth': 0.9,
+            'axes.edgecolor': '#4A4A4A',
+            'xtick.color': '#4A4A4A',
+            'ytick.color': '#4A4A4A',
+            'axes.labelcolor': '#1A1A1A',
+            'legend.frameon': False,
+        }
+        with plt.rc_context(rc):
+            fig, axes = plt.subplots(
+                1, 2, figsize=(10.6, 5.6), sharey=True,
+                gridspec_kw={'wspace': 0.07, 'width_ratios': [0.92, 1.0]},
+            )
+            drawn = [
+                self._draw_profiles(axes[0], feature),
+                self._draw_ssim_curves(axes[1], feature),
+            ]
 
-        for ax, (matrix, label) in zip(axes, panels):
-            self._draw_heatmap(ax, matrix, label)
-            ax.set_title(label, fontsize=15, fontweight='bold', pad=12)
+            for ax, tag, ok in zip(axes, ('a', 'b'), drawn):
+                if not ok:
+                    ax.set_visible(False)
+                    continue
+                ax.annotate(
+                    f'({tag})', xy=(0, 1), xycoords='axes fraction',
+                    xytext=(2, 14), textcoords='offset points',
+                    fontsize=13, fontweight='bold', va='top', ha='left',
+                )
 
-        fig.suptitle(
-            f'Model Similarity Matrix — {feature.upper()}',
-            fontsize=hm_cfg['title_fontsize'], fontweight='bold', y=1.01,
-        )
-        plt.tight_layout()
-        self._save_figure(fig, f'ssim_heatmap_{feature}')
+            if drawn[-1]:
+                self._add_discontinuity_labels(axes[-1])
+
+            self._save_figure(fig, f'ssim_{feature}')
         return fig
 
-    def plot_cwssim_heatmap(self, feature: str = 'vs') -> Optional[plt.Figure]:
-        """兼容旧入口，转发到整体 SSIM 热图。"""
-        return self.plot_ssim_heatmap(feature)
+    # ---------- 论文图: Vs 与 Vp 合并版 ----------
+
+    def _draw_profiles_joint(self, ax, features: Tuple[str, ...]) -> int:
+        """
+        Vs 与 Vp 平均剖面共用同一速度轴（同为 km/s，不需要第二套刻度）。
+
+        两族曲线在图面上天然分离：量值接近的地壳 Vp（~5-6 km/s）出现在图顶，
+        而同样量值的下地幔 Vs 出现在图底，深度轴把它们拉开，无需人为偏移。
+        参数用线型区分（实线 Vs / 虚线 Vp），模型用颜色区分。
+
+        Returns:
+            绘制的曲线数量
+        """
+        n_plotted = 0
+        anchors: Dict[str, float] = {}
+        z_ref = 0.62 * float(self.config.analysis['depth_range_km'][1])
+
+        for feature in features:
+            ls = self._FEAT_STYLES.get(feature, '-')
+            ref_vals: List[float] = []
+            for key, prof in self.analyzer.profiles.get(feature, {}).items():
+                model = self.analyzer.models.get(key)
+                color = model.color if model else '#333333'
+                z = np.asarray(prof['depth'], dtype=float)
+                v = np.asarray(prof['value'], dtype=float)
+                m = np.isfinite(z) & np.isfinite(v)
+                if not m.any():
+                    continue
+                ax.plot(v[m], z[m], color=color, linewidth=1.2,
+                        linestyle=ls, zorder=3)
+
+                std = np.asarray(prof.get('std', np.full_like(v, np.nan)),
+                                 dtype=float)
+                ms = m & np.isfinite(std)
+                if ms.any():
+                    ax.fill_betweenx(
+                        z[ms], v[ms] - std[ms], v[ms] + std[ms],
+                        color=color, alpha=0.18, linewidth=0, zorder=1,
+                    )
+                ref_vals.append(float(np.interp(z_ref, z[m], v[m])))
+                n_plotted += 1
+            if ref_vals:
+                anchors[feature] = float(np.mean(ref_vals))
+
+        if not n_plotted:
+            return 0
+
+        ax.set_xlabel('Velocity (km/s)', fontsize=12)
+        ax.set_ylabel('Depth (km)', fontsize=12)
+        self._decorate_depth_axis(ax)
+
+        # 参数名直接标注在各自曲线族旁，指向两族之间的空白，比图例更好读
+        x0, x1 = ax.get_xlim()
+        offset = 0.05 * (x1 - x0)
+        order = sorted(anchors, key=lambda f: anchors[f])
+        for i, feature in enumerate(order):
+            to_right = (i == 0)
+            ax.text(
+                anchors[feature] + (offset if to_right else -offset), z_ref,
+                self._feat_math(feature),
+                ha='left' if to_right else 'right', va='center',
+                fontsize=13, color='#4A4A4A', zorder=4,
+            )
+
+        handles = [
+            Line2D([], [], color=self.analyzer.models[k].color,
+                   linewidth=1.2, label=self._model_label(k))
+            for k in self.analyzer.models
+        ]
+        ax.legend(handles=handles, fontsize=9.5, loc='lower left',
+                  handlelength=1.6)
+        return n_plotted
+
+    def plot_ssim_joint_figure(
+        self, features: Tuple[str, ...] = ('vs', 'vp')
+    ) -> Optional[plt.Figure]:
+        """
+        Vs 与 Vp 合并的论文图，各面板共享深度轴：
+
+        (a) 共同区域 1D 平均剖面与 ±1σ 横向变化带（Vs 与 Vp 同轴，km/s）
+        (b)(c) 逐深度 2D SSIM(z) 与相位随机化零假设带，按参数分栏
+
+        SSIM(z) 不把两个参数叠在同一横轴上：6 条本身就逐层抖动的曲线全落在
+        0.1-0.4 的窄带内，其中两个 SinoScope 模型对几乎重合，再靠线型区分参数
+        只会更乱。分栏后每栏 3 条实线，两栏强制共用横轴上限，Vs 与 Vp 的高低
+        仍可直接对读。
+
+        Vp 与 Vs 并列是有信息量的：三个模型都给出原生 vpv/vph，δlnVp 与
+        δlnVs 的逐层相关只有 0.25-0.98、Vp/Vs 比值在空间上变化，Vp 不是 Vs
+        的确定性换算。但 EARA2024 与 FWEA23 的 δlnVp/δlnVs 斜率接近经验值
+        0.5-0.7，说明其 Vp 受 Vs 约束较强——因此 Vp 得分低于 Vs 不能直接读作
+        "Vp 结构分歧更大"，其中混入了各模型 Vp-Vs 耦合假设本身的差异。
+
+        Args:
+            features: 参与合并的参数，(a) 中按线型 _FEAT_STYLES 区分，
+                SSIM(z) 各占一栏
+
+        Returns:
+            图对象；无可用数据时返回 None
+        """
+        feats = tuple(
+            f for f in features
+            if self.analyzer.profiles.get(f)
+            or any(k.endswith(f'_{f}_depth') for k in self.analyzer.results)
+        )
+        if len(feats) < 2:
+            return None
+
+        self.logger.info(
+            f"\n🎨 论文图 (剖面 + 2D SSIM, 合并): "
+            f"{' + '.join(self._feat_label(f) for f in feats)}"
+        )
+
+        rc = {
+            'font.size': 11,
+            'axes.linewidth': 0.9,
+            'axes.edgecolor': '#4A4A4A',
+            'xtick.color': '#4A4A4A',
+            'ytick.color': '#4A4A4A',
+            'axes.labelcolor': '#1A1A1A',
+            'legend.frameon': False,
+        }
+        with plt.rc_context(rc):
+            fig, axes = plt.subplots(
+                1, 1 + len(feats), figsize=(4.9 + 3.7 * len(feats), 5.6),
+                sharey=True,
+                gridspec_kw={
+                    'wspace': 0.09,
+                    # (a) 横跨 Vs 与 Vp 两个速度量程，需要比单参数栏更宽
+                    'width_ratios': [1.32] + [1.0] * len(feats),
+                },
+            )
+            drawn = [self._draw_profiles_joint(axes[0], feats)]
+            for ax, feature in zip(axes[1:], feats):
+                drawn.append(self._draw_ssim_curves(ax, feature))
+
+            # 各 SSIM 栏强制同一横轴上限，跨参数的高低才能直接目视对比
+            ssim_axes = [ax for ax, ok in zip(axes[1:], drawn[1:]) if ok]
+            if ssim_axes:
+                x_max = max(ax.get_xlim()[1] for ax in ssim_axes)
+                for ax in ssim_axes:
+                    ax.set_xlim(0.0, x_max)
+
+            for ax, tag, ok in zip(axes, 'abcdef', drawn):
+                if not ok:
+                    ax.set_visible(False)
+                    continue
+                ax.annotate(
+                    f'({tag})', xy=(0, 1), xycoords='axes fraction',
+                    xytext=(2, 14), textcoords='offset points',
+                    fontsize=13, fontweight='bold', va='top', ha='left',
+                )
+
+            if drawn[-1]:
+                self._add_discontinuity_labels(axes[-1])
+
+            self._save_figure(fig, f"ssim_{'_'.join(feats)}")
+        return fig
+
+    def plot_ssim_matrix(self, feature: str = 'vs') -> Optional[plt.Figure]:
+        """
+        N×N 上三角相似性矩阵，单独出图。
+
+        当前 3 个模型只有 3 个数，信息量不足以在主图里占版面（数值已在
+        similarity_summary_{feature}.csv 与主图图例中给出），因此 main()
+        不调用；模型库扩展到多模型后这张矩阵才值得单独成图。
+        """
+        metric = self.config.visualization.get('matrix_metric', '1d')
+        matrix = self._build_matrix(feature, metric)
+        if matrix is None:
+            return None
+
+        self.logger.info(f"\n🎨 相似性矩阵: {feature.upper()}")
+        feat = self._feat_label(feature)
+        label = (f'1D SSIM  ({feat} profile)' if metric == '1d'
+                 else f'2D SSIM  ({feat} lateral structure)')
+
+        with plt.rc_context({'legend.frameon': False}):
+            fig, ax = plt.subplots(figsize=(6.4, 5.8))
+            self._draw_matrix(ax, matrix, label)
+            self._save_figure(fig, f'ssim_matrix_{metric}_{feature}')
+        return fig
 
     # ---------- 4. CW-SSIM 空间分布图 ----------
 
@@ -2515,113 +3162,18 @@ class SimilarityVisualization:
 
         return None
 
-    # ---------- 5. 综合概览面板 ----------
-
-    def plot_1d_profiles(self, feature: str = 'vs') -> Optional[plt.Figure]:
-        """绘制共同区域原始 1D 速度剖面（对齐 2_1）。"""
-        profs = self.analyzer.profiles.get(feature, {})
-        if not profs:
-            return None
-
-        self.logger.info(f"\n🎨 1D 速度剖面: {feature.upper()}")
-        fig, ax = plt.subplots(figsize=(6, 8))
-        for key, prof in profs.items():
-            model = self.analyzer.models.get(key)
-            name = model.name if model else key
-            color = model.color if model else '#333333'
-            z = prof['depth']
-            v = prof['value']
-            m = np.isfinite(z) & np.isfinite(v)
-            ax.plot(v[m], z[m], color=color, linewidth=1.8, label=name)
-
-        ax.set_xlabel(f'{feature.upper()} (km/s)', fontsize=14)
-        ax.set_ylabel('Depth (km)', fontsize=14)
-        ax.set_title(
-            f'1D Mean {feature.upper()} Profiles (common region)',
-            fontsize=14, fontweight='bold',
-        )
-        ax.invert_yaxis()
-        self._add_discontinuities(ax, 'horizontal')
-        ax.legend(fontsize=11, loc='lower left')
-        ax.grid(True, alpha=0.3)
-        plt.tight_layout()
-        self._save_figure(fig, f'1d_profile_{feature}')
-        return fig
-
-    def plot_similarity_overview(self, feature: str = 'vs') -> Optional[plt.Figure]:
-        """1D 剖面 + 1D SSIM(z) + 2D SSIM(z) + 两个相似性矩阵"""
-        has_1d = any(k.endswith(f'_{feature}_1d') for k in self.analyzer.results)
-        has_2d = any(k.endswith(f'_{feature}_depth') for k in self.analyzer.results)
-        if not (has_1d or has_2d):
-            return None
-
-        self.logger.info(f"\n🎨 综合概览面板: {feature.upper()}")
-
-        fig = plt.figure(figsize=(20, 11))
-        gs = fig.add_gridspec(2, 3, hspace=0.32, wspace=0.30)
-        ax_prof = fig.add_subplot(gs[0, 0])
-        ax_1d = fig.add_subplot(gs[0, 1])
-        ax_2d = fig.add_subplot(gs[0, 2])
-        ax_hm1 = fig.add_subplot(gs[1, 0])
-        ax_hm2 = fig.add_subplot(gs[1, 1])
-
-        for key, prof in self.analyzer.profiles.get(feature, {}).items():
-            model = self.analyzer.models.get(key)
-            name = model.name if model else key
-            color = model.color if model else '#333333'
-            z, v = prof['depth'], prof['value']
-            m = np.isfinite(z) & np.isfinite(v)
-            ax_prof.plot(v[m], z[m], color=color, linewidth=1.8, label=name)
-        ax_prof.set_xlabel(f'{feature.upper()} (km/s)', fontsize=12)
-        ax_prof.set_ylabel('Depth (km)', fontsize=12)
-        ax_prof.set_title('1D Mean Profiles', fontsize=14, fontweight='bold')
-        ax_prof.invert_yaxis()
-        ax_prof.legend(fontsize=9, loc='lower left')
-        ax_prof.grid(True, alpha=0.3)
-        self._add_discontinuities(ax_prof)
-
-        self._plot_depth_curve(ax_1d, f'_{feature}_1d', 'ssim_1d', feature)
-        ax_1d.set_xlabel('1D SSIM', fontsize=12)
-        ax_1d.set_title('1D SSIM vs Depth', fontsize=14, fontweight='bold')
-        ax_1d.legend(fontsize=8, loc='lower left')
-
-        self._plot_depth_curve(ax_2d, f'_{feature}_depth', 'ssim', feature)
-        ax_2d.set_xlabel('2D SSIM', fontsize=12)
-        ax_2d.set_title('2D SSIM vs Depth', fontsize=14, fontweight='bold')
-        ax_2d.legend(fontsize=8, loc='lower right')
-
-        m_1d = self._build_matrix(feature, '1d')
-        m_2d = self._build_matrix(feature, '2d')
-        if m_1d is not None:
-            self._draw_heatmap(ax_hm1, m_1d, '1D SSIM')
-            ax_hm1.set_title('Overall 1D SSIM', fontsize=14, fontweight='bold')
-        else:
-            ax_hm1.set_visible(False)
-        if m_2d is not None:
-            self._draw_heatmap(ax_hm2, m_2d, '2D SSIM')
-            ax_hm2.set_title('2D SSIM (depth-averaged)', fontsize=14, fontweight='bold')
-        else:
-            ax_hm2.set_visible(False)
-
-        fig.suptitle(
-            f'Structural Similarity — {feature.upper()}',
-            fontsize=18, fontweight='bold', y=0.98,
-        )
-        self._save_figure(fig, f'similarity_overview_{feature}')
-        return fig
-
-
 # ==================== 主函数 ====================
 
 def main():
     """主函数 — 1D SSIM + 2D SSIM(z)"""
     print("\n" + "=" * 80)
-    print("🚀 EASTASIA-FWI 速度模型结构相似性分析 (v19.0)")
+    print("🚀 EASTASIA-FWI 速度模型结构相似性分析 (v20.0)")
     print("   框架: Wang et al. (2004) SSIM — 1D 剖面 + 2D 逐深度切片")
     print("=" * 80)
     print("\n🎯 主路径:")
     print("  • 1D SSIM: 共同区域横向平均的原始 Vs / Vp 剖面 V(z)")
-    print("  • 2D SSIM(z): 逐深度切片、去横向平均后的横向结构")
+    print("  • 2D SSIM(z): 统一网格上 δlnV 的横向结构，含零假设基线")
+    print("  • 产品: 单幅论文图 2-2_ssim_{vs,vp}.jpg/pdf")
     print("=" * 80 + "\n")
 
     analyzer = None
@@ -2650,12 +3202,15 @@ def main():
 
         for feature in sorted(features_done):
             print(f"\n  📊 {feature.upper()}...")
-            visualizer.plot_1d_profiles(feature)
-            visualizer.plot_depth_ssim(feature)
-            visualizer.plot_ssim_heatmap(feature)
-            visualizer.plot_similarity_overview(feature)
+            visualizer.plot_ssim_figure(feature)
             if analyzer.config.analysis.get('compute_cwssim_spatial'):
                 visualizer.plot_cwssim_spatial(feature)
+
+        # Vs + Vp 合并版（线型区分参数），供正文单图使用
+        joint = tuple(f for f in ('vs', 'vp') if f in features_done)
+        if len(joint) > 1:
+            print(f"\n  📊 {' + '.join(f.upper() for f in joint)} (合并)...")
+            visualizer.plot_ssim_joint_figure(joint)
 
         print("\n" + "=" * 80)
         print("✅ 分析完成 (1D SSIM + 2D SSIM(z))")

@@ -5,11 +5,14 @@ EASTASIA-FWI 速度相聚类可视化模块
 功能描述:
 - K 选择诊断图: BIC 曲线、拐点弦距、四带合并面板
 - 聚类结果图: 深度切片、垂直剖面、簇剖面、特征分布、簇中心
+- 特征空间交会图: 2-3-12 二维 (δlnVs, δlnVp) 与 2-3-13 三维 (δlnVs, δlnVp, depth)
 - 结构对照: Slab2 俯冲板片几何、地质省与 CN 地块边界叠绘（均为定性对照）
 - GMM 与 KMeans 对比图、后验概率分布图
 
 科学原理:
 - facies 解释标注依据 δlnVp/δlnVs 的联合符号与幅值（见 interpret_facies）
+- 交会图判据 R = σ∥/σ⊥ 量化簇中心相对点云主轴的走向，R ≫ 1 表明聚类主要
+  按扰动幅度切分而非物性差异（见 crossplot_diagnostics）
 - Slab2 与地质边界仅作定性对照，不参与任何定量评分
 
 说明:
@@ -23,6 +26,7 @@ EASTASIA-FWI 速度相聚类可视化模块
 
 import sys
 import re
+import textwrap
 import logging
 from pathlib import Path
 from typing import Dict, List, Tuple, Any, Optional, Sequence
@@ -37,6 +41,7 @@ from sklearn.mixture import GaussianMixture
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 from matplotlib.gridspec import GridSpec
+from matplotlib.patches import Rectangle
 import seaborn as sns
 
 # 添加项目根目录到路径
@@ -47,6 +52,34 @@ from config.base_config import BaseConfig
 
 # 与 2_3_Model_clustering 保持一致的随机种子，确保抽样绘图可复现
 RANDOM_SEED = 42
+
+# moho_4band 选 K 图固定顺序与发表用层名
+MOHO_BAND_ORDER: Tuple[str, ...] = (
+    'crust', 'lithosphere', 'transition_zone', 'lower_mantle',
+)
+MOHO_BAND_TITLES: Dict[str, str] = {
+    'crust': 'Crust',
+    'lithosphere': 'Lithosphere',
+    'transition_zone': 'Transition zone',
+    'lower_mantle': 'Lower mantle',
+    'shallow': 'Shallow mantle',
+    'all': 'Full depth',
+}
+# 谱系图 facies 表格行高相对基准的缩放（含 GridSpec 表格区高度）
+PHYLO_TABLE_ROW_SCALE = 1.5
+
+
+def _short_model_label(model_name: str) -> str:
+    """2022_SinoScope1.0 → SinoScope1.0"""
+    return re.sub(r'^\d{4}_', '', str(model_name))
+
+
+def _sort_bands_for_k_plot(
+    bands: Sequence[Tuple[str, Any]],
+) -> List[Tuple[str, Any]]:
+    """按 moho_4band 固定顺序排列子图 (a–d)"""
+    order = {name: i for i, name in enumerate(MOHO_BAND_ORDER)}
+    return sorted(bands, key=lambda item: order.get(item[0], 99))
 
 
 
@@ -173,6 +206,24 @@ def perturbation_clim(
     return -m, m
 
 
+def velocity_clim(
+    cube: np.ndarray,
+    feat_idx: int,
+    pct_lo: float = 2.0,
+    pct_hi: float = 98.0,
+) -> Tuple[float, float]:
+    """绝对速度色标：分位数 min–max（非对称，不含负值）。"""
+    vals = cube[:, :, :, feat_idx]
+    vals = vals[np.isfinite(vals)]
+    if vals.size == 0:
+        return 0.0, 1.0
+    lo = float(np.nanpercentile(vals, pct_lo))
+    hi = float(np.nanpercentile(vals, pct_hi))
+    if hi <= lo:
+        hi = lo + 1e-3
+    return lo, hi
+
+
 # ==================== 等大地图子图网格 ====================
 def make_equal_map_subplots(
     nrows: int,
@@ -237,6 +288,90 @@ def generate_distinct_colors(n_colors: int) -> List:
         
         # 选择前n个
         return base_colors[:n_colors]
+
+
+# ==================== 扰动特征空间交会图诊断 ====================
+# 地幔热标定：温度主导的异常满足 dlnVp ≈ 0.5·dlnVs（Karato 1993；
+# Cammarano et al. 2003）。偏离该线的簇才携带独立的 Vp/Vs 信息，
+# 即成分或流体差异；沿线排列的簇只反映扰动幅度强弱。
+MANTLE_SCALING_SLOPE = 0.5
+
+# 泊松固体的 Vp/Vs = √3，原始速度交会图的岩性判别参考线
+# （Christensen 1996；Hao et al. 2026 的 Vs-Vp 交会图即以此线为界）
+POISSON_VPVS_RATIO = 1.732
+
+
+def principal_axis(xy: np.ndarray) -> Tuple[np.ndarray, np.ndarray, float]:
+    """
+    对二维点云做总体最小二乘（PCA）求主轴方向。
+
+    与普通最小二乘不同，总体最小二乘对两个变量对称，适用于两个特征
+    均含误差的扰动域交会图。
+
+    Args:
+        xy: 形状 (N, 2) 的点云
+
+    Returns:
+        (主轴单位向量, 次轴单位向量, 主轴/次轴奇异值之比即点云各向异性)
+    """
+    centered = np.asarray(xy, dtype=float) - np.mean(xy, axis=0)
+    _, sv, vt = np.linalg.svd(centered, full_matrices=False)
+    anisotropy = float(sv[0] / sv[1]) if sv[1] > 0 else float('inf')
+    return vt[0], vt[1], anisotropy
+
+
+def crossplot_diagnostics(
+    xy: np.ndarray, labels: np.ndarray
+) -> Dict[str, float]:
+    """
+    计算簇中心在特征空间中的走向诊断量。
+
+    判据 R = σ∥/σ⊥ 为簇中心沿点云主轴方向与垂直方向的标准差之比。
+    R 越大说明簇中心越集中排列在主轴上，即聚类主要按扰动幅度切分，
+    各簇之间缺乏独立的 Vp/Vs（成分/流体）差异；R 接近 1 则说明簇在
+    垂直主轴方向上也有分异，具备物性域含义。
+
+    Args:
+        xy: 形状 (N, 2) 的点云，列序为 (横轴特征, 纵轴特征)
+        labels: 形状 (N,) 的簇标签，负值视为无效
+
+    Returns:
+        含点数、簇数、相关系数、主轴斜率、点云各向异性、σ∥、σ⊥、R 的字典
+    """
+    xy = np.asarray(xy, dtype=float)
+    labels = np.asarray(labels)
+    valid = labels >= 0
+    valid &= np.all(np.isfinite(xy), axis=1)
+    xy, labels = xy[valid], labels[valid]
+
+    empty = {
+        'n_points': 0, 'n_clusters': 0, 'corr': np.nan, 'pc1_slope': np.nan,
+        'cloud_anisotropy': np.nan, 'sigma_par': np.nan,
+        'sigma_perp': np.nan, 'ratio_R': np.nan,
+    }
+    if len(xy) < 10:
+        return empty
+
+    pc1, pc2, anisotropy = principal_axis(xy)
+    uniq = np.unique(labels)
+    centers = np.stack([xy[labels == u].mean(axis=0) for u in uniq])
+    centers_c = centers - centers.mean(axis=0)
+
+    sigma_par = float(np.std(centers_c @ pc1))
+    sigma_perp = float(np.std(centers_c @ pc2))
+
+    return {
+        'n_points': int(len(xy)),
+        'n_clusters': int(len(uniq)),
+        'corr': float(np.corrcoef(xy[:, 0], xy[:, 1])[0, 1]),
+        'pc1_slope': float(pc1[1] / pc1[0]) if pc1[0] != 0 else float('inf'),
+        'cloud_anisotropy': anisotropy,
+        'sigma_par': sigma_par,
+        'sigma_perp': sigma_perp,
+        'ratio_R': (
+            sigma_par / sigma_perp if sigma_perp > 0 else float('inf')
+        ),
+    }
 
 
 # ==================== facies 自动解释（启发式，供剖面图标注） ====================
@@ -319,6 +454,239 @@ def interpret_facies(band: str, dlnvp: float, dlnvs: float) -> str:
     ):
         name += ' [Vp-Vs decoupled]'
     return name
+
+
+def short_facies_label(full_label: str, max_len: int = 34) -> str:
+    """
+    压缩 interpret_facies 输出，供表格列显示。
+
+    完整解释仍写在图下方图例；叶节点只保留主类名，避免 90° 旋转后不可读。
+    """
+    s = str(full_label).split(' [')[0].strip()
+    decoupled = ' [Vp-Vs decoupled]' if '[Vp-Vs decoupled]' in str(full_label) else ''
+    if len(s) > max_len:
+        s = s[: max_len - 1].rstrip() + '…'
+    return s + decoupled
+
+
+def facies_leaf_color(dlnvs: float, band: str) -> str:
+    """按 δlnVs 符号与幅度返回叶节点/表格行配色（蓝=快，红=慢，灰=背景）"""
+    b = str(band).lower()
+    weak, strong = FACIES_DVS_THRESHOLDS.get(b, (0.010, 0.030))
+    v = float(dlnvs) if np.isfinite(dlnvs) else 0.0
+    if v >= weak:
+        return '#1d4ed8' if v >= strong else '#3b82f6'
+    if v <= -weak:
+        return '#b91c1c' if v <= -strong else '#ef4444'
+    return '#4b5563'
+
+
+def _wrap_table_text(text: str, width: int = 32) -> str:
+    """表格单元格自动换行，避免 facies 列被截断。"""
+    s = str(text).strip()
+    if not s or s == '—':
+        return s
+    return '\n'.join(textwrap.wrap(s, width=width, break_long_words=False))
+
+
+def _phylogeny_grid_layout(
+    n_pair_rows: int,
+    n_cols: int,
+    band_meta: List[Tuple[str, Any, np.ndarray, int]],
+    tbl_row_u: float = 0.22,
+) -> Tuple[List[float], List[Tuple[str, int]]]:
+    """
+    构建谱系图 GridSpec：每块 dend | 叶标缓冲 | table，块间 block_gap。
+
+    Returns:
+        height_ratios, row_specs（('dend'|'label_gap'|'tbl'|'block', pair_row)）
+    """
+    dend_h = 1.05
+    label_gap = 0.38
+    block_gap = 0.72
+    height_ratios: List[float] = []
+    row_specs: List[Tuple[str, int]] = []
+    for pr in range(n_pair_rows):
+        if pr > 0:
+            height_ratios.append(block_gap)
+            row_specs.append(('block', -1))
+        i0 = pr * n_cols
+        i1 = i0 + 1
+        k_pair = band_meta[i0][3]
+        if i1 < len(band_meta):
+            k_pair = max(k_pair, band_meta[i1][3])
+        tbl_h = tbl_row_u * (k_pair + 1)
+        height_ratios.extend([dend_h, label_gap, tbl_h])
+        row_specs.extend([
+            ('dend', pr), ('label_gap', pr), ('tbl', pr),
+        ])
+    return height_ratios, row_specs
+
+
+def _phylogeny_row_index(
+    row_specs: List[Tuple[str, int]], kind: str, pair_row: int,
+) -> int:
+    """返回指定块、指定类型的 GridSpec 行号。"""
+    for i, (k, pr) in enumerate(row_specs):
+        if k == kind and pr == pair_row:
+            return i
+    raise KeyError(f'row {kind!r} for pair {pair_row}')
+
+
+def _render_centroid_phylogeny_panel(
+    ax_dend: plt.Axes,
+    ax_tbl: plt.Axes,
+    bname: str,
+    binfo: Dict[str, Any],
+    band_labels: np.ndarray,
+    band_X: np.ndarray,
+    cids: List[int],
+    vp_idx: int,
+    vs_idx: int,
+    is_pert: bool,
+    F: Dict[str, int],
+    panel_label: Optional[str] = None,
+    show_ylabel: bool = True,
+    table_slot_rows: Optional[int] = None,
+    table_row_h: float = 0.118,
+    table_scale_y: float = 2.0,
+) -> List[Dict[str, Any]]:
+    """单深度带：上方 dendrogram（C# 叶标）+ 下方 facies 表；发表版 2×2 子块。"""
+    from scipy.cluster.hierarchy import dendrogram, linkage
+
+    centroids: List[np.ndarray] = []
+    band_export: List[Dict[str, Any]] = []
+    for local_idx, cid in enumerate(cids):
+        m = band_labels == cid
+        mu = np.nanmean(band_X[m], axis=0)
+        centroids.append(mu)
+        if is_pert and mu.size > max(vs_idx, vp_idx):
+            facies = interpret_facies(
+                bname, float(mu[vp_idx]), float(mu[vs_idx]),
+            )
+            short = short_facies_label(facies, max_len=42)
+        else:
+            facies = 'Absolute velocity cluster'
+            short = '—'
+        band_export.append({
+            'cluster_id': cid,
+            'display_id': local_idx,
+            'n_voxels': int(np.sum(m)),
+            'dlnvp': float(mu[vp_idx]) if mu.size > vp_idx else None,
+            'dlnvs': float(mu[vs_idx]) if mu.size > vs_idx else None,
+            'facies_interpretation': facies,
+            'facies_short': short,
+        })
+
+    C = np.asarray(centroids, dtype=float)
+    Z = linkage(C, method='ward')
+    leaf_ids = [f'C{r["display_id"]}' for r in band_export]
+    # 2×2 发表版每块较宽，K≤10 时水平叶标即可，避免 90° 标签伸入下方表格
+    leaf_rot = 90. if len(cids) >= 11 else 0.
+    leaf_fs = max(F['tick'] - 3, 7) if len(cids) >= 10 else max(F['tick'] - 2, 8)
+    dendrogram(
+        Z,
+        ax=ax_dend,
+        labels=leaf_ids,
+        leaf_rotation=leaf_rot,
+        leaf_font_size=leaf_fs,
+        color_threshold=0,
+        above_threshold_color='#94a3b8',
+        count_sort='ascending',
+    )
+    band_title = MOHO_BAND_TITLES.get(bname, bname.replace('_', ' ').title())
+    title_prefix = f'{panel_label} ' if panel_label else ''
+    ax_dend.set_title(
+        f'{title_prefix}{band_title} · $K={len(cids)}$',
+        fontsize=F['title'] - 5,
+        fontweight='bold',
+        pad=4,
+    )
+    if show_ylabel:
+        ax_dend.set_ylabel(
+            'Ward distance', fontsize=F['label'] - 2, labelpad=4,
+        )
+    else:
+        ax_dend.set_ylabel('')
+    x_pad = 8 if leaf_rot else 6
+    ax_dend.tick_params(axis='both', labelsize=F['tick'] - 2)
+    ax_dend.tick_params(axis='x', pad=x_pad)
+    ax_dend.margins(x=0.02)
+    ax_dend.grid(True, axis='y', alpha=0.22, linestyle='-', linewidth=0.5)
+    ax_dend.spines['top'].set_visible(False)
+    ax_dend.spines['right'].set_visible(False)
+    ax_dend.spines['bottom'].set_visible(True)
+    ax_dend.spines['bottom'].set_linewidth(0.8)
+    ax_dend.spines['bottom'].set_color('#334155')
+    ax_dend.spines['left'].set_linewidth(0.8)
+    ax_dend.spines['left'].set_color('#334155')
+
+    # 叶节点按 fast/slow/ambient 着色（display_id 对齐）
+    id_to_row = {f"C{r['display_id']}": r for r in band_export}
+    for tick in ax_dend.get_xmajorticklabels():
+        row = id_to_row.get(tick.get_text())
+        if row and is_pert and row.get('dlnvs') is not None:
+            tick.set_color(facies_leaf_color(row['dlnvs'], bname))
+            tick.set_fontweight('bold')
+
+    # 下方 facies 对照表（与叶节点 ID 对齐）
+    ax_tbl.axis('off')
+    if is_pert and band_export:
+        rows_sorted = sorted(band_export, key=lambda r: r['display_id'])
+        wrap_w = 34 if len(cids) <= 7 else 28
+        table_data = [
+            [
+                f"C{r['display_id']}",
+                f"{r['dlnvs']:+.3f}" if r['dlnvs'] is not None else '—',
+                f"{r['dlnvp']:+.3f}" if r['dlnvp'] is not None else '—',
+                _wrap_table_text(r['facies_short'], width=wrap_w),
+            ]
+            for r in rows_sorted
+        ]
+        col_labels = ['Cluster', r'$\delta\ln V_s$', r'$\delta\ln V_p$', 'Facies hint']
+        n_tbl_rows = len(cids) + 1
+        slot_rows = max(n_tbl_rows, int(table_slot_rows or n_tbl_rows))
+        bbox_h = min(1.0, n_tbl_rows / slot_rows)
+        tbl = ax_tbl.table(
+            cellText=table_data,
+            colLabels=col_labels,
+            loc='lower center',
+            cellLoc='left',
+            colLoc='center',
+            bbox=[0.0, 0.0, 1.0, bbox_h],
+        )
+        tbl.auto_set_font_size(False)
+        tbl_fs = max(F['annotation'] - 4, 6) if len(cids) >= 9 else max(F['annotation'] - 3, 7)
+        tbl.set_fontsize(tbl_fs)
+        tbl.scale(1.0, table_scale_y)
+        col_widths = [0.10, 0.13, 0.13, 0.64]
+        header_row_h = 0.072 * PHYLO_TABLE_ROW_SCALE
+        data_row_h = 0.118 * PHYLO_TABLE_ROW_SCALE
+        for (row, col), cell in tbl.get_celld().items():
+            cell.set_edgecolor('#e2e8f0')
+            cell.set_linewidth(0.5)
+            if col < len(col_widths):
+                cell.set_width(col_widths[col])
+            if row == 0:
+                cell.set_facecolor('#f1f5f9')
+                cell.set_text_props(fontweight='bold', color='#334155')
+                cell.set_height(header_row_h)
+            elif col == 0 and row > 0:
+                r = rows_sorted[row - 1]
+                cell.set_text_props(
+                    fontweight='bold',
+                    color=facies_leaf_color(r['dlnvs'] or 0.0, bname),
+                )
+                cell.set_height(data_row_h)
+            elif row > 0:
+                cell.set_facecolor('#ffffff' if row % 2 else '#f8fafc')
+                cell.set_height(data_row_h)
+                if col == 3:
+                    cell.get_text().set_ha('left')
+                    cell.get_text().set_va('center')
+                    cell.PAD = 0.04
+
+    return band_export
 
 
 class GeologyConcordanceEvaluator:
@@ -1026,7 +1394,7 @@ class GeologyConcordanceEvaluator:
             ax.tick_params(labelsize=F['tick'])
             ax.grid(True, alpha=0.3, linestyle='--', linewidth=0.5)
             ax.set_title(
-                f'Facies  |  Lat={actual_lat:.1f}°',
+                f'Cluster  |  Lat={actual_lat:.1f}°',
                 fontsize=F['title'],
                 fontweight='bold',
                 pad=4,
@@ -1084,7 +1452,7 @@ class GeologyConcordanceEvaluator:
                     fig.add_subplot(gs[row, col]).axis('off')
 
         fig.suptitle(
-            f'{model_name} — Facies / dlnV vs Slab2 Volume '
+            f'{model_name} — Cluster / dlnV vs Slab2 Volume '
             f'(dep+thk mask; black = slab body)',
             fontsize=self.fonts['suptitle'],
             fontweight='bold',
@@ -1339,6 +1707,401 @@ class EnhancedClusteringVisualizer:
         """设置数据处理器引用"""
         self.processor = processor
     
+    def plot_wkmeans_k_selection(
+        self,
+        k_selection: Dict[str, Dict[str, Any]],
+        output_dir: Path,
+        model_name: str,
+    ) -> None:
+        """
+        绘制 W-k-means 的选 K 判据：肘部法 SSE 曲线 + 轮廓系数曲线。
+
+        每个深度带一列，上排为 SSE-K 曲线（含首末端点连线，肘点即离该线
+        最远的点），下排为轮廓系数-K 曲线。两条曲线并置是有意的：SSE 决定
+        K，轮廓系数检验该 K 下簇的紧致度与分离度（Nainggolan et al., 2019）。
+        二者最优 K 不一致时在标题中标出，这一分歧本身需要在方法学中说明。
+
+        与 GMM 路径的 BIC 图是两套不能混用的判据——k-means 无似然函数，
+        BIC/AIC 无从定义；GMM 的 BIC 曲线有极小值，而 SSE 曲线单调下降。
+
+        Args:
+            k_selection: {深度带名: 选 K 诊断字典}
+            output_dir: 图件输出目录
+            model_name: 模型名
+        """
+        bands = [(b, d) for b, d in k_selection.items() if d.get('k_values')]
+        if not bands:
+            return
+        self.logger.info("    📊 绘制 W-k-means 选 K 判据...")
+        F = self.fonts = apply_clustering_plot_style(self.config)
+
+        has_beta = any(d.get('beta_scan') for _, d in bands)
+        n = len(bands)
+        n_rows = 2 if has_beta else 1
+        fig, axes = plt.subplots(n_rows, n, figsize=(5.2 * n, 4.6 * n_rows),
+                                 squeeze=False)
+
+        c_sse, c_sil = 'tab:blue', 'tab:red'
+        for i, (bname, d) in enumerate(bands):
+            k = np.asarray(d['k_values'], dtype=float)
+            sse = np.asarray(d['sse'], dtype=float)
+            sil = np.asarray(d['silhouette'], dtype=float)
+            k_elbow, k_sil, k_sel = d['k_elbow'], d['k_silhouette'], d['optimal_n']
+            k_loc = d.get('k_local_maxima', [])
+
+            # SSE 与轮廓系数共用横轴、分列左右纵轴：选 K 须同时读这两条曲线，
+            # 分置两图会让读者难以判断二者在同一 K 处的取舍
+            ax = axes[0, i]
+            ax.plot(k, sse, 'o-', color=c_sse, lw=1.8, ms=5.5)
+            ax.set_xlabel('Number of Clusters (K)', fontsize=F['label'] - 2)
+            ax.set_ylabel('SSE', color=c_sse, fontsize=F['label'] - 2)
+            ax.tick_params(axis='y', labelcolor=c_sse)
+            ax.grid(True, alpha=0.3)
+
+            # 轮廓系数是子样本估计，误差棒为多次独立抽样的标准差：
+            # 它远小于相邻 K 之间的差异，即证明子样本规模足以支撑选 K
+            sd = np.asarray(d.get('silhouette_sd') or np.zeros_like(sil))
+            ax2 = ax.twinx()
+            ax2.errorbar(k, sil, yerr=sd, fmt='o-', color=c_sil, lw=1.8,
+                         ms=5.5, capsize=3, elinewidth=1.2)
+            ax2.set_ylabel('Mean Silhouette', color=c_sil,
+                           fontsize=F['label'] - 2)
+            ax2.tick_params(axis='y', labelcolor=c_sil)
+
+            # 选定的 K 在两条曲线上各圈一次
+            j = int(np.argmin(np.abs(k - k_sel)))
+            for a, y, col in ((ax, sse, c_sse), (ax2, sil, c_sil)):
+                a.plot(k[j], y[j], 'o', ms=15, mfc='none', mec='red', mew=2.0,
+                       zorder=5)
+            ax2.annotate(f'K={k_sel}', (k[j], sil[j]),
+                         textcoords='offset points', xytext=(8, 8),
+                         color='red', fontsize=F['annotation'] - 3,
+                         fontweight='bold')
+
+            note = f'elbow K={k_elbow}'
+            note += (f', silhouette local max K={k_loc}' if k_loc
+                     else ', no silhouette local max')
+            npt = d.get('n_points_scanned')
+            head = f'{bname}' + (f'  (N = {npt:,})' if npt else '')
+            ax.set_title(f'{head}\n{note}', fontsize=F['title'] - 5,
+                         fontweight='bold')
+
+            # β 扫描：平均轮廓系数随权重指数的变化
+            if has_beta:
+                axb = axes[1, i]
+                bs = d.get('beta_scan')
+                if not bs:
+                    axb.axis('off')
+                    continue
+                betas = np.asarray(bs['beta_values'], dtype=float)
+                bsil = np.asarray(bs['silhouette'], dtype=float)
+                axb.plot(betas, bsil, 'o-', color=c_sse, lw=1.5, ms=4,
+                         label='Silhouette Scores')
+                jb = int(np.nanargmax(bsil))
+                axb.plot(betas[jb], bsil[jb], 'o', ms=14, mfc='none',
+                         mec='red', mew=2.0, label='Best Beta')
+                axb.annotate(rf'$\beta$ = {bs["best_beta"]:.1f}',
+                             (betas[jb], bsil[jb]),
+                             textcoords='offset points', xytext=(8, 8),
+                             color='red', fontsize=F['annotation'] - 3,
+                             fontweight='bold')
+                axb.axvline(bs['beta_in_use'], color='0.4', ls='--', lw=1.4,
+                            label=f"In use ({bs['beta_in_use']:.1f})")
+                axb.set_xlabel('Beta', fontsize=F['label'] - 2)
+                axb.set_ylabel('Mean Silhouette', fontsize=F['label'] - 2)
+                axb.legend(fontsize=F['legend'] - 4)
+                axb.grid(True, alpha=0.3)
+
+        fig.suptitle(
+            f'{model_name} — W-k-means parameter selection '
+            f'(elbow + silhouette; Nainggolan et al., 2019)',
+            fontsize=F['suptitle'] - 4, fontweight='bold',
+        )
+        fig.tight_layout()
+
+        stem = '2-3-15_wkmeans_k_selection'
+        for fmt in self.config.visualization.get('save_formats', ['jpg']):
+            fig.savefig(output_dir / f'{stem}.{fmt}',
+                        dpi=self.config.visualization['dpi'],
+                        bbox_inches='tight')
+        plt.close(fig)
+        self.logger.info(f"      ✅ 保存: {stem}")
+
+    def plot_alt_clustering_diagnostics(
+        self,
+        algorithm: str,
+        method_diagnostics: Dict[str, Dict[str, Any]],
+        per_band: Optional[Dict[str, Any]],
+        output_dir: Path,
+        model_name: str,
+    ) -> None:
+        """
+        HDBSCAN / 层次聚类的方法学诊断图
+
+        - HDBSCAN: 各带簇规模分布与噪声比例
+        - Hierarchical: 子样本树状图 + 目标 K 切分线
+
+        Args:
+            algorithm: 'hdbscan' | 'hierarchical'
+            method_diagnostics: {深度带名: 诊断字典}
+            per_band: 分带聚类结果（含 metrics）
+            output_dir: 图件输出目录
+            model_name: 模型名
+        """
+        if not method_diagnostics:
+            return
+        algo = str(algorithm).lower()
+        self.logger.info(f"    📊 绘制 {algo.upper()} 方法学诊断图...")
+        F = self.fonts = apply_clustering_plot_style(self.config)
+        bands = list(method_diagnostics.items())
+        n = len(bands)
+
+        if algo == 'hdbscan':
+            fig, axes = plt.subplots(1, n, figsize=(5.2 * n, 4.8), squeeze=False)
+            for i, (bname, diag) in enumerate(bands):
+                ax = axes[0, i]
+                pb = (per_band or {}).get(bname, {})
+                sizes = pb.get('metrics', {}).get('cluster_sizes', {})
+                if sizes:
+                    ids = sorted(sizes.keys())
+                    vals = [sizes[k] for k in ids]
+                    ax.bar([str(k) for k in ids], vals, color='tab:purple', alpha=0.85)
+                noise = pb.get('metrics', {}).get('noise_fraction', 0.0)
+                ax.set_title(
+                    f'{bname}\nK={pb.get("n_clusters", "?")}, '
+                    f'noise={noise:.1%}\n'
+                    f'min_cluster_size={diag.get("min_cluster_size", "?")}',
+                    fontsize=F['title'] - 4, fontweight='bold',
+                )
+                ax.set_xlabel('Cluster ID', fontsize=F['label'] - 2)
+                ax.set_ylabel('Voxel count', fontsize=F['label'] - 2)
+                ax.grid(True, alpha=0.3, axis='y')
+            fig.suptitle(
+                f'{model_name} — HDBSCAN cluster size distribution',
+                fontsize=F['suptitle'] - 4, fontweight='bold',
+            )
+            stem = '2-3-15_hdbscan_diagnostics'
+
+        elif algo == 'hierarchical':
+            fig, axes = plt.subplots(1, n, figsize=(5.5 * n, 5.5), squeeze=False)
+            for i, (bname, diag) in enumerate(bands):
+                ax = axes[0, i]
+                Z = np.asarray(diag.get('linkage_matrix', []), dtype=float)
+                if Z.size:
+                    from scipy.cluster.hierarchy import dendrogram
+                    dendrogram(
+                        Z, ax=ax, truncate_mode='lastp', p=12,
+                        leaf_rotation=90., color_threshold=0,
+                        above_threshold_color='0.4',
+                    )
+                    ax.axhline(
+                        Z[-(int(diag.get('n_clusters', 2)) - 1), 2],
+                        color='red', ls='--', lw=1.5,
+                        label=f"Cut K={diag.get('n_clusters')}",
+                    )
+                pb = (per_band or {}).get(bname, {})
+                ax.set_title(
+                    f'{bname}\n{diag.get("linkage", "ward")} linkage, '
+                    f'K={diag.get("n_clusters", "?")}\n'
+                    f'n={diag.get("dendrogram_n_points", "?")} (dendrogram sample)',
+                    fontsize=F['title'] - 5, fontweight='bold',
+                )
+                ax.set_xlabel('Sample index / merged cluster', fontsize=F['label'] - 3)
+                ax.set_ylabel('Distance', fontsize=F['label'] - 3)
+                if i == 0:
+                    ax.legend(fontsize=F['legend'] - 4)
+            fig.suptitle(
+                f'{model_name} — Hierarchical clustering dendrogram',
+                fontsize=F['suptitle'] - 4, fontweight='bold',
+            )
+            stem = '2-3-15_hierarchical_diagnostics'
+        else:
+            return
+
+        fig.tight_layout()
+        for fmt in self.config.visualization.get('save_formats', ['jpg']):
+            fig.savefig(
+                output_dir / f'{stem}.{fmt}',
+                dpi=self.config.visualization['dpi'],
+                bbox_inches='tight',
+            )
+        plt.close(fig)
+        self.logger.info(f"      ✅ 保存: {stem}")
+
+    def plot_centroid_phylogeny(
+        self,
+        X: np.ndarray,
+        labels: np.ndarray,
+        metadata: Dict[str, Any],
+        per_band: Dict[str, Any],
+        output_dir: Path,
+        model_name: str,
+        algorithm_name: str = 'gmm',
+    ) -> Optional[Dict[str, Any]]:
+        """
+        GMM 簇心在 (δlnVp, δlnVs) 空间的 Ward 谱系树 + facies 对照表（2×2 发表版）。
+
+        四深度带按 (a–d) 排列：上排 crust / lithosphere，下排 TZ / lower mantle。
+        每块上方 dendrogram、下方 facies 表；叶节点按 fast/slow 着色。
+
+        Returns:
+            各带簇心 δlnV 与 facies 标签，供 JSON 导出
+        """
+        self.logger.info(f"    📊 绘制簇心谱系 dendrogram ({algorithm_name})...")
+        F = apply_clustering_plot_style(self.config)
+
+        labels = np.asarray(labels)
+        X = np.asarray(X)
+        X_phys = X.copy()
+        if (
+            self.processor is not None
+            and getattr(self.processor, 'scaler', None) is not None
+        ):
+            try:
+                X_phys = self.processor.scaler.inverse_transform(X)
+            except Exception:
+                X_phys = X
+
+        feature_names = list(
+            metadata.get('feature_display_names')
+            or metadata.get('features', ['vp', 'vs'])
+        )
+        vp_idx = next(
+            (i for i, nm in enumerate(feature_names) if 'vp' in str(nm).lower()),
+            0,
+        )
+        vs_idx = next(
+            (i for i, nm in enumerate(feature_names) if 'vs' in str(nm).lower()),
+            min(1, X_phys.shape[1] - 1),
+        )
+        feat_space = str(metadata.get('feature_space', '') or '')
+        is_pert = 'perturbation' in feat_space or any(
+            'dln' in str(n).lower() for n in feature_names
+        )
+
+        band_items = [
+            (bname, binfo)
+            for bname, binfo in per_band.items()
+            if binfo.get('point_mask') is not None
+        ]
+        if not band_items:
+            return None
+
+        band_items = _sort_bands_for_k_plot(band_items)
+        n = len(band_items)
+        n_cols = 2 if n > 1 else 1
+        n_pair_rows = int(np.ceil(n / n_cols))
+
+        # 预计算各带 K，用于固定 dend 高度 + 同行表格行槽对齐
+        band_meta: List[Tuple[str, Any, np.ndarray, int]] = []
+        for bname, binfo in band_items:
+            pmask = np.asarray(binfo['point_mask'], dtype=bool)
+            bl = labels[pmask]
+            n_cids = len([
+                c for c in np.unique(bl[bl >= 0]) if c >= 0
+            ])
+            band_meta.append((bname, binfo, pmask, n_cids))
+
+        max_k = max(m[3] for m in band_meta)
+        panel_w = max(6.6, 0.40 * max(max_k, 5) + 2.0)
+        tbl_row_u = 0.22 * PHYLO_TABLE_ROW_SCALE
+        height_ratios, row_specs = _phylogeny_grid_layout(
+            n_pair_rows, n_cols, band_meta, tbl_row_u,
+        )
+
+        unit_in = 1.22
+        fig_h = sum(height_ratios) * unit_in + 2.2
+        fig = plt.figure(figsize=(panel_w * n_cols, fig_h))
+        gs = GridSpec(
+            len(height_ratios), n_cols, figure=fig,
+            height_ratios=height_ratios,
+            hspace=0.0, wspace=0.28,
+            top=0.88, bottom=0.07, left=0.10, right=0.98,
+        )
+        panel_labels = [f'({chr(ord("a") + i)})' for i in range(n)]
+        export: Dict[str, Any] = {
+            'model': model_name,
+            'algorithm': algorithm_name,
+            'bands': {},
+        }
+
+        # 块间空白行
+        for i, (kind, _) in enumerate(row_specs):
+            if kind != 'block':
+                continue
+            for c in range(n_cols):
+                ax_blk = fig.add_subplot(gs[i, c])
+                ax_blk.axis('off')
+
+        for idx, (bname, binfo, pmask, n_cids) in enumerate(band_meta):
+            pair_row, col = divmod(idx, n_cols)
+            dend_row = _phylogeny_row_index(row_specs, 'dend', pair_row)
+            gap_row = _phylogeny_row_index(row_specs, 'label_gap', pair_row)
+            tbl_row = _phylogeny_row_index(row_specs, 'tbl', pair_row)
+
+            ax_dend = fig.add_subplot(gs[dend_row, col])
+            ax_gap = fig.add_subplot(gs[gap_row, col])
+            ax_gap.axis('off')
+            ax_tbl = fig.add_subplot(gs[tbl_row, col])
+
+            i0 = pair_row * n_cols
+            i1 = i0 + 1
+            pair_k = band_meta[i0][3]
+            if i1 < len(band_meta):
+                pair_k = max(pair_k, band_meta[i1][3])
+            table_slot_rows = pair_k + 1
+
+            band_labels = labels[pmask]
+            band_X = X_phys[pmask]
+            cids = sorted(int(c) for c in np.unique(band_labels[band_labels >= 0]))
+            if len(cids) < 2:
+                ax_dend.text(
+                    0.5, 0.5, f'{bname}\n$K={len(cids)}$ (too few for tree)',
+                    ha='center', va='center', transform=ax_dend.transAxes,
+                )
+                ax_dend.set_axis_off()
+                ax_tbl.set_axis_off()
+                continue
+
+            band_export = _render_centroid_phylogeny_panel(
+                ax_dend, ax_tbl, bname, binfo, band_labels, band_X,
+                cids, vp_idx, vs_idx, is_pert, F,
+                panel_label=panel_labels[idx],
+                show_ylabel=(col == 0),
+                table_slot_rows=table_slot_rows,
+                table_row_h=0.118 * PHYLO_TABLE_ROW_SCALE,
+                table_scale_y=1.75 * PHYLO_TABLE_ROW_SCALE,
+            )
+            export['bands'][bname] = band_export
+
+        short_name = _short_model_label(model_name)
+        fig.suptitle(
+            f'{short_name} — GMM cluster centroid phylogeny (Ward linkage)',
+            fontsize=F['suptitle'] - 5,
+            fontweight='bold',
+            y=0.97,
+        )
+        if is_pert:
+            fig.text(
+                0.5, 0.018,
+                'Blue = fast $\\delta\\ln V_s$ · Red = slow · Gray = ambient  |  '
+                'Facies hints are heuristic ($\\delta\\ln V$-based), not lithology',
+                ha='center', va='bottom',
+                fontsize=max(F['annotation'] - 2, 8),
+                color='#64748b', style='italic',
+            )
+
+        stem = f'2-3-17_{algorithm_name}_centroid_phylogeny'
+        for fmt in self.config.visualization.get('save_formats', ['jpg']):
+            fig.savefig(
+                output_dir / f'{stem}.{fmt}',
+                dpi=self.config.visualization['dpi'],
+                facecolor='white',
+            )
+        plt.close(fig)
+        self.logger.info(f"      ✅ 保存: {stem}")
+        return export
+
     def plot_k_selection_panels(
         self,
         per_band: Dict[str, Any],
@@ -1346,20 +2109,18 @@ class EnhancedClusteringVisualizer:
         model_name: str,
     ) -> bool:
         """
-        K 选择判据图（各深度带合成一张）。
+        GMM 选 K 判据图（2×2 发表版，双轴 BIC + 轮廓系数）。
 
-        每格画归一化 BIC(K) 与首末两点连成的弦，红星标在曲线偏离弦最远处，
-        竖线标出该偏离量——判据（max-distance-to-chord）由此在图上自证，
-        无需正文解释阈值。曲线单调降至 K 上界即说明 BIC 无内部极小、
-        不能直接用 argmin 选 K。
+        左轴 BIC、右轴 Mean Silhouette；建议 K 以红圈标出。诊断细节写入
+        gmm_k_selection.csv，图面仅保留层名与 panel 标号 (a–d)。
 
         Args:
-            per_band: 分层聚类结果的 per_band 字典
+            per_band: 分层聚类 per_band 字典
             output_dir: 输出目录
-            model_name: 模型名（用于标题与日志）
+            model_name: 模型名
 
         Returns:
-            True 表示已出图；False 表示本模式不适用（调用方应回退逐带绘图）
+            True 表示已出图；False 表示不适用
         """
         bands = [
             (name, info)
@@ -1371,100 +2132,125 @@ class EnhancedClusteringVisualizer:
         if not bands:
             return False
 
-        self.logger.info("    📊 绘制 K 选择判据图（合成）...")
-        self.fonts = apply_clustering_plot_style(self.config)
+        self.logger.info("    📊 绘制 GMM 选 K 判据（BIC + silhouette）...")
+        F = self.fonts = apply_clustering_plot_style(self.config)
+        bands = _sort_bands_for_k_plot(bands)
 
         n = len(bands)
         n_cols = 2 if n > 1 else 1
         n_rows = int(np.ceil(n / n_cols))
         fig, axes = plt.subplots(
-            n_rows, n_cols, figsize=(5.9 * n_cols, 4.1 * n_rows), squeeze=False
+            n_rows, n_cols,
+            figsize=(5.6 * n_cols, 4.4 * n_rows),
+            squeeze=False,
         )
-        C_BIC, C_CHORD, C_SEL = '#1f6fb4', '#9a9a9a', '#d62728'
 
-        for ax, (name, info) in zip(axes.ravel(), bands):
+        c_bic, c_sil = '#2166AC', '#B2182B'
+        panel_labels = [f'({chr(ord("a") + i)})' for i in range(n)]
+
+        for idx, (ax, (name, info)) in enumerate(zip(axes.ravel(), bands)):
             ba = info['bic_analysis']
-            ks = np.asarray(ba['n_clusters_range'], dtype=int)
+            k = np.asarray(ba['n_clusters_range'], dtype=float)
             bic = np.asarray(ba['bics'], dtype=float)
             finite = np.isfinite(bic)
-            k_sel = int(ba['optimal_n'])
-            rule = str(ba.get('selection_rule', ''))
+            if not np.any(finite):
+                ax.axis('off')
+                continue
 
-            span = float(np.nanmax(bic[finite]) - np.nanmin(bic[finite]))
-            y = ((bic - np.nanmin(bic[finite])) / span if span > 0
-                 else np.zeros_like(bic))
-            x = np.arange(len(ks), dtype=float)
-            xf, yf = x[finite], y[finite]
-
-            # 首末连弦：拐点判据的几何构造
-            chord = yf[0] + (yf[-1] - yf[0]) * (xf - xf[0]) / max(
-                xf[-1] - xf[0], 1e-12
+            sil = np.asarray(
+                ba.get('silhouette') or np.full_like(bic, np.nan), dtype=float
             )
-            ax.plot(xf, chord, ls='--', color=C_CHORD, lw=1.3, zorder=2,
-                    label='Chord (endpoints)')
-            ax.plot(xf, yf, 'o-', color=C_BIC, lw=2.0, ms=5, zorder=3,
-                    label='BIC (normalized)')
+            sd = np.asarray(
+                ba.get('silhouette_sd') or np.zeros_like(sil), dtype=float
+            )
+            k_sel = int(ba['optimal_n'])
 
-            is_fixed = rule == 'fixed_k'
-            # 先验固定 K 时，拐点仍绘出但降为诊断标记，星号标在实际采用的 K
-            k_knee = int(ba.get('knee_n', k_sel))
-            if is_fixed and k_knee in ks:
-                jk = int(np.where(ks == k_knee)[0][0])
-                if finite[jk]:
-                    jkf = int(np.where(xf == x[jk])[0][0])
-                    ax.vlines(x[jk], yf[jkf], chord[jkf], color=C_CHORD,
-                              lw=1.4, ls=':', zorder=4)
-                    ax.plot([x[jk]], [yf[jkf]], 'D', color='none',
-                            mec=C_CHORD, mew=1.6, ms=8, zorder=5,
-                            label='BIC knee (diagnostic only)')
+            ax.plot(
+                k[finite], bic[finite], 'o-', color=c_bic,
+                lw=2.0, ms=6, markerfacecolor='white',
+                markeredgewidth=1.4, zorder=3,
+            )
+            ax.set_xlabel('Number of clusters ($K$)', fontsize=F['label'] - 1)
+            ax.set_ylabel('BIC', color=c_bic, fontsize=F['label'] - 1)
+            ax.tick_params(axis='y', labelcolor=c_bic, labelsize=F['tick'] - 1)
+            ax.tick_params(axis='x', labelsize=F['tick'] - 1)
+            ax.grid(True, alpha=0.22, ls='-', lw=0.6)
+            ax.set_axisbelow(True)
 
-            j = int(np.where(ks == k_sel)[0][0])
-            if finite[j]:
-                jf = int(np.where(xf == x[j])[0][0])
-                if not is_fixed:
-                    ax.vlines(x[j], yf[jf], chord[jf], color=C_SEL, lw=1.6,
-                              ls=':', zorder=4)
-                ax.plot([x[j]], [yf[jf]], '*', color=C_SEL, ms=19, mec='k',
-                        mew=0.6, zorder=6,
-                        label=('Prescribed K (prior)' if is_fixed
-                               else 'Selected K (max distance to chord)'))
+            ax2 = None
+            if np.any(np.isfinite(sil)):
+                ax2 = ax.twinx()
+                ax2.errorbar(
+                    k, sil, yerr=sd, fmt='o-', color=c_sil, lw=2.0, ms=6,
+                    capsize=2.5, elinewidth=1.0, markerfacecolor='white',
+                    markeredgewidth=1.4, zorder=3,
+                )
+                ax2.set_ylabel(
+                    'Mean silhouette', color=c_sil, fontsize=F['label'] - 1,
+                )
+                ax2.tick_params(
+                    axis='y', labelcolor=c_sil, labelsize=F['tick'] - 1,
+                )
 
-            ax.set_xticks(x)
-            ax.set_xticklabels([str(k) for k in ks])
-            ax.set_xlim(x[0] - 0.4, x[-1] + 0.4)
-            ax.set_ylim(-0.08, 1.12)
-            ax.set_xlabel('Number of components K', fontsize=10)
-            ax.set_ylabel('Normalized BIC', fontsize=10)
-            ax.grid(alpha=0.25, ls=':')
+            j = int(np.argmin(np.abs(k - k_sel)))
+            ax.plot(
+                k[j], bic[j], 'o', ms=13, mfc='none', mec=c_sil,
+                mew=2.2, zorder=5,
+            )
+            if ax2 is not None and np.isfinite(sil[j]):
+                ax2.plot(
+                    k[j], sil[j], 'o', ms=13, mfc='none', mec=c_sil,
+                    mew=2.2, zorder=5,
+                )
+                ax2.annotate(
+                    f'$K={k_sel}$', (k[j], sil[j]),
+                    textcoords='offset points', xytext=(6, 6),
+                    color=c_sil, fontsize=F['annotation'] - 1,
+                    fontweight='bold',
+                )
 
-            if is_fixed:
-                note = f'prescribed; BIC knee = {k_knee}'
-            else:
-                note = 'BIC knee' if rule == 'bic_knee' else rule
-            k_argmin = ba.get('argmin_n')
-            note += f'; argmin BIC = {k_argmin}' if k_argmin is not None else ''
+            band_title = MOHO_BAND_TITLES.get(name, name.replace('_', ' ').title())
             ax.set_title(
-                f"{name}  |  {info.get('description', '')}\n"
-                f"N = {info.get('n_points', 0):,}   →   K* = {k_sel}  ({note})",
-                fontsize=10, fontweight='bold',
+                band_title,
+                fontsize=F['title'] - 2, fontweight='bold', pad=8,
+            )
+            ax.text(
+                -0.11, 1.06, panel_labels[idx],
+                transform=ax.transAxes,
+                fontsize=F['title'] - 1, fontweight='bold',
+                va='top', ha='left',
             )
 
         for ax in axes.ravel()[len(bands):]:
             ax.axis('off')
 
-        h, l = axes.ravel()[0].get_legend_handles_labels()
-        fig.legend(h, l, loc='lower center', ncol=3, frameon=False, fontsize=10,
-                   bbox_to_anchor=(0.5, -0.004))
+        short_name = _short_model_label(model_name)
         fig.suptitle(
-            f'{model_name} — Selection of K per depth band',
-            fontsize=13.5, fontweight='bold', y=0.995,
+            f'{short_name} — GMM optimal $K$ selection',
+            fontsize=F['suptitle'] - 6, fontweight='bold', y=0.98,
         )
-        fig.tight_layout(rect=(0.0, 0.045, 1.0, 0.965))
+
+        # 统一图例（BIC / Silhouette）
+        from matplotlib.lines import Line2D
+        legend_handles = [
+            Line2D([0], [0], color=c_bic, marker='o', lw=2, ms=6,
+                   markerfacecolor='white', label='BIC'),
+            Line2D([0], [0], color=c_sil, marker='o', lw=2, ms=6,
+                   markerfacecolor='white', label='Mean silhouette'),
+        ]
+        fig.legend(
+            handles=legend_handles, loc='lower center', ncol=2,
+            frameon=False, fontsize=F['legend'] - 2,
+            bbox_to_anchor=(0.5, -0.02),
+        )
+
+        fig.tight_layout(rect=(0.0, 0.04, 1.0, 0.96))
 
         for fmt in self.config.visualization.get('save_formats', ['jpg']):
             fig.savefig(
                 output_dir / f'2-3-1_k_selection.{fmt}',
                 dpi=self.config.visualization['dpi'],
+                bbox_inches='tight',
             )
         plt.close(fig)
         self.logger.info("      ✅ 保存: 2-3-1_k_selection")
@@ -2034,6 +2820,61 @@ class BasicClusteringVisualizer:
         """设置数据处理器引用"""
         self.processor = processor
 
+    def _is_perturbation_space(self, metadata: Dict[str, Any]) -> bool:
+        """判断当前聚类/绘图是否处于扰动域（δln）而非原始 Vp/Vs。"""
+        fs = str(metadata.get('feature_space', '') or '')
+        if fs.startswith('perturbation'):
+            return True
+        if fs == 'absolute':
+            return False
+        names = list(
+            metadata.get('feature_display_names')
+            or metadata.get('features', [])
+        )
+        if any(str(d).lower().startswith(('dln', 'drel')) for d in names[:2]):
+            return True
+        return bool(
+            self.config.preprocessing.get('perturbation', {}).get(
+                'enabled', True
+            )
+        )
+
+    def _physical_feature_matrix(
+        self,
+        X: np.ndarray,
+        spatial_indices: Optional[np.ndarray],
+        n_features: int = 2,
+    ) -> np.ndarray:
+        """
+        取绘图用物理量特征矩阵：优先 last_feature_cube，否则反标准化。
+
+        交会图/剖面应展示 km/s 或 δln 原值，而非 StandardScaler 后的 z 分数。
+        """
+        if spatial_indices is not None and self.processor is not None:
+            cube = getattr(self.processor, 'last_feature_cube', None)
+            if cube is not None and cube.ndim == 4:
+                si = np.asarray(spatial_indices, dtype=int)
+                if len(si) == len(X):
+                    nf = min(int(cube.shape[-1]), int(n_features))
+                    return np.column_stack([
+                        cube[si[:, 0], si[:, 1], si[:, 2], j]
+                        for j in range(nf)
+                    ]).astype(float)
+
+        X_plot = np.asarray(X, dtype=float)
+        n_use = min(X_plot.shape[1], int(n_features))
+        if (
+            self.processor is not None
+            and getattr(self.processor, 'scaler', None) is not None
+        ):
+            try:
+                return self.processor.scaler.inverse_transform(
+                    X_plot[:, :n_use]
+                )
+            except Exception:
+                pass
+        return X_plot[:, :n_use]
+
     def _ensure_geology_basemap_png(
         self,
         map_extent: Sequence[float],
@@ -2382,7 +3223,7 @@ class BasicClusteringVisualizer:
 
         fig.suptitle(
             f'{model_name} — {algorithm_name.upper()} Depth Slices '
-            f'(row1 bedrock+facies; row2–3 Slab2)',
+            f'(row1 bedrock+cluster; row2–3 Slab2)',
             fontsize=self.fonts['suptitle'],
             fontweight='bold',
             y=0.975,
@@ -2457,14 +3298,15 @@ class BasicClusteringVisualizer:
 
         if pert_cube is None and self.processor is not None:
             pert_cube = getattr(self.processor, 'last_feature_cube', None)
-        has_pert = (
+        is_pert = self._is_perturbation_space(metadata)
+        has_velocity = (
             pert_cube is not None
             and np.ndim(pert_cube) == 4
             and pert_cube.shape[-1] >= 2
             and pert_cube.shape[:3] == labels_3d.shape
         )
-        n_rows = 4 if has_pert else 2
-        right_margin = 0.90 if has_pert else 0.98
+        n_rows = 4 if has_velocity else 2
+        right_margin = 0.90 if has_velocity else 0.98
 
         panel_w, panel_h = 6.0, 4.2
         fig = plt.figure(figsize=(panel_w * n_sections, panel_h * n_rows))
@@ -2628,7 +3470,7 @@ class BasicClusteringVisualizer:
                     legend_fontsize=self.fonts['legend'],
                 )
             ax.set_title(
-                f'Facies  |  Lat={actual_lat:.1f}°',
+                f'Cluster  |  Lat={actual_lat:.1f}°',
                 fontsize=self.fonts['title'],
                 fontweight='bold',
             )
@@ -2638,15 +3480,19 @@ class BasicClusteringVisualizer:
             ax.set_ylim(float(depths.max()), float(depths.min()))
             ax.grid(True, alpha=0.3, linestyle='--', linewidth=0.5)
 
-        # 第三/四行：δlnVp / δlnVs + Slab2
-        if has_pert:
-            feat_titles = [
-                r'$\delta\ln V_p$',
-                r'$\delta\ln V_s$',
-            ]
+        # 第三/四行：Vp/Vs 或 δlnVp/δlnVs + Slab2
+        if has_velocity:
+            if is_pert:
+                feat_titles = [r'$\delta\ln V_p$', r'$\delta\ln V_s$']
+                vel_cmap = 'RdBu_r'
+                clim_fn = perturbation_clim
+            else:
+                feat_titles = [r'$V_p$ (km/s)', r'$V_s$ (km/s)']
+                vel_cmap = 'turbo'
+                clim_fn = velocity_clim
             for r_off, (fi, ftitle) in enumerate(zip((0, 1), feat_titles)):
                 row = 2 + r_off
-                vmin, vmax = perturbation_clim(pert_cube, fi)
+                vmin, vmax = clim_fn(pert_cube, fi)
                 last_im = None
                 for idx, target_lat in enumerate(selected_lats):
                     ax = fig.add_subplot(gs[row, idx])
@@ -2657,7 +3503,7 @@ class BasicClusteringVisualizer:
                         sec.T,
                         aspect='auto',
                         origin='upper',
-                        cmap='RdBu_r',
+                        cmap=vel_cmap,
                         interpolation='nearest',
                         extent=sec_extent,
                         vmin=vmin,
@@ -2690,9 +3536,13 @@ class BasicClusteringVisualizer:
                         cbar.set_label(ftitle, fontsize=self.fonts['label'])
                         cbar.ax.tick_params(labelsize=self.fonts['tick'])
 
+        vel_tag = (
+            'cluster + dlnV + Slab2' if is_pert
+            else 'cluster + Vp/Vs + Slab2'
+        )
         fig.suptitle(
             f'{model_name} - {algorithm_name.upper()} Vertical Sections'
-            + ('  |  facies + dlnV + Slab2' if has_pert else '')
+            + (f'  |  {vel_tag}' if has_velocity else '')
             + ('  (black: Slab2 body)' if slab_mask is not None else ''),
             fontsize=self.fonts['suptitle'],
             fontweight='bold',
@@ -3545,4 +4395,916 @@ class BasicClusteringVisualizer:
         plt.close()
         
         self.logger.info(f"      ✅ 保存: 2-3-8_{algorithm_name}_cluster_centers.png")
+
+    def plot_wkmeans_feature_weights(
+        self,
+        per_band: Dict[str, Any],
+        metadata: Dict[str, Any],
+        output_dir: Path,
+        model_name: str,
+    ) -> None:
+        """
+        绘制 W-k-means 各深度带的特征权重与簇中心。
+
+        特征权重是 W-k-means 相对普通 k-means 的核心产出：它直接回答"哪个
+        特征在这一带的分簇中起作用"。权重接近均分说明各特征贡献相当，
+        某一特征权重显著偏高则说明该带的分簇几乎由它单独决定。
+
+        Args:
+            per_band: 分带结果字典，需含 feature_weights / cluster_centers / n_clusters
+            metadata: 含 feature_display_names 的元数据
+            output_dir: 图件输出目录
+            model_name: 模型名
+        """
+        self.logger.info("    📊 绘制 W-k-means 特征权重...")
+        F = self.fonts = apply_clustering_plot_style(self.config)
+
+        bands = [(b, v) for b, v in per_band.items()
+                 if v.get('feature_weights') is not None]
+        if not bands:
+            return
+
+        names = list(metadata.get('feature_display_names')
+                     or metadata.get('features', []))
+        n_feat = len(np.asarray(bands[0][1]['feature_weights']))
+        names = (names + [f'f{i}' for i in range(n_feat)])[:n_feat]
+
+        fig, axes = plt.subplots(1, 2, figsize=(15, 5.5))
+
+        # (a) 各带特征权重的分组柱状图
+        ax = axes[0]
+        x = np.arange(len(bands))
+        width = 0.8 / max(n_feat, 1)
+        for j, fname in enumerate(names):
+            vals = [float(np.asarray(v['feature_weights'])[j]) for _, v in bands]
+            ax.bar(x + (j - (n_feat - 1) / 2) * width, vals, width,
+                   label=fname, edgecolor='black', linewidth=0.6)
+        ax.axhline(1.0 / n_feat, color='crimson', ls='--', lw=1.5,
+                   label=f'Equal ({1.0 / n_feat:.2f})')
+        ax.set_xticks(x)
+        ax.set_xticklabels([b for b, _ in bands], rotation=15, ha='right')
+        ax.set_ylabel('Feature weight', fontsize=F['label'])
+        ax.set_title('W-k-means feature weights per band',
+                     fontsize=F['title'] - 3, fontweight='bold')
+        ax.legend(fontsize=F['legend'] - 2)
+        ax.grid(True, axis='y', alpha=0.3)
+
+        # (b) 各带簇中心（物理量纲），点大小随带内簇序递增
+        ax = axes[1]
+        cmap = plt.get_cmap('tab10', max(len(bands), 3))
+        for i, (bname, v) in enumerate(bands):
+            cen = v.get('cluster_centers')
+            if cen is None:
+                continue
+            cen = np.asarray(cen, dtype=float)
+            if cen.shape[1] < 2:
+                continue
+            ix = next((j for j, n in enumerate(names)
+                       if str(n).lower().endswith('vs')), 0)
+            iy = next((j for j, n in enumerate(names)
+                       if str(n).lower().endswith('vp')), 1)
+            ax.plot(cen[:, ix], cen[:, iy], 'o-', color=cmap(i), ms=8,
+                    lw=1.2, alpha=0.85,
+                    label=f"{bname} (K={v['n_clusters']})",
+                    markeredgecolor='black', markeredgewidth=0.6)
+            ax.set_xlabel(names[ix], fontsize=F['label'])
+            ax.set_ylabel(names[iy], fontsize=F['label'])
+        ax.set_title('Cluster centers by band', fontsize=F['title'] - 3,
+                     fontweight='bold')
+        ax.legend(fontsize=F['legend'] - 2)
+        ax.grid(True, alpha=0.3)
+
+        fig.suptitle(f'{model_name} — W-k-means feature weighting',
+                     fontsize=F['suptitle'] - 4, fontweight='bold')
+        fig.tight_layout()
+
+        stem = '2-3-16_wkmeans_feature_weights'
+        for fmt in self.config.visualization.get('save_formats', ['jpg']):
+            fig.savefig(output_dir / f'{stem}.{fmt}',
+                        dpi=self.config.visualization['dpi'],
+                        bbox_inches='tight')
+        plt.close(fig)
+        self.logger.info(f"      ✅ 保存: {stem}")
+
+    def plot_radial_stratification(
+        self,
+        cluster_results: Dict[str, Any],
+        metadata: Dict[str, Any],
+        output_dir: Path,
+        model_name: str,
+        radial_config: Dict[str, Any],
+    ) -> pd.DataFrame:
+        """
+        绘制全深度聚类的径向分层结构。
+
+        原始速度值随深度单调增长，故全深度域一次性聚类得到的簇必然构成
+        径向壳层序列。本图从三个角度解读该序列：
+
+        1. 各簇的深度占位区间与参考间断面（410/660 km）的相对位置，
+           检验聚类是否复现了地幔相变引起的速度跃变
+        2. 层界深度图：层界的横向起伏即构造信号。俯冲板片使 410 km 抬升、
+           660 km 下沉（两处相变的 Clapeyron 斜率符号相反）
+        3. 层界深度的中位数与起伏幅度，是有量纲的物理量，可跨模型直接比较，
+           不受簇编号任意性影响
+
+        Args:
+            cluster_results: W-k-means 结果字典，需含 labels_3d / radial_stats /
+                feature_weights / cluster_centers
+            metadata: 含 lats / lons / depths 的元数据
+            output_dir: 图件输出目录
+            model_name: 模型名
+            radial_config: 含 reference_discontinuities / section_latitude 的配置
+
+        Returns:
+            层界深度统计表（boundary / depth_median / depth_p05 / depth_p95 / relief）
+        """
+        self.logger.info("    📊 绘制径向分层分析...")
+        F = self.fonts = apply_clustering_plot_style(self.config)
+
+        lats = np.asarray(metadata['lats'], dtype=float)
+        lons = np.asarray(metadata['lons'], dtype=float)
+        depths = np.asarray(metadata['depths'], dtype=float)
+        labels_3d = np.asarray(cluster_results['labels_3d'])
+        stats = cluster_results['radial_stats']
+        n_clusters = int(cluster_results['n_clusters'])
+
+        refs = [float(z) for z in radial_config.get(
+            'reference_discontinuities', [410.0, 660.0])]
+        sec_lat = float(radial_config.get('section_latitude', 35.0))
+
+        bnd = self._boundary_depth_table(labels_3d, depths, n_clusters, model_name)
+        maps = self._boundary_depth_maps(labels_3d, depths, n_clusters)
+
+        cmap = plt.get_cmap('tab10', n_clusters)
+        fig = plt.figure(figsize=(20, 11))
+        gs = fig.add_gridspec(2, 3, hspace=0.30, wspace=0.26,
+                              width_ratios=[1.0, 1.0, 1.5])
+
+        # (a) 簇中心在物理量纲下的分布，按平均深度着色
+        ax = fig.add_subplot(gs[0, 0])
+        cen_cols = [c for c in stats.columns if c.startswith('center_')]
+        if len(cen_cols) >= 2:
+            xcol = next((c for c in cen_cols if c.endswith('vs')), cen_cols[1])
+            ycol = next((c for c in cen_cols if c.endswith('vp')), cen_cols[0])
+            sc = ax.scatter(stats[xcol], stats[ycol], c=stats['depth_mean'],
+                            s=190, cmap='viridis', edgecolor='black',
+                            linewidth=1.3, zorder=3)
+            for _, r in stats.iterrows():
+                ax.annotate(f"{int(r['cluster'])}", (r[xcol], r[ycol]),
+                            ha='center', va='center', fontsize=8,
+                            fontweight='bold', color='white', zorder=4)
+            fig.colorbar(sc, ax=ax, label='Mean depth (km)')
+            ax.set_xlabel(xcol.replace('center_', ''), fontsize=F['label'])
+            ax.set_ylabel(ycol.replace('center_', ''), fontsize=F['label'])
+        ax.set_title('Cluster centers', fontsize=F['title'] - 3,
+                     fontweight='bold')
+        ax.grid(True, alpha=0.3)
+
+        # (b) 各簇的深度占位区间
+        ax = fig.add_subplot(gs[0, 1])
+        for _, r in stats.iterrows():
+            l = int(r['cluster'])
+            ax.plot([r['depth_p05'], r['depth_p95']], [l, l], lw=7,
+                    color=cmap(l), solid_capstyle='butt')
+            ax.plot(r['depth_mean'], l, 'k|', ms=13, mew=2)
+        for zd in refs:
+            ax.axvline(zd, color='crimson', ls='--', lw=1.5)
+            ax.text(zd, -0.7, f'{zd:.0f}', color='crimson',
+                    fontsize=F['annotation'] - 4, ha='center')
+        ax.set_xlabel('Depth (km)', fontsize=F['label'])
+        ax.set_ylabel('Cluster (ordered by depth)', fontsize=F['label'])
+        ax.set_title('Depth occupancy (5th-95th pct)',
+                     fontsize=F['title'] - 3, fontweight='bold')
+        ax.set_yticks(range(n_clusters))
+        ax.invert_yaxis()
+        ax.grid(True, axis='x', alpha=0.3)
+
+        # (c) 经度—深度剖面
+        ilat = int(np.argmin(np.abs(lats - sec_lat)))
+        ax = fig.add_subplot(gs[0, 2])
+        sec = labels_3d[ilat, :, :].astype(float)
+        sec[labels_3d[ilat, :, :] < 0] = np.nan
+        im = ax.pcolormesh(lons, depths, sec.T, cmap=cmap, vmin=-0.5,
+                           vmax=n_clusters - 0.5, shading='auto')
+        for zd in refs:
+            ax.axhline(zd, color='crimson', ls='--', lw=1.5)
+        ax.invert_yaxis()
+        ax.set_xlabel('Longitude (°E)', fontsize=F['label'])
+        ax.set_ylabel('Depth (km)', fontsize=F['label'])
+        ax.set_title(f'Section at {lats[ilat]:.0f}°N '
+                     f'(dashed: {", ".join(f"{z:.0f}" for z in refs)} km)',
+                     fontsize=F['title'] - 3, fontweight='bold')
+        fig.colorbar(im, ax=ax, ticks=range(n_clusters), label='Cluster',
+                     pad=0.01)
+
+        # (d)(e) 最接近参考间断面的两个层界的深度图
+        if not bnd.empty:
+            for i, zd in enumerate(refs[:2]):
+                k = int(bnd.iloc[(bnd['depth_median'] - zd).abs().argmin()]
+                        ['boundary'])
+                ax = fig.add_subplot(gs[1, i])
+                dmap = maps[k]
+                med = float(np.nanmedian(dmap))
+                span = float(np.nanpercentile(np.abs(dmap - med), 95)) or 1.0
+                im = ax.pcolormesh(lons, lats, dmap, cmap='RdBu',
+                                   vmin=med - span, vmax=med + span,
+                                   shading='auto')
+                fig.colorbar(im, ax=ax, label='Depth (km)')
+                ax.set_title(f'Boundary {k}: median {med:.0f} km '
+                             f'(ref {zd:.0f} km)', fontsize=F['title'] - 4,
+                             fontweight='bold')
+                ax.set_xlabel('Longitude (°E)', fontsize=F['label'] - 2)
+                if i == 0:
+                    ax.set_ylabel('Latitude (°N)', fontsize=F['label'] - 2)
+                ax.set_aspect('equal')
+
+            # (f) 层界深度与横向起伏汇总
+            ax = fig.add_subplot(gs[1, 2])
+            ax.errorbar(
+                bnd['depth_median'], bnd['boundary'],
+                xerr=[bnd['depth_median'] - bnd['depth_p05'],
+                      bnd['depth_p95'] - bnd['depth_median']],
+                fmt='o', color='navy', ecolor='steelblue', elinewidth=3,
+                capsize=4, ms=8,
+            )
+            for zd in refs:
+                ax.axvline(zd, color='crimson', ls='--', lw=1.5)
+                ax.text(zd, bnd['boundary'].min() - 0.5, f'{zd:.0f} km',
+                        color='crimson', fontsize=F['annotation'] - 4,
+                        ha='center')
+            ax.set_xlabel('Boundary depth (km)', fontsize=F['label'])
+            ax.set_ylabel('Boundary index', fontsize=F['label'])
+            ax.set_title('Boundary depth and lateral relief (5th-95th pct)',
+                         fontsize=F['title'] - 3, fontweight='bold')
+            ax.invert_yaxis()
+            ax.grid(True, alpha=0.3)
+
+        weights = cluster_results.get('feature_weights')
+        wtxt = ''
+        if weights is not None:
+            names = list(metadata.get('feature_display_names')
+                         or metadata.get('features', []))
+            wtxt = '   weights: ' + ', '.join(
+                f'{n}={w:.3f}' for n, w in zip(names, np.asarray(weights))
+            )
+        fig.suptitle(
+            f'{model_name} — W-k-means radial stratification '
+            f'(K={n_clusters}){wtxt}',
+            fontsize=F['suptitle'] - 4, fontweight='bold',
+        )
+
+        stem = '2-3-14_wkmeans_radial_stratification'
+        for fmt in self.config.visualization.get('save_formats', ['jpg']):
+            fig.savefig(output_dir / f'{stem}.{fmt}',
+                        dpi=self.config.visualization['dpi'],
+                        bbox_inches='tight')
+        plt.close(fig)
+
+        for _, r in bnd.iterrows():
+            self.logger.info(
+                f"      界{int(r['boundary'])}  中位 {r['depth_median']:>6.1f} km  "
+                f"P5-P95 {r['depth_p05']:>6.1f}-{r['depth_p95']:>6.1f}  "
+                f"起伏 {r['relief']:>5.1f} km"
+            )
+        self.logger.info(f"      ✅ 保存: {stem}")
+        return bnd
+
+    @staticmethod
+    def _boundary_depth_maps(
+        labels_3d: np.ndarray, depths: np.ndarray, n_clusters: int
+    ) -> Dict[int, np.ndarray]:
+        """
+        计算各层界（簇 k 的顶界）在每个地理网格点上的深度
+
+        簇已按平均深度排序，故层界 k 定义为沿深度方向标签首次达到 k 的深度。
+        该定义对局部非单调（如板片造成的标签反转）稳健，取首次穿越深度。
+        """
+        maps: Dict[int, np.ndarray] = {}
+        invalid_column = np.all(labels_3d < 0, axis=2)
+        for k in range(1, n_clusters):
+            reached = labels_3d >= k
+            any_reached = np.any(reached, axis=2)
+            first_idx = np.argmax(reached, axis=2)
+            dmap = np.where(any_reached, depths[first_idx], np.nan)
+            dmap[invalid_column] = np.nan
+            maps[k] = dmap
+        return maps
+
+    def _boundary_depth_table(
+        self,
+        labels_3d: np.ndarray,
+        depths: np.ndarray,
+        n_clusters: int,
+        model_name: str,
+    ) -> pd.DataFrame:
+        """汇总各层界的中位深度与横向起伏（P95-P5）"""
+        maps = self._boundary_depth_maps(labels_3d, depths, n_clusters)
+        rows: List[Dict[str, Any]] = []
+        for k, dmap in maps.items():
+            valid = dmap[np.isfinite(dmap)]
+            if valid.size == 0:
+                continue
+            p05, p95 = np.percentile(valid, [5, 95])
+            rows.append({
+                'model': model_name,
+                'boundary': k,
+                'depth_median': float(np.median(valid)),
+                'depth_p05': float(p05),
+                'depth_p95': float(p95),
+                'relief': float(p95 - p05),
+            })
+        return pd.DataFrame(rows)
+
+    def _crossplot_overview_panel(
+        self,
+        ax: Any,
+        X_plot: np.ndarray,
+        labels: np.ndarray,
+        band_items: List[Tuple[str, np.ndarray, str]],
+        ix: int,
+        iy: int,
+        ref_slope: float,
+        ref_label: str,
+        xlabel: str,
+        ylabel: str,
+        is_perturbation: bool,
+        max_scatter: int,
+        rng: np.random.Generator,
+        F: Dict[str, int],
+    ) -> None:
+        """
+        绘制交会图的全区域总览面板：全部体元按深度带着色，并框出各带占位。
+
+        各带的单独面板用各自的坐标范围以看清带内结构，代价是读者无法比较
+        带与带之间的位置关系。本面板用统一坐标补上这一层：矩形框取每带
+        2–98 百分位范围，标注带名，使"哪一带落在特征空间的哪个位置"一目了然。
+
+        Args:
+            ax: 目标坐标轴
+            X_plot: 已反标准化的特征矩阵
+            labels: 簇标签，负值为无效点
+            band_items: [(带名, 点掩膜, 子标题)]
+            ix, iy: 横轴/纵轴对应的特征列索引
+            ref_slope: 参考线斜率
+            ref_label: 参考线图例名
+            xlabel, ylabel: 轴标签
+            is_perturbation: 是否为扰动域
+            max_scatter: 散点抽样上限
+            rng: 随机数发生器
+            F: 字号字典
+        """
+        # 直接取 tab10 的前 N 色。get_cmap('tab10', N) 在 N<10 时会沿整条色表
+        # 重采样，得到的并非前 N 色，且相邻带的配色可能撞色。
+        tab10 = plt.get_cmap('tab10').colors
+        band_colors = [tab10[i % len(tab10)] for i in range(len(band_items))]
+        per_band_quota = max(max_scatter // max(len(band_items), 1), 1)
+
+        all_xy: List[np.ndarray] = []
+        boxes: List[Tuple[str, np.ndarray, np.ndarray, Any]] = []
+
+        for i, (bname, pmask, _sub) in enumerate(band_items):
+            sel = np.asarray(pmask, dtype=bool) & (labels >= 0)
+            if not np.any(sel):
+                continue
+            xy = np.stack([X_plot[sel, ix], X_plot[sel, iy]], axis=1)
+            xy = xy[np.all(np.isfinite(xy), axis=1)]
+            if len(xy) < 10:
+                continue
+
+            pick = (rng.choice(len(xy), per_band_quota, replace=False)
+                    if len(xy) > per_band_quota else np.arange(len(xy)))
+            ax.scatter(xy[pick, 0], xy[pick, 1], s=2.0,
+                       color=band_colors[i], alpha=0.30, linewidths=0,
+                       rasterized=True, label=bname)
+
+            lo = np.percentile(xy, 2, axis=0)
+            hi = np.percentile(xy, 98, axis=0)
+            boxes.append((bname, lo, hi, band_colors[i]))
+            all_xy.append(xy)
+
+        if not all_xy:
+            ax.axis('off')
+            return
+
+        # 坐标范围取各带方框的并集：地壳的扰动幅度可比地幔大一个量级，若按
+        # 全体点的分位数定范围，占比小的地壳会被整个裁到画面之外。
+        box_lo = np.min([b[1] for b in boxes], axis=0)
+        box_hi = np.max([b[2] for b in boxes], axis=0)
+        pad = 0.10 * (box_hi - box_lo)
+        if is_perturbation:
+            lim = float(np.max(np.abs([box_lo - pad, box_hi + pad])))
+            xlim = ylim = (-lim, lim)
+            t = np.array([-lim, lim])
+            ax.axhline(0, color='0.6', lw=0.6, zorder=1)
+            ax.axvline(0, color='0.6', lw=0.6, zorder=1)
+        else:
+            xlim = (float(box_lo[0] - pad[0]), float(box_hi[0] + pad[0]))
+            ylim = (float(box_lo[1] - pad[1]), float(box_hi[1] + pad[1]))
+            t = np.array([0.0, xlim[1]])
+
+        # 标注轮流放到方框的不同角上：扰动域下各带方框近似同心嵌套，
+        # 统一放同一个角会把四个标签叠在一起
+        corners = [(1, 1, 4, 4), (0, 1, -4, 4), (1, 0, 4, -10), (0, 0, -4, -10)]
+        for i, (bname, lo, hi, col) in enumerate(boxes):
+            ax.add_patch(Rectangle(
+                (lo[0], lo[1]), hi[0] - lo[0], hi[1] - lo[1],
+                fill=False, edgecolor=col, linewidth=2.0, zorder=6,
+            ))
+            cx, cy, dx, dy = corners[i % len(corners)]
+            ax.annotate(
+                bname,
+                (hi[0] if cx else lo[0], hi[1] if cy else lo[1]),
+                textcoords='offset points', xytext=(dx, dy),
+                ha='left' if cx else 'right', color=col,
+                fontsize=F['annotation'] - 4, fontweight='bold', zorder=7,
+                bbox=dict(boxstyle='round,pad=0.18', fc='white', ec=col,
+                          alpha=0.85, lw=0.8),
+            )
+
+        ax.plot(t, ref_slope * t, 'k--', lw=1.8, zorder=4,
+                label=f'{ref_label} ({ref_slope:.2f})')
+        ax.set_xlim(*xlim)
+        ax.set_ylim(*ylim)
+        if is_perturbation:
+            ax.set_aspect('equal')
+        ax.grid(True, alpha=0.3, linestyle='--')
+        ax.tick_params(labelsize=F['tick'])
+        ax.set_xlabel(xlabel, fontsize=F['label'])
+        ax.set_ylabel(ylabel, fontsize=F['label'])
+        ax.set_title(f'All depths  (N = {sum(len(a) for a in all_xy):,})',
+                     fontsize=F['title'] - 3, fontweight='bold')
+
+        leg = ax.legend(fontsize=F['legend'] - 3, loc='upper left',
+                        framealpha=0.9, markerscale=4)
+        for h in leg.legend_handles:
+            if hasattr(h, 'set_alpha'):
+                h.set_alpha(1.0)
+
+    def _prepare_crossplot_context(
+        self,
+        X: np.ndarray,
+        labels: np.ndarray,
+        metadata: Dict[str, Any],
+        per_band: Optional[Dict[str, Any]],
+        spatial_indices: Optional[np.ndarray] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """交会图（2D/3D）共用的特征反变换、轴标签与分带组织。"""
+        F = apply_clustering_plot_style(self.config)
+        labels = np.asarray(labels)
+
+        X_phys = self._physical_feature_matrix(X, spatial_indices, n_features=2)
+        features = [str(f).lower() for f in metadata.get('features', [])]
+
+        def _find(tag: str) -> Optional[int]:
+            for i, f in enumerate(features):
+                if f.endswith(tag):
+                    return i
+            return None
+
+        ix, iy = _find('vs'), _find('vp')
+        if ix is None or iy is None or X_phys.shape[1] < 2:
+            return None
+
+        is_perturbation = self._is_perturbation_space(metadata)
+        cp_cfg = self.config.visualization.get('crossplot', {})
+        X_plot = X_phys
+        if is_perturbation:
+            X_plot = X_phys * 100.0
+            xlabel = r'$\delta\ln V_S$ (%)'
+            ylabel = r'$\delta\ln V_P$ (%)'
+            ref_label = 'Thermal scaling'
+            space_label = 'Perturbation Feature Space'
+            ref_slope = float(cp_cfg.get('reference_slope_perturbation',
+                                         MANTLE_SCALING_SLOPE))
+        else:
+            xlabel = r'$V_S$ (km/s)'
+            ylabel = r'$V_P$ (km/s)'
+            ref_label = r'$V_P/V_S$'
+            space_label = 'Velocity Feature Space'
+            ref_slope = float(cp_cfg.get('reference_slope_raw',
+                                         POISSON_VPVS_RATIO))
+
+        band_items: List[Tuple[str, np.ndarray, str]] = []
+        if per_band:
+            for bname, binfo in per_band.items():
+                pmask = binfo.get('point_mask')
+                if pmask is None:
+                    continue
+                pmask = np.asarray(pmask, dtype=bool)
+                if not np.any(pmask):
+                    continue
+                z0, z1 = binfo.get('depth_range', [np.nan, np.nan])
+                k = int(binfo.get('n_clusters', 0))
+                subtitle = f'{bname}  ({z0:.0f}–{z1:.0f} km, K={k})'
+                band_items.append((bname, pmask, subtitle))
+        if not band_items:
+            band_items = [('all', labels >= 0, 'All depths')]
+
+        return {
+            'F': F,
+            'X_plot': X_plot,
+            'labels': labels,
+            'ix': ix,
+            'iy': iy,
+            'xlabel': xlabel,
+            'ylabel': ylabel,
+            'ref_label': ref_label,
+            'ref_slope': ref_slope,
+            'space_label': space_label,
+            'is_perturbation': is_perturbation,
+            'band_items': band_items,
+            'cp_cfg': cp_cfg,
+        }
+
+    def _crossplot_3d_panel(
+        self,
+        ax: Any,
+        X_plot: np.ndarray,
+        labels: np.ndarray,
+        point_depths: np.ndarray,
+        ix: int,
+        iy: int,
+        colors: List[Any],
+        F: Dict[str, int],
+        xlabel: str,
+        ylabel: str,
+        is_perturbation: bool,
+        cp_cfg: Dict[str, Any],
+    ) -> int:
+        """
+        三维交会面板：横纵轴为 δlnVs/δlnVp（或 Vp/Vs），竖轴为深度。
+
+        扰动域默认裁剪到 perturbation_lim_3d（±20%），范围内全量散点绘制。
+
+        Returns:
+            实际绘制的体元数
+        """
+        valid = (labels >= 0) & np.all(np.isfinite(X_plot[:, [ix, iy]]), axis=1)
+        valid &= np.isfinite(point_depths)
+        if not np.any(valid):
+            ax.set_axis_off()
+            return 0
+
+        xs = X_plot[valid, ix]
+        ys = X_plot[valid, iy]
+        zs = np.asarray(point_depths[valid], dtype=float)
+        lbl = labels[valid]
+
+        xlim = ylim = None
+        if is_perturbation:
+            lim_cfg = cp_cfg.get('perturbation_lim_3d', [-20.0, 20.0])
+            lo, hi = float(lim_cfg[0]), float(lim_cfg[1])
+            in_box = (xs >= lo) & (xs <= hi) & (ys >= lo) & (ys <= hi)
+            xs, ys, zs, lbl = xs[in_box], ys[in_box], zs[in_box], lbl[in_box]
+            xlim = ylim = (lo, hi)
+        else:
+            xlo, xhi = np.percentile(xs, [1.0, 99.0])
+            ylo, yhi = np.percentile(ys, [1.0, 99.0])
+            xpad = 0.05 * max(float(xhi - xlo), 1e-3)
+            ypad = 0.05 * max(float(yhi - ylo), 1e-3)
+            xlim = (max(0.0, float(xlo) - xpad), float(xhi) + xpad)
+            ylim = (max(0.0, float(ylo) - ypad), float(yhi) + ypad)
+
+        if len(xs) == 0:
+            ax.set_axis_off()
+            return 0
+
+        max_scatter = cp_cfg.get('max_scatter_points_3d')
+        n = len(xs)
+        if max_scatter is not None and int(max_scatter) > 0 and n > int(max_scatter):
+            rng = np.random.default_rng(RANDOM_SEED)
+            pick = rng.choice(n, int(max_scatter), replace=False)
+        else:
+            pick = np.arange(n)
+
+        pt_colors = np.array([colors[int(c) % len(colors)] for c in lbl[pick]])
+        ax.scatter(
+            xs[pick], ys[pick], zs[pick],
+            c=pt_colors, s=0.35, alpha=0.18, linewidths=0, depthshade=False,
+        )
+
+        # 簇中心（仅在裁剪框内体元上统计）
+        for cid in np.unique(lbl):
+            m = lbl == cid
+            cx, cy, cz = xs[m].mean(), ys[m].mean(), zs[m].mean()
+            col = colors[int(cid) % len(colors)]
+            ax.scatter(
+                [cx], [cy], [cz], s=120, c=[col],
+                edgecolors='black', linewidths=1.0, depthshade=False, zorder=5,
+            )
+            ax.text(
+                cx, cy, cz, f'{int(cid)}', fontsize=F['annotation'] - 5,
+                ha='center', va='center', fontweight='bold', zorder=6,
+            )
+
+        # 410 / 660 km 参考面
+        if xlim is not None:
+            xx, yy = np.meshgrid(
+                np.linspace(xlim[0], xlim[1], 2),
+                np.linspace(ylim[0], ylim[1], 2),
+            )
+        else:
+            xspan = float(np.percentile(np.abs(xs), 99.5))
+            yspan = float(np.percentile(np.abs(ys), 99.5))
+            xx, yy = np.meshgrid(
+                np.linspace(-xspan, xspan, 2),
+                np.linspace(-yspan, yspan, 2),
+            )
+        for z_ref in (410.0, 660.0):
+            if z_ref <= float(np.nanmax(zs)):
+                ax.plot_surface(
+                    xx, yy, np.full_like(xx, z_ref),
+                    color='0.4', alpha=0.08, linewidth=0, shade=False,
+                )
+
+        if xlim is not None:
+            ax.set_xlim(*xlim)
+            ax.set_ylim(*ylim)
+        ax.set_xlabel(xlabel, fontsize=F['label'] - 2, labelpad=8)
+        ax.set_ylabel(ylabel, fontsize=F['label'] - 2, labelpad=8)
+        ax.set_zlabel('Depth (km)', fontsize=F['label'] - 2, labelpad=8)
+        ax.invert_zaxis()
+        ax.view_init(elev=22, azim=-58)
+        ax.tick_params(labelsize=F['tick'] - 2)
+        ax.grid(True, alpha=0.25)
+        return int(len(xs))
+
+    def plot_cluster_crossplot(
+        self,
+        X: np.ndarray,
+        labels: np.ndarray,
+        metadata: Dict[str, Any],
+        output_dir: Path,
+        algorithm_name: str,
+        model_name: str,
+        per_band: Optional[Dict[str, Any]] = None,
+        spatial_indices: Optional[np.ndarray] = None,
+    ) -> Dict[str, Dict[str, float]]:
+        """
+        绘制各深度带簇在扰动特征空间 (δlnVs, δlnVp) 中的交会图。
+
+        每个面板叠绘两条参考线：地幔热标定线 δlnVp = 0.5·δlnVs，以及点云
+        实测主轴（总体最小二乘）。若簇中心沿主轴串成一列（R = σ∥/σ⊥ ≫ 1），
+        说明聚类主要按扰动幅度切分，各簇缺乏独立的 Vp/Vs 差异；若簇在垂直
+        主轴方向上分开，则簇携带成分或流体信息，具备物性域含义。
+
+        对应 Hao et al. (2026, EPSL) 在 Vs–Vp 交会图上以斜率 1.73 参考线判别
+        簇物性差异的做法，此处为扰动域下的等价诊断。
+
+        Args:
+            X: 形状 (N, n_features) 的标准化特征矩阵（内部反标准化到扰动域）
+            labels: 形状 (N,) 的簇标签，负值为无效点
+            metadata: 含 features / feature_display_names 的元数据
+            output_dir: 图件输出目录
+            algorithm_name: 算法名（用于文件名，如 'gmm'）
+            model_name: 模型名（用于图题）
+            per_band: 分带结果字典，含 point_mask / depth_range / n_clusters
+
+        Returns:
+            {深度带名: 诊断量字典}，诊断量见 crossplot_diagnostics
+        """
+        self.logger.info(f"    📊 绘制特征空间交会图 ({algorithm_name})...")
+        ctx = self._prepare_crossplot_context(
+            X, labels, metadata, per_band, spatial_indices=spatial_indices,
+        )
+        if ctx is None:
+            self.logger.warning("      ⚠️ 未找到 vp/vs 特征列，跳过交会图")
+            return {}
+
+        self.fonts = ctx['F']
+        F = ctx['F']
+        X_plot = ctx['X_plot']
+        labels = ctx['labels']
+        ix, iy = ctx['ix'], ctx['iy']
+        xlabel, ylabel = ctx['xlabel'], ctx['ylabel']
+        ref_label, ref_slope = ctx['ref_label'], ctx['ref_slope']
+        space_label = ctx['space_label']
+        is_perturbation = ctx['is_perturbation']
+        band_items = ctx['band_items']
+        cp_cfg = ctx['cp_cfg']
+        max_scatter = int(cp_cfg.get('max_scatter_points', 25_000))
+
+        show_overview = bool(cp_cfg.get('overview_panel', True)) and len(band_items) > 1
+        n_panels = len(band_items) + (1 if show_overview else 0)
+        n_cols = min(5 if show_overview else 4, n_panels)
+        n_rows = int(np.ceil(n_panels / n_cols))
+        fig, axes = plt.subplots(
+            n_rows, n_cols, figsize=(5.6 * n_cols, 6.2 * n_rows), squeeze=False
+        )
+        panel_offset = 1 if show_overview else 0
+
+        max_cid = int(labels.max()) if np.any(labels >= 0) else 0
+        colors = generate_distinct_colors(
+            max(max_cid + 1, self.config.visualization['n_colors'])
+        )
+        rng = np.random.default_rng(RANDOM_SEED)
+        diagnostics: Dict[str, Dict[str, float]] = {}
+
+        if show_overview:
+            self._crossplot_overview_panel(
+                axes[0, 0], X_plot, labels, band_items, ix, iy,
+                ref_slope, ref_label, xlabel, ylabel,
+                is_perturbation, max_scatter, rng, F,
+            )
+
+        for idx0, (bname, pmask, subtitle) in enumerate(band_items):
+            idx = idx0 + panel_offset
+            ax = axes[idx // n_cols, idx % n_cols]
+            sel = pmask & (labels >= 0)
+            xy = np.stack([X_plot[sel, ix], X_plot[sel, iy]], axis=1)
+            band_labels = labels[sel]
+            finite = np.all(np.isfinite(xy), axis=1)
+            xy, band_labels = xy[finite], band_labels[finite]
+
+            if len(xy) < 10:
+                ax.axis('off')
+                ax.set_title(f'{subtitle}\n(no data)', fontsize=F['title'])
+                continue
+
+            # 诊断量在全量体元上计算；下面的抽样只作用于散点绘制，
+            # 因为把数百万个点画成散点会糊成色块且文件体积失控
+            diag = crossplot_diagnostics(xy, band_labels)
+            diag['n_points'] = float(len(xy))
+            diagnostics[bname] = diag
+
+            # 散点抽样（仅影响显示密度，不影响上面的诊断量）
+            if len(xy) > max_scatter:
+                pick = rng.choice(len(xy), max_scatter, replace=False)
+            else:
+                pick = np.arange(len(xy))
+            pt_colors = np.array(
+                [colors[int(c) % len(colors)] for c in band_labels[pick]]
+            )
+            ax.scatter(
+                xy[pick, 0], xy[pick, 1], s=2.0, c=pt_colors,
+                alpha=0.35, linewidths=0, rasterized=True,
+            )
+
+            # 簇中心（标号按带内顺序，与 2-3-6/2-3-7 的 C 编号一致）
+            for cid in np.unique(band_labels):
+                c = xy[band_labels == cid].mean(axis=0)
+                ax.scatter(
+                    c[0], c[1], s=180, facecolor=colors[int(cid) % len(colors)],
+                    edgecolor='black', linewidth=1.4, zorder=5,
+                )
+                ax.annotate(
+                    f'{int(cid)}', c, ha='center', va='center',
+                    fontsize=F['annotation'] - 4, fontweight='bold', zorder=6,
+                )
+
+            # 坐标范围：扰动域以 0 为中心对称，原始域按数据实际范围
+            if is_perturbation:
+                lim = float(np.percentile(np.abs(xy), 99.5))
+                xlim = ylim = (-lim, lim)
+                t = np.array([-lim, lim])
+                ax.axhline(0, color='0.6', lw=0.6, zorder=1)
+                ax.axvline(0, color='0.6', lw=0.6, zorder=1)
+            else:
+                lo = np.percentile(xy, 0.5, axis=0)
+                hi = np.percentile(xy, 99.5, axis=0)
+                pad = 0.05 * (hi - lo)
+                xlim = (float(lo[0] - pad[0]), float(hi[0] + pad[0]))
+                ylim = (float(lo[1] - pad[1]), float(hi[1] + pad[1]))
+                t = np.array([0.0, float(hi[0] + pad[0])])
+
+            # 参考线：过原点的标定线 + 点云实测主轴
+            ax.plot(
+                t, ref_slope * t, 'k--', lw=1.8, zorder=4,
+                label=f'{ref_label} ({ref_slope:.2f})',
+            )
+            pc1, _, _ = principal_axis(xy)
+            mean_xy = xy.mean(axis=0)
+            span = np.array([-1.0, 1.0]) * float(np.ptp(xlim))
+            ax.plot(
+                mean_xy[0] + span * pc1[0], mean_xy[1] + span * pc1[1],
+                color='crimson', lw=1.8, zorder=4,
+                label=f"Observed axis ({diag['pc1_slope']:.2f})",
+            )
+
+            ax.set_xlim(*xlim)
+            ax.set_ylim(*ylim)
+            if is_perturbation:
+                ax.set_aspect('equal')
+            ax.grid(True, alpha=0.3, linestyle='--')
+            ax.tick_params(labelsize=F['tick'])
+            ax.set_title(
+                f"{subtitle}\n"
+                f"r = {diag['corr']:.2f},  "
+                f"R = $\\sigma_\\parallel/\\sigma_\\perp$ = {diag['ratio_R']:.1f}",
+                fontsize=F['title'] - 3, fontweight='bold',
+            )
+            ax.set_xlabel(xlabel, fontsize=F['label'])
+            if idx % n_cols == 0:
+                ax.set_ylabel(ylabel, fontsize=F['label'])
+            if idx == panel_offset:
+                ax.legend(fontsize=F['legend'] - 3, loc='upper left',
+                          framealpha=0.9)
+
+        # 关闭多余空面板
+        for idx in range(n_panels, n_rows * n_cols):
+            axes[idx // n_cols, idx % n_cols].axis('off')
+
+        fig.suptitle(
+            f'{model_name} — {algorithm_name.upper()} Cluster Distribution '
+            f'in the {space_label}',
+            fontsize=F['suptitle'], fontweight='bold',
+        )
+        fig.tight_layout(rect=[0, 0.01, 1, 0.95], w_pad=0.8, h_pad=1.0)
+
+        stem = f'2-3-12_{algorithm_name}_cluster_crossplot'
+        for fmt in self.config.visualization.get('save_formats', ['jpg']):
+            fig.savefig(
+                output_dir / f'{stem}.{fmt}',
+                dpi=self.config.visualization['dpi'], bbox_inches='tight',
+            )
+        plt.close(fig)
+
+        for bname, d in diagnostics.items():
+            self.logger.info(
+                f"      {bname:<16} K={d['n_clusters']:>2}  "
+                f"r={d['corr']:.3f}  axis={d['pc1_slope']:.3f}  "
+                f"cloud_aniso={d['cloud_anisotropy']:.2f}  R={d['ratio_R']:.2f}"
+            )
+        self.logger.info(f"      ✅ 保存: {stem}")
+        return diagnostics
+
+    def plot_cluster_crossplot_3d(
+        self,
+        X: np.ndarray,
+        labels: np.ndarray,
+        metadata: Dict[str, Any],
+        output_dir: Path,
+        algorithm_name: str,
+        model_name: str,
+        per_band: Optional[Dict[str, Any]] = None,
+        spatial_indices: Optional[np.ndarray] = None,
+    ) -> None:
+        """
+        独立绘制 (δlnVs, δlnVp, depth) 三维特征空间交会图（2-3-13）。
+
+        与 2-3-12 的 2D 分带面板互补：展示四带在扰动–深度体积中的分层占位。
+        """
+        self.logger.info(f"    📊 绘制三维特征空间交会图 ({algorithm_name})...")
+        ctx = self._prepare_crossplot_context(
+            X, labels, metadata, per_band, spatial_indices=spatial_indices,
+        )
+        if ctx is None:
+            self.logger.warning("      ⚠️ 未找到 vp/vs 特征列，跳过三维交会图")
+            return
+
+        if spatial_indices is None:
+            self.logger.warning("      ⚠️ 缺少 spatial_indices，跳过三维交会图")
+            return
+
+        depths_arr = np.asarray(metadata.get('depths', []), dtype=float)
+        if len(depths_arr) == 0 or len(spatial_indices) != len(ctx['labels']):
+            self.logger.warning("      ⚠️ depth 坐标无效，跳过三维交会图")
+            return
+
+        point_depths = depths_arr[np.asarray(spatial_indices[:, 2], dtype=int)]
+        self.fonts = ctx['F']
+        F = ctx['F']
+        labels = ctx['labels']
+        cp_cfg = ctx['cp_cfg']
+
+        max_cid = int(labels.max()) if np.any(labels >= 0) else 0
+        colors = generate_distinct_colors(
+            max(max_cid + 1, self.config.visualization['n_colors'])
+        )
+
+        figsize = self.config.visualization.get('figsize', {}).get('3d', (12, 10))
+        fig = plt.figure(figsize=figsize)
+        ax = fig.add_subplot(111, projection='3d')
+
+        n_plotted = self._crossplot_3d_panel(
+            ax, ctx['X_plot'], labels, point_depths,
+            ctx['ix'], ctx['iy'], colors, F,
+            ctx['xlabel'], ctx['ylabel'],
+            ctx['is_perturbation'], cp_cfg,
+        )
+        if n_plotted == 0:
+            plt.close(fig)
+            self.logger.warning('      ⚠️ 三维交会图无有效体元，已跳过保存')
+            return
+        self.logger.info(f'      三维交会散点: {n_plotted:,} 体元')
+
+        title_3d = (
+            r'3D feature space  ($\delta\ln V_S$, $\delta\ln V_P$, depth)'
+            if ctx['is_perturbation'] else
+            r'3D feature space  ($V_S$, $V_P$, depth)'
+        )
+        fig.suptitle(
+            f'{model_name} — {algorithm_name.upper()} {title_3d}',
+            fontsize=F['suptitle'], fontweight='bold', y=0.98,
+        )
+        fig.tight_layout(rect=[0, 0, 1, 0.96])
+
+        stem = f'2-3-13_{algorithm_name}_cluster_crossplot_3d'
+        for fmt in self.config.visualization.get('save_formats', ['jpg']):
+            fig.savefig(
+                output_dir / f'{stem}.{fmt}',
+                dpi=self.config.visualization['dpi'], bbox_inches='tight',
+            )
+        plt.close(fig)
+        self.logger.info(f"      ✅ 保存: {stem}")
 

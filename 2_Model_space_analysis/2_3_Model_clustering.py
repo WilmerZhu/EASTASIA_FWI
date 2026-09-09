@@ -1,37 +1,61 @@
 """
-EASTASIA-FWI 单模型速度相聚类模块 (v7.6)
+EASTASIA-FWI 单模型速度簇聚类模块 (v8.0)
 ====================================================================================
 
 科学目标：
-- 刻画单模型内部速度相 / 构造分区（体素级 GMM）
+- 刻画单模型内部速度簇 / 构造分区（体素级聚类，默认 GMM 正文主路径）
 - 切片/剖面/三维体叠绘 USGS Slab2 俯冲板片几何（定性对照，不做定量评分）
-- 浅部 facies 切片叠绘 USGS 地质省 / CN 地块边界（仅定性对照，不做定量符合度）
-- Moho 点数据仅用于 moho_4band 空间分带，不再参与符合度评价
+- 浅部簇切片叠绘 USGS 地质省 / CN 地块边界（仅定性对照，不做定量符合度）
+- Moho 点数据仅用于 moho_4band 空间分带，不参与符合度评价
 - 不用于模型间代表性筛选（那是 2_2 CW-SSIM + 模型级聚类的职责）
+
+支持的聚类算法（--algorithm，各算法独立输出目录，互不覆盖）：
+- gmm（默认）：高斯混合，软后验，支持投票与融合；K 由 BIC 拐点或分带 fixed_k 先验
+- wkmeans：特征加权 k-means（Huang et al., 2005；Hao et al., 2026）；硬指派；
+  全量体元拟合，K 由肘部法（Kneedle）定值 + 轮廓系数评估（Nainggolan et al., 2019）
+- hdbscan：层次密度聚类（Campello et al., 2013）；K 由密度参数自动决定，不预设
+- hierarchical：Ward 凝聚层次聚类；K 沿用分带 fixed_k 先验，子样本拟合 + 全量簇心指派
 
 核心流程：
 1. 加载各模型原始 NetCDF（经纬度用原生范围；深度统一截到 1000 km）
-2. 转为相对水平平均 1D 参考的 δlnV 特征（消除深度主趋势）
-3. 深度分层 GMM，支持两种方案：
-   - fixed_3band: 浅部(0-410) / 过渡带 / 下地幔
-   - moho_4band: 地壳(z<Moho) / 岩石圈(Moho-410) / 过渡带 / 下地幔
-4. 按零模型校正的划分重现性选 K（体元数 N 不是独立观测数，argmin(BIC)
-   必贴 K 上界且随抽样量漂移；改为逐 K 做多次部分重抽样重拟合，取标签
-   ARI，再减去等量单高斯零模型的同一指标，选超额重现率最大的 K。
-   同时报告 argmin(BIC) 与 argmin(BIC_eff) 作为诊断上/下界）
-5. 可视化：3×3 深度切片（第1排首格基岩地质底图 + 10/40 km facies + 地质线，
-   第2–3排叠 Slab2 等深线）、剖面与三维体叠 Slab2 几何（均为定性对照）
-6. 聚类剖面图按 δlnVp/δlnVs 特征自动标注 facies 推测解释名
+2. 特征域（--raw 可切换，两类对照实验）：
+   - 默认扰动域：NetCDF 原生 δlnVp、δlnVs = ln(V/V_ref)，V_ref 来自模型自带
+     vp0/vs0（EARA2024 的 vp_ref/vs_ref、FWEA23 的 vp0/vs0）；SinoScope1.0 无
+     参考场时回退为各深度水平平均 1D 剖面（与 2_1 / 1_5 一致）
+   - 原始域（--raw）：标准化 Vp、Vs 绝对值（径向分层 / Hao et al. 对照实验用）
+   - 可选坐标增广（--coords）：经度/纬度/深度并入特征（默认关闭，对照实验须声明）
+3. 深度分带（两条路径共用 DepthBandPartitioner，保证逐带可比）：
+   - fixed_3band: 浅部(0-410) / 过渡带(410-660) / 下地幔(660-1000)
+   - moho_4band: 地壳(z<Moho) / 岩石圈(Moho-410) / 过渡带 / 下地幔（默认）
+4. 各带独立聚类，带内簇按 Vs（或扰动域 δlnVs）升序编号，带间 label_offset 拼合
+5. 质量诊断：
+   - GMM：BIC 曲线、划分重现性（k_robustness）、后验概率
+   - W-k-means：SSE-轮廓双轴选 K 图、特征权重、可选 β 扫描
+   - HDBSCAN / 层次：方法学诊断图（簇规模分布 / 树状图）
+   - 全算法：δlnVp-δlnVs（或 Vp-Vs）交会图 + 振幅切分判据 R = σ∥/σ⊥
+6. 可视化（5_10_Clustering_visualization.py）：
+   2-3-1 GMM 双轴选 K（BIC + silhouette，panel a–d）、3×3 深度切片、
+   垂直剖面、簇剖面、Slab2 三维体对照、特征空间交会图等
+7. 输出：数据 → results/model_clustering/{scheme|algo_tag}/；
+   图件 → figures/model_clustering/{scheme|algo_tag}/
+
+命令行示例：
+  python 2_3_Model_clustering.py                                    # GMM 正文路径
+  python 2_3_Model_clustering.py --algorithm wkmeans                  # 扰动域 W-k-means
+  python 2_3_Model_clustering.py --algorithm wkmeans --raw            # 原始 Vp/Vs
+  python 2_3_Model_clustering.py --algorithm hdbscan --models M1 M2   # 密度聚类对照
+  python 2_3_Model_clustering.py --algorithm hierarchical               # 层次聚类对照
 
 作者：EASTASIA-FWI Team
-日期：2026-09-02
-版本：v7.6
+日期：2026-09-08
+版本：v8.0
 """
 
 import sys
 import warnings
 import importlib.util
 import logging
+import argparse
 import time
 import traceback
 import json
@@ -46,9 +70,17 @@ import pandas as pd
 import xarray as xr
 
 # 机器学习库
-from sklearn.cluster import KMeans, MiniBatchKMeans
+from sklearn.cluster import (
+    KMeans,
+    MiniBatchKMeans,
+    AgglomerativeClustering,
+    kmeans_plusplus,
+)
 from sklearn.preprocessing import StandardScaler, RobustScaler
 from sklearn.mixture import GaussianMixture
+from scipy.cluster.hierarchy import linkage, fcluster, dendrogram
+from scipy.spatial.distance import pdist
+import hdbscan
 from sklearn.metrics import (
     silhouette_score,
     davies_bouldin_score,
@@ -104,6 +136,8 @@ perturbation_clim = _viz_mod.perturbation_clim
 make_equal_map_subplots = _viz_mod.make_equal_map_subplots
 generate_distinct_colors = _viz_mod.generate_distinct_colors
 interpret_facies = _viz_mod.interpret_facies
+principal_axis = _viz_mod.principal_axis
+crossplot_diagnostics = _viz_mod.crossplot_diagnostics
 
 @dataclass
 class ClusteringConfig:
@@ -121,17 +155,122 @@ class ClusteringConfig:
         ],
         'all_features': ['vp', 'vs', 'vsv', 'vsh', 'vpv', 'vph'],
         'default_features': ['vp', 'vs'],
+        # 扰动参考：NetCDF 中 vp→vp0、vs→vs0（1_5 标准化命名）
+        'reference_features': {'vp': 'vp0', 'vs': 'vs0'},
+    })
+
+    # ==================== 聚类算法选择 ====================
+    # 'gmm'           — 高斯混合 + BIC/先验选 K（正文主路径，软后验支持投票与融合）
+    # 'wkmeans'       — 特征加权 k-means（Huang et al. 2005；Hao et al. 2026 采用）
+    # 'hdbscan'       — 层次密度聚类（Campello et al., 2013）
+    # 'hierarchical'  — 凝聚层次聚类 + 树状图切分（Ward linkage）
+    # 各路径共用同一套深度分带，结果可逐带对照。
+    algorithm: str = 'gmm'
+
+    # ==================== W-k-means 配置 ====================
+    wkmeans: Dict[str, Any] = field(default_factory=lambda: {
+        'beta': 6.5,           # 与 Hao et al. (2026) 一致；须在 [0,1] 之外
+        'n_init': 3,
+        'max_iter': 100,
+        # None = 用全部体元拟合。W-k-means 每次迭代是 O(n·k·d)，且 _assign
+        # 已分块，全量拟合只增加线性时间，不存在内存瓶颈。
+        'fit_max_points': None,
+        'random_state': RANDOM_SEED,
+
+        # 选 K：肘部法定值 + 轮廓系数评估簇的紧致度与分离度
+        # （Nainggolan et al., 2019）
+        'k_selection': {
+            # 'elbow'            — SSE 曲线 Kneedle 拐点
+            # 'elbow_silhouette' — 肘点之后取轮廓系数的局部极大（Hao et al. 2026
+            #                      图 S39a 的做法）；本项目数据的轮廓曲线多为单调
+            #                      下降，无局部极大时回退到肘点
+            # 'sse_threshold'    — 边际 SSE 改善首次低于总降幅的给定比例
+            # 'silhouette'       — 轮廓系数全局最大（连续速度场下必压到 K=2，
+            #                      仅作诊断，不建议用于选 K）
+            # 'fixed'            — 直接指定
+            'method': 'elbow',
+            # 沿用分带配置的 min/max_clusters，保证与 GMM 路径扫描范围一致
+            'use_band_k_range': True,
+            'min_clusters': 2,          # use_band_k_range=False 时生效
+            'max_clusters': 12,
+            # 分带里的 fixed_k 是为 GMM 设的地质省先验，W-k-means 默认忽略
+            'respect_fixed_k': False,
+            'fixed_k': None,            # method='fixed' 时生效
+            # method='sse_threshold' 时生效：边际降幅低于总降幅的该比例即停
+            'sse_improvement_threshold': 0.05,
+            'scan_max_points': None,     # None = K 扫描也用全部体元
+            'scan_n_init': 2,
+            # 轮廓系数是 O(n²)，全量计算不可行（本项目单带可达 2.8×10⁶ 体元，
+            # 对应 7.8×10¹² 个点对）。改为在多个独立子样本上重复估计，用
+            # 估计量的标准差量化抽样不确定度，而非假定子样本有代表性。
+            'silhouette_sample_size': 50_000,
+            'silhouette_n_repeats': 3,
+        },
+
+        # 权重指数 β 的选取：Hao et al. (2026) 图 S39b 以平均轮廓系数扫 β 定值。
+        # β→1⁺ 时权重塌缩到单一特征，β 增大权重趋于均分，故存在一个平台区。
+        # 默认关闭：扫描开销约等于再跑一遍 K 扫描，只在方法学标定时开启。
+        'beta_selection': {
+            'enabled': False,
+            'beta_min': 1.2,      # β 须在 [0,1] 之外，故从 1.2 起扫
+            'beta_max': 10.0,
+            'beta_step': 0.4,
+            'n_clusters': None,   # None 表示用该带选定的 K
+            'scan_max_points': None,
+        },
+
+        # 全深度模式（depth_stratified.enabled=False）专用
+        'order_by_depth': True,     # 按簇平均深度重排编号，簇序即径向次序
+        'radial_analysis': {
+            'enabled': True,
+            'reference_discontinuities': [410.0, 660.0],
+            'section_latitude': 35.0,
+        },
+    })
+
+    # ==================== HDBSCAN ====================
+    hdbscan: Dict[str, Any] = field(default_factory=lambda: {
+        # None = max(50, 0.05% × 带内体元数)
+        'min_cluster_size': None,
+        'min_samples': None,
+        'cluster_selection_epsilon': 0.0,
+        'metric': 'euclidean',
+        # 全带体元过多时在子样本上拟合，再 approximate_predict 赋全量标签
+        'fit_max_points': 200_000,
+        'assign_noise_to_nearest': True,
+        'random_state': RANDOM_SEED,
+    })
+
+    # ==================== 层次聚类 ====================
+    hierarchical: Dict[str, Any] = field(default_factory=lambda: {
+        'linkage': 'ward',          # 'ward' | 'average' | 'complete'
+        'n_clusters': None,         # None = 沿用分带 fixed_k
+        'fit_max_points': 20_000,   # Ward 为 O(n²)；10 万点/带需 15–30 min，2 万约 1–3 min
+        'respect_fixed_k': True,
+        'dendrogram_sample': 5000,  # 树状图绘制的子样本规模
+        'random_state': RANDOM_SEED,
     })
 
     # ==================== 预处理配置 ====================
     preprocessing: Dict[str, Any] = field(default_factory=lambda: {
         # 统一截到 1000 km（含 SinoScope 原始数据更深部分）
         'depth_range': [0, 1000],
-        # 扰动域：相对各深度水平平均 1D 参考，δlnV = ln(V/V_ref)
+        # 扰动域：δlnV = ln(V/V_ref)；优先模型原生 vp0/vs0，缺失时水平平均 1D
         'perturbation': {
             'enabled': True,
             'method': 'dln',  # 'dln' | 'relative'=(V-Vref)/Vref
-            'reference': 'horizontal_mean',  # 与 2_1 一致
+            'reference': 'model_native',  # 'model_native' | 'horizontal_mean'
+        },
+        # 坐标增广：把经度/纬度/深度并入特征空间（Hao et al. 2026 的做法）
+        #
+        # ⚠️ 该选项会改变聚类的性质，默认关闭。加入坐标后距离度量同时包含
+        # 空间邻近性，簇被算法强制成空间紧致的块体，此时"簇边界与构造单元
+        # 吻合"部分是算法造成的，而非从速度结构中发现的。用于对照实验时
+        # 必须在结论中声明这一点。
+        'coordinates': {
+            'enabled': False,
+            # 可选 'longitude' | 'latitude' | 'depth'
+            'components': ['longitude', 'latitude', 'depth'],
         },
         'normalization': {
             'enabled': True,
@@ -190,7 +329,7 @@ class ClusteringConfig:
                         'mask': 'above_moho',
                         'depth_cap': 410,
                         'min_clusters': 2,
-                        'max_clusters': 10,
+                        'max_clusters': 15,
                         # 地质先验：研究区内 Hasterok et al. (2022) 地质省
                         # prov_type 面积占比 ≥1% 的类别恰为 10 种（火山弧、
                         # 增生杂岩、造山带、洋壳、陆缘/洋内弧后盆地、克拉通、
@@ -202,7 +341,7 @@ class ClusteringConfig:
                         'mask': 'moho_to_depth',
                         'depth_range': [None, 410],
                         'min_clusters': 2,
-                        'max_clusters': 10,
+                        'max_clusters': 15,
                         # 与地壳带取同一 K，便于跨带比较岩石圈—软流圈过渡。
                         # 注意：该值高于本带分辨率上界（动态范围/模型间 RMS
                         # 差异 = 5.0），属可解释性优先的选择，跨模型稳健的
@@ -258,6 +397,10 @@ class ClusteringConfig:
         # 理论上这是必然的：Cai, Campbell & Broderick (2021, ICML) 证明模型
         # 设定只要有任意小偏差，有限混合模型的组分数后验即发散，任何有限 K
         # 的后验概率随 N 趋于 0。故 BIC 只用于定位拐点，不用于断言"真实 K"。
+        #
+        # ── 'bic_knee_silhouette'：BIC 拐点划定下界，其后取轮廓系数局部极大 ──
+        # 与 W-k-means 的 elbow_silhouette 同构：左轴 BIC 曲线定复杂度下界，
+        # 右轴轮廓系数检验簇分离度；最终 K 供自动流水线使用，图件供人工复核。
         #
         # ── 'bic_min'：原始 argmin(BIC)，仅作诊断 ──
         # 体元级数据下必贴 K 上界（理由同上），不建议作为选 K 依据。
@@ -398,6 +541,11 @@ class ClusteringConfig:
             'cluster_profiles': True,
             'feature_distributions': True,
             'cluster_centers': True,
+            # 簇在 (δlnVs, δlnVp) 平面的交会图 + 振幅切分判据 R
+            'cluster_crossplot': True,
+            'cluster_crossplot_3d': True,
+            # GMM 簇心 Ward 谱系树（附录稳健性 / 分量亲缘解释）
+            'centroid_phylogeny': True,
             'velocity_statistics': False,
             'spatial_distribution': False,
             # 三维聚类体 vs Slab2(dep+thk) 体掩膜对比图
@@ -417,6 +565,20 @@ class ClusteringConfig:
         'section_positions': {
             'latitudes': [20, 30, 40],
             'longitudes': [100, 110, 120, 130],
+        },
+        # 特征空间交会图（2-3-12）
+        'crossplot': {
+            # 参考线斜率随特征域而变，两者含义不同，不可混用：
+            #   扰动域 δlnVp = 0.5·δlnVs 为温度主导的热标定关系
+            #   原始域 Vp = √3·Vs 对应泊松固体，是岩性判别的经典参考线
+            'reference_slope_perturbation': 0.5,
+            'reference_slope_raw': 1.732,
+            'max_scatter_points': 25_000,
+            # 首个面板汇总全部深度带，并标出各带在特征空间中的占位
+            'overview_panel': True,
+            # 独立图 2-3-13：δlnVs–δlnVp–depth 三维交会
+            'perturbation_lim_3d': [-20.0, 20.0],  # 超出范围的体元不绘制
+            'max_scatter_points_3d': None,           # None = 范围内全量散点
         },
         'figsize': {
             'slices': (18, 15),
@@ -568,6 +730,23 @@ class NetCDF3DLoader:
                     # 替换无效值
                     data_3d[data_3d == 9999.0] = np.nan
                     data_cube[:, :, :, i] = data_3d
+
+            # 加载扰动参考场（vp0/vs0 等），供 δlnV 计算；不参与聚类特征
+            ref_map = self.config.data.get('reference_features', {})
+            reference_cube: Dict[str, np.ndarray] = {}
+            for feat, ref_name in ref_map.items():
+                if ref_name not in ds:
+                    continue
+                ref_3d = ds[ref_name].values
+                if ref_3d.shape[0] == len(lons) and ref_3d.shape[1] == len(lats):
+                    ref_3d = ref_3d.transpose(1, 0, 2)
+                ref_3d = ref_3d[:, :, depth_mask]
+                ref_3d[ref_3d == 9999.0] = np.nan
+                reference_cube[feat] = ref_3d.astype(np.float32)
+                finite_frac = float(np.isfinite(ref_3d).mean())
+                self.logger.info(
+                    f"  参考场 {ref_name}→{feat}: 有效占比 {finite_frac:.1%}"
+                )
             
             ds.close()
             
@@ -578,6 +757,7 @@ class NetCDF3DLoader:
                 'lons': lons,
                 'depths': depths_filtered,
                 'features': features_to_load,
+                'reference_cube': reference_cube,
                 'dims': (n_lats, n_lons, n_depths),
                 'spatial_range': {
                     'lat': (float(lats.min()), float(lats.max())),
@@ -624,7 +804,7 @@ class DataCube3DProcessor:
         self.config = config
         self.logger = logger
         self.scaler: Optional[Any] = None
-        self.reference_1d: Dict[str, np.ndarray] = {}
+        self.reference_1d: Dict[str, Any] = {}
         # 未标准化的 3D 特征立方体 (lat, lon, depth, feat)，供剖面叠图
         self.last_feature_cube: Optional[np.ndarray] = None
 
@@ -654,7 +834,8 @@ class DataCube3DProcessor:
         pert_cfg = self.config.preprocessing.get('perturbation', {})
         if pert_cfg.get('enabled', False):
             working_cube, ref_1d = self._to_perturbation(
-                data_cube, metadata['depths'], metadata['features'], pert_cfg
+                data_cube, metadata['depths'], metadata['features'], pert_cfg,
+                reference_cube=metadata.get('reference_cube'),
             )
             self.reference_1d = ref_1d
             method = pert_cfg.get('method', 'dln')
@@ -664,7 +845,7 @@ class DataCube3DProcessor:
                 for f in metadata['features']
             ]
             prep_info['preprocessing_steps'].append(
-                f"扰动转换({method}, ref={pert_cfg.get('reference', 'horizontal_mean')})"
+                f"扰动转换({method}, ref={ref_1d.get('_source', pert_cfg.get('reference', 'model_native'))})"
             )
             self.logger.info(f"  特征空间: {prep_info['feature_space']}")
 
@@ -675,6 +856,20 @@ class DataCube3DProcessor:
         X, spatial_indices = self._extract_valid_points(working_cube)
         prep_info['n_valid_points'] = len(X)
         self.logger.info(f"  有效数据点: {len(X):,}")
+
+        # 坐标增广（默认关闭；开启后聚类同时受空间邻近性约束）
+        coord_cfg = self.config.preprocessing.get('coordinates', {})
+        if coord_cfg.get('enabled', False):
+            X, coord_names = self._append_coordinates(
+                X, spatial_indices, metadata,
+                coord_cfg.get('components', ['longitude', 'latitude', 'depth']),
+            )
+            prep_info['feature_names'] = list(prep_info['feature_names']) + coord_names
+            prep_info['preprocessing_steps'].append(
+                f"坐标增广({'+'.join(coord_names)})"
+            )
+            prep_info['coordinates_appended'] = coord_names
+            self.logger.info(f"  坐标增广: +{', '.join(coord_names)}")
 
         # 标准化（在扰动域上做，避免深度趋势主导）
         if self.config.preprocessing['normalization']['enabled']:
@@ -696,31 +891,54 @@ class DataCube3DProcessor:
         depths: np.ndarray,
         features: List[str],
         pert_cfg: Dict[str, Any],
+        reference_cube: Optional[Dict[str, np.ndarray]] = None,
     ) -> Tuple[np.ndarray, Dict[str, np.ndarray]]:
         """
-        将绝对速度转为相对水平平均 1D 参考的扰动
+        将绝对速度转为 δlnV 或相对扰动。
 
-        δlnV = ln(V / V_ref)  或  δV/V = (V - V_ref) / V_ref
+        参考优先级（reference='model_native' 时）：
+        1. NetCDF 原生参考场 vp0/vs0（EARA2024、FWEA23 等）
+        2. 各深度水平平均 1D 剖面（SinoScope1.0 等无参考场模型，与 2_1 一致）
         """
         method = pert_cfg.get('method', 'dln')
+        ref_mode = pert_cfg.get('reference', 'model_native')
         n_features = data_cube.shape[-1]
         out = np.full_like(data_cube, np.nan, dtype=np.float64)
-        ref_1d: Dict[str, np.ndarray] = {'depth': np.asarray(depths, dtype=float)}
+        ref_1d: Dict[str, Any] = {'depth': np.asarray(depths, dtype=float)}
+        reference_cube = reference_cube or {}
+        used_native = False
+        used_fallback_features: List[str] = []
 
         for f_idx in range(n_features):
             slab = data_cube[:, :, :, f_idx]
-            v_ref = np.nanmean(slab, axis=(0, 1))  # (n_depths,)
-            v_ref = np.where(np.isfinite(v_ref) & (v_ref > 0), v_ref, np.nan)
             feat_name = features[f_idx] if f_idx < len(features) else f'f{f_idx}'
-            ref_1d[feat_name] = v_ref
+
+            v_ref_3d: Optional[np.ndarray] = None
+            if ref_mode == 'model_native' and feat_name in reference_cube:
+                candidate = reference_cube[feat_name]
+                if np.isfinite(candidate).any():
+                    v_ref_3d = candidate
+                    used_native = True
+
+            if v_ref_3d is not None:
+                v_ref = v_ref_3d
+                ref_for_1d = np.nanmean(v_ref, axis=(0, 1))
+            else:
+                v_ref = np.nanmean(slab, axis=(0, 1))  # (n_depths,)
+                v_ref = np.where(np.isfinite(v_ref) & (v_ref > 0), v_ref, np.nan)
+                v_ref = np.broadcast_to(
+                    v_ref[np.newaxis, np.newaxis, :], slab.shape
+                )
+                ref_for_1d = v_ref[0, 0, :]
+                used_fallback_features.append(feat_name)
+
+            ref_1d[feat_name] = ref_for_1d
 
             with np.errstate(divide='ignore', invalid='ignore'):
                 if method == 'relative':
-                    pert = (slab - v_ref[np.newaxis, np.newaxis, :]) / v_ref[
-                        np.newaxis, np.newaxis, :
-                    ]
+                    pert = (slab - v_ref) / v_ref
                 else:
-                    pert = np.log(slab / v_ref[np.newaxis, np.newaxis, :])
+                    pert = np.log(slab / v_ref)
                 pert[~np.isfinite(pert)] = np.nan
             out[:, :, :, f_idx] = pert
 
@@ -730,6 +948,18 @@ class DataCube3DProcessor:
                     f"    {feat_name}: δ 范围 "
                     f"[{np.nanpercentile(finite, 1):.3f}, {np.nanpercentile(finite, 99):.3f}]"
                 )
+
+        if used_native and not used_fallback_features:
+            ref_1d['_source'] = 'model_native'
+            self.logger.info("  扰动参考: 模型原生 vp0/vs0")
+        elif used_native and used_fallback_features:
+            ref_1d['_source'] = 'model_native+horizontal_mean'
+            self.logger.info(
+                f"  扰动参考: 混合（原生 + 水平平均回退: {', '.join(used_fallback_features)}）"
+            )
+        else:
+            ref_1d['_source'] = 'horizontal_mean'
+            self.logger.info("  扰动参考: 各深度水平平均 1D（模型无 vp0/vs0）")
 
         return out.astype(np.float32), ref_1d
 
@@ -776,13 +1006,1669 @@ class DataCube3DProcessor:
             )
         return X[sampled_indices_arr], spatial_indices[sampled_indices_arr]
 
+    def _append_coordinates(
+        self,
+        X: np.ndarray,
+        spatial_indices: np.ndarray,
+        metadata: Dict[str, Any],
+        components: List[str],
+    ) -> Tuple[np.ndarray, List[str]]:
+        """
+        把空间坐标作为额外特征列拼接到特征矩阵
+
+        坐标取网格实际值（经纬度为度、深度为 km），后续统一标准化，
+        因此各坐标的原始量纲差异不会直接转化为权重差异。
+
+        Args:
+            X: (n_points, n_features) 特征矩阵
+            spatial_indices: (n_points, 3) → [lat_idx, lon_idx, depth_idx]
+            metadata: 含 lats / lons / depths 的元数据
+            components: 需要拼接的坐标名列表
+
+        Returns:
+            (增广后的特征矩阵, 新增列名列表)
+        """
+        axis_map = {
+            'latitude': (np.asarray(metadata['lats'], dtype=float), 0),
+            'longitude': (np.asarray(metadata['lons'], dtype=float), 1),
+            'depth': (np.asarray(metadata['depths'], dtype=float), 2),
+        }
+        columns: List[np.ndarray] = []
+        names: List[str] = []
+        for comp in components:
+            key = str(comp).lower()
+            if key not in axis_map:
+                self.logger.warning(f"    ⚠️ 未知坐标分量 '{comp}'，已跳过")
+                continue
+            values, idx_col = axis_map[key]
+            columns.append(values[spatial_indices[:, idx_col]])
+            names.append(key)
+
+        if not columns:
+            return X, []
+        return np.hstack([X, np.stack(columns, axis=1)]), names
+
     def _normalize_features(self, X: np.ndarray) -> np.ndarray:
         """特征标准化"""
         method = self.config.preprocessing['normalization']['method']
         self.scaler = StandardScaler() if method == 'standard' else RobustScaler()
         return self.scaler.fit_transform(X)
 
-class GMMAutoClusteringOptimizer:
+class WKMeans:
+    """
+    特征加权 k-means（W-k-means, Huang et al. 2005, IEEE TPAMI 27(5): 657-668）
+
+    在标准 k-means 的基础上，把特征权重 w_j 也作为待优化变量，目标函数为
+
+        P(U, Z, W) = Σ_l Σ_i Σ_j u_il · w_j^β · (x_ij - z_lj)²
+        s.t.  Σ_l u_il = 1, u_il ∈ {0,1};  Σ_j w_j = 1, 0 ≤ w_j ≤ 1
+
+    通过交替固定两组变量求另一组的极小值迭代求解，三步均有闭式解，
+    目标函数单调不增，因此必然收敛到局部极小（Huang et al. 2005, Thm 1-3）。
+
+    权重闭式解为 w_j ∝ D_j^{-1/(β-1)}，其中 D_j = Σ_l Σ_{i∈l} (x_ij - z_lj)²
+    为特征 j 的簇内总离散度。即簇内离散度越大的特征权重越小——该特征对
+    当前划分的贡献越弱，越应被抑制。
+
+    参数 β 控制加权强度：β → ∞ 时权重趋于均匀（退化为标准 k-means），
+    β → 1⁺ 时权重趋于集中在单一特征。Huang et al. (2005) 证明 β ∈ [0,1]
+    时迭代不收敛，故 β 必须取该区间之外的值。
+
+    Args:
+        n_clusters: 簇数 K
+        beta: 权重调节参数，须满足 beta > 1 或 beta < 0
+        max_iter: 最大迭代轮数
+        tol: 目标函数相对变化收敛阈值
+        n_init: 不同初始化的重复次数，取目标函数最小者
+        random_state: 随机种子
+        chunk_size: 分配步的分块大小，控制距离矩阵内存占用
+    """
+
+    def __init__(
+        self,
+        n_clusters: int,
+        beta: float = 6.5,
+        max_iter: int = 100,
+        tol: float = 1e-6,
+        n_init: int = 5,
+        random_state: int = RANDOM_SEED,
+        chunk_size: int = 200_000,
+    ):
+        if 0.0 <= beta <= 1.0:
+            raise ValueError(
+                f"beta 必须位于 [0, 1] 之外（Huang et al. 2005），当前 beta={beta}"
+            )
+        self.n_clusters = int(n_clusters)
+        self.beta = float(beta)
+        self.max_iter = int(max_iter)
+        self.tol = float(tol)
+        self.n_init = int(n_init)
+        self.random_state = int(random_state)
+        self.chunk_size = int(chunk_size)
+
+        self.cluster_centers_: Optional[np.ndarray] = None
+        self.feature_weights_: Optional[np.ndarray] = None
+        self.labels_: Optional[np.ndarray] = None
+        self.inertia_: float = np.inf
+        self.n_iter_: int = 0
+        self.converged_: bool = False
+
+    def _assign(
+        self, X: np.ndarray, centers: np.ndarray, w_pow: np.ndarray
+    ) -> Tuple[np.ndarray, float]:
+        """
+        分配步：在加权平方欧氏距离下把每个样本指派到最近的簇中心
+
+        Args:
+            X: (n_samples, n_features) 特征矩阵
+            centers: (n_clusters, n_features) 簇中心
+            w_pow: (n_features,) 已取过 β 次幂的特征权重
+
+        Returns:
+            (labels, objective) 标签数组与目标函数值
+        """
+        n = len(X)
+        labels = np.empty(n, dtype=np.int32)
+        objective = 0.0
+        for start in range(0, n, self.chunk_size):
+            stop = min(start + self.chunk_size, n)
+            chunk = X[start:stop]
+            # (chunk, K)：Σ_j w_j^β (x_ij - z_lj)²
+            diff = chunk[:, None, :] - centers[None, :, :]
+            dist = np.einsum('nkj,j->nk', diff ** 2, w_pow)
+            idx = np.argmin(dist, axis=1)
+            labels[start:stop] = idx
+            objective += float(dist[np.arange(stop - start), idx].sum())
+        return labels, objective
+
+    def _update_centers(
+        self, X: np.ndarray, labels: np.ndarray, centers: np.ndarray
+    ) -> np.ndarray:
+        """更新步：簇中心取簇内均值；空簇保留原中心以免退化"""
+        new_centers = centers.copy()
+        for l in range(self.n_clusters):
+            mask = labels == l
+            if np.any(mask):
+                new_centers[l] = X[mask].mean(axis=0)
+        return new_centers
+
+    def _update_weights(
+        self, X: np.ndarray, labels: np.ndarray, centers: np.ndarray
+    ) -> np.ndarray:
+        """
+        权重步：按闭式解 w_j ∝ D_j^{-1/(β-1)} 更新特征权重
+
+        若存在 D_j = 0 的特征（该特征在所有簇内完全无离散），则权重全部
+        分配给这些特征，其余置零——这是 Huang et al. (2005) 的边界情形处理。
+        """
+        n_features = X.shape[1]
+        dispersion = np.zeros(n_features, dtype=float)
+        for l in range(self.n_clusters):
+            mask = labels == l
+            if np.any(mask):
+                dispersion += ((X[mask] - centers[l]) ** 2).sum(axis=0)
+
+        zero = dispersion <= 0
+        if np.any(zero):
+            weights = np.zeros(n_features, dtype=float)
+            weights[zero] = 1.0 / int(np.count_nonzero(zero))
+            return weights
+
+        exponent = 1.0 / (self.beta - 1.0)
+        inv = dispersion ** (-exponent)
+        return inv / inv.sum()
+
+    def _fit_once(
+        self, X: np.ndarray, rng: np.random.Generator
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, float, int, bool]:
+        """单次初始化下的完整迭代"""
+        n_features = X.shape[1]
+        # k-means++ 初始化中心，权重从均匀开始
+        centers, _ = kmeans_plusplus(
+            X, n_clusters=self.n_clusters,
+            random_state=int(rng.integers(0, 2 ** 31 - 1)),
+        )
+        centers = np.asarray(centers, dtype=float)
+        weights = np.full(n_features, 1.0 / n_features, dtype=float)
+
+        prev_obj = np.inf
+        labels = np.zeros(len(X), dtype=np.int32)
+        converged = False
+        n_iter = 0
+
+        for n_iter in range(1, self.max_iter + 1):
+            labels, _ = self._assign(X, centers, weights ** self.beta)
+            centers = self._update_centers(X, labels, centers)
+            weights = self._update_weights(X, labels, centers)
+            # 三步更新后重新计算目标函数，保证与最终 (U, Z, W) 一致
+            _, obj = self._assign(X, centers, weights ** self.beta)
+
+            if prev_obj < np.inf:
+                rel = abs(prev_obj - obj) / max(abs(prev_obj), 1e-300)
+                if rel < self.tol:
+                    prev_obj = obj
+                    converged = True
+                    break
+            prev_obj = obj
+
+        return labels, centers, weights, float(prev_obj), n_iter, converged
+
+    def fit(self, X: np.ndarray) -> 'WKMeans':
+        """
+        拟合模型
+
+        Args:
+            X: (n_samples, n_features) 特征矩阵，应事先标准化
+
+        Returns:
+            self
+        """
+        X = np.asarray(X, dtype=float)
+        if X.ndim != 2:
+            raise ValueError(f"X 必须为二维数组，当前 shape={X.shape}")
+        if len(X) < self.n_clusters:
+            raise ValueError(f"样本数 {len(X)} 少于簇数 {self.n_clusters}")
+
+        rng = np.random.default_rng(self.random_state)
+        best = None
+        for _ in range(max(1, self.n_init)):
+            result = self._fit_once(X, rng)
+            if best is None or result[3] < best[3]:
+                best = result
+
+        assert best is not None
+        (self.labels_, self.cluster_centers_, self.feature_weights_,
+         self.inertia_, self.n_iter_, self.converged_) = best
+        return self
+
+    def predict(self, X: np.ndarray) -> np.ndarray:
+        """
+        用已拟合的中心与权重为新样本分配簇标签
+
+        Args:
+            X: (n_samples, n_features) 特征矩阵
+
+        Returns:
+            (n_samples,) 簇标签
+        """
+        if self.cluster_centers_ is None or self.feature_weights_ is None:
+            raise RuntimeError("WKMeans 尚未拟合，请先调用 fit()")
+        labels, _ = self._assign(
+            np.asarray(X, dtype=float), self.cluster_centers_,
+            self.feature_weights_ ** self.beta,
+        )
+        return labels
+
+    def fit_predict(self, X: np.ndarray) -> np.ndarray:
+        """拟合并返回训练样本的簇标签"""
+        self.fit(X)
+        assert self.labels_ is not None
+        return self.labels_
+
+
+class DepthBandPartitioner:
+    """
+    深度分带划分器（GMM 与 W-k-means 共用）
+
+    把体元按深度带切分是两条聚类路径共同的前置步骤：绝对速度随深度
+    单调增长，不分带时深度趋势会主导整个特征空间，横向结构被淹没。
+    带边界可取固定深度，也可取随位置变化的 Moho 面。
+
+    使用者须提供 self.config / self.logger / self.concordance_eval。
+    """
+
+    config: 'ClusteringConfig'
+    logger: logging.Logger
+    concordance_eval: Optional['GeologyConcordanceEvaluator'] = None
+
+    def _active_scheme(self) -> Tuple[str, Dict[str, Any]]:
+        """返回当前分层方案名与方案配置"""
+        cfg = self.config.depth_stratified
+        scheme = str(cfg.get('scheme', 'fixed_3band'))
+        schemes = cfg.get('schemes', {})
+        if scheme not in schemes:
+            raise ValueError(
+                f"未知分层方案 '{scheme}'，可选: {list(schemes.keys())}"
+            )
+        return scheme, schemes[scheme]
+
+    def _moho_depth_per_point(
+        self,
+        spatial_indices: np.ndarray,
+        metadata: Dict[str, Any],
+    ) -> np.ndarray:
+        """
+        为每个体素取 Moho 深度（km）。
+
+        无覆盖处用 moho_fallback_km，并裁剪到 moho_clip_km。
+        """
+        if self.concordance_eval is None:
+            self.concordance_eval = GeologyConcordanceEvaluator(
+                self.config, self.logger
+            )
+
+        lons = np.asarray(metadata['lons'], dtype=float)
+        lats = np.asarray(metadata['lats'], dtype=float)
+        moho_grid = self.concordance_eval.get_moho_grid(lons, lats)
+        if moho_grid is None:
+            raise RuntimeError(
+                "moho_4band 需要 Moho 数据，但插值失败；请检查 "
+                f"{self.config.geology_concordance.get('moho_file')}"
+            )
+
+        cfg = self.config.depth_stratified
+        fallback = float(cfg.get('moho_fallback_km', 35.0))
+        z_lo, z_hi = cfg.get('moho_clip_km', [10.0, 80.0])
+
+        lat_i = spatial_indices[:, 0].astype(int)
+        lon_i = spatial_indices[:, 1].astype(int)
+        moho_z = moho_grid[lat_i, lon_i].astype(np.float64)
+        n_fallback = int(np.sum(~np.isfinite(moho_z)))
+        moho_z[~np.isfinite(moho_z)] = fallback
+        moho_z = np.clip(moho_z, float(z_lo), float(z_hi))
+
+        self.logger.info(
+            f"  🧭 Moho 分带: 点位={len(moho_z):,}, "
+            f"深度[{moho_z.min():.1f}, {moho_z.max():.1f}] km, "
+            f"回退填充 {n_fallback:,} 点 → {fallback:.1f} km"
+        )
+        return moho_z
+
+    def _build_band_mask(
+        self,
+        band: Dict[str, Any],
+        point_depths: np.ndarray,
+        moho_z: Optional[np.ndarray],
+        is_last: bool,
+        model_z_max: float,
+    ) -> Tuple[np.ndarray, List[float], str]:
+        """
+        构造深度带布尔掩膜。
+
+        Returns:
+            (mask, depth_range_for_log, description)
+        """
+        mask_type = band.get('mask', 'depth_range')
+
+        if mask_type == 'above_moho':
+            if moho_z is None:
+                raise ValueError(f"带 {band['name']} 需要 Moho 场")
+            cap = float(band.get('depth_cap', 410))
+            mask = (point_depths < moho_z) & (point_depths < cap)
+            z_ref = [0.0, float(np.nanmedian(moho_z))]
+            desc = f"z < Moho (median={z_ref[1]:.1f} km, cap={cap:.0f})"
+            return mask, z_ref, desc
+
+        if mask_type == 'moho_to_depth':
+            if moho_z is None:
+                raise ValueError(f"带 {band['name']} 需要 Moho 场")
+            _, z1 = band['depth_range']
+            z1_eff = model_z_max if z1 is None else float(z1)
+            mask = (point_depths >= moho_z) & (point_depths < z1_eff)
+            if is_last:
+                mask = (point_depths >= moho_z) & (point_depths <= z1_eff)
+            z_ref = [float(np.nanmedian(moho_z)), z1_eff]
+            desc = f"Moho ≤ z < {z1_eff:.0f} km (median Moho={z_ref[0]:.1f})"
+            return mask, z_ref, desc
+
+        # 固定深度区间
+        z0, z1 = band['depth_range']
+        z0_eff = 0.0 if z0 is None else float(z0)
+        z1_eff = model_z_max if z1 is None else float(z1)
+        mask = (point_depths >= z0_eff) & (point_depths < z1_eff)
+        if is_last:
+            mask = (point_depths >= z0_eff) & (point_depths <= z1_eff)
+        desc = f"{z0_eff:.0f}-{z1_eff:.0f} km"
+        return mask, [z0_eff, z1_eff], desc
+
+
+class WKMeansClusteringOptimizer(DepthBandPartitioner):
+    """
+    W-k-means 聚类执行器（Huang et al. 2005 特征加权 k-means）
+
+    与 GMM 路径的三点关键差异：
+
+    1. 硬指派，无后验概率。故不产出概率分布图、置信度图与投票权重，
+       所有依赖软后验的下游输出在该路径下不可用。
+    2. 选 K 用肘部法定值、轮廓系数评估（Nainggolan et al., 2019）。
+       k-means 无似然函数，BIC/AIC 无从定义；SSE 随 K 单调下降也不存在
+       极值点，只能以曲率拐点定 K，再用簇内紧致度与簇间分离度加以检验。
+    3. 特征权重由算法自适应求解并作为结果的一部分输出，权重分布本身即
+       "哪个特征在分簇中起作用"的定量答案。
+
+    分带口径与 GMM 路径完全一致（共用 DepthBandPartitioner），保证两条
+    路径的结果可以逐带对照，差异只来自算法而非分区方式。
+    """
+
+    def __init__(self, config: ClusteringConfig, logger: logging.Logger):
+        self.config = config
+        self.logger = logger
+        self.concordance_eval: Optional[GeologyConcordanceEvaluator] = None
+        self.feature_inverse_transform: Optional[Any] = None
+
+    # ==================== 选 K：肘部法 + 轮廓系数 ====================
+
+    @staticmethod
+    def _elbow_k(k_values: np.ndarray, sse: np.ndarray) -> int:
+        """
+        肘部法定 K：SSE-K 曲线上离首末端点连线最远的点
+
+        k-means 的 SSE 随 K 单调下降、无极值点，故须以曲率而非极值定 K。
+        把 (K, SSE) 归一化到单位方形后取到首末连线的最大垂距（Kneedle
+        判据，Satopää et al. 2011），等价于在无量纲曲线上找曲率最大处，
+        避免了"下降幅度小于百分之几即停"这类阈值的任意性。
+
+        Args:
+            k_values: 升序排列的候选 K
+            sse: 对应的簇内平方和
+
+        Returns:
+            肘点对应的 K
+        """
+        k_values = np.asarray(k_values, dtype=float)
+        sse = np.asarray(sse, dtype=float)
+        if len(k_values) < 3:
+            return int(k_values[0])
+
+        span_k = k_values[-1] - k_values[0]
+        span_sse = sse[0] - sse[-1]
+        if span_k <= 0 or not np.isfinite(span_sse) or span_sse <= 0:
+            return int(k_values[0])
+
+        x = (k_values - k_values[0]) / span_k
+        y = (sse - sse[-1]) / span_sse
+        # 首末点连线为 y = 1 - x，点到该线的距离 ∝ |x + y - 1|
+        dist = np.abs(x + y - 1.0) / np.sqrt(2.0)
+        return int(k_values[int(np.argmax(dist))])
+
+    def find_optimal_k(
+        self,
+        X: np.ndarray,
+        min_clusters: int,
+        max_clusters: int,
+        band_name: str = '',
+    ) -> Tuple[int, Dict[str, Any]]:
+        """
+        扫描 K 并选定最优值
+
+        流程遵循 Nainggolan et al. (2019)：先以肘部法在 SSE-K 曲线上定 K，
+        再用轮廓系数评估该 K 下簇的紧致度（cohesion）与分离度（separation）。
+        轮廓系数作为检验量而非选择量——它在 K 小时系统性偏高，单独用会把
+        K 压到 2-3，抹掉需要分辨的结构。两者不一致时按配置的 method 取舍，
+        并在日志中记录分歧，供方法学讨论引用。
+
+        Args:
+            X: (n_points, n_features) 标准化特征矩阵
+            min_clusters: 候选 K 下界
+            max_clusters: 候选 K 上界
+            band_name: 深度带名（仅用于日志与诊断记录）
+
+        Returns:
+            (选定的 K, 诊断字典)
+        """
+        cfg = self.config.wkmeans
+        ksel = cfg['k_selection']
+        tag = f"[{band_name}] " if band_name else ""
+
+        k_values = np.arange(int(min_clusters), int(max_clusters) + 1)
+        if len(k_values) == 0:
+            raise ValueError(f"{tag}K 搜索区间为空")
+
+        X_fit = self._subsample(X, ksel['scan_max_points'], seed_offset=0)
+
+        sse: List[float] = []
+        sil: List[float] = []
+        sil_sd: List[float] = []
+        self.logger.info(
+            f"  🔍 {tag}扫描 K={k_values[0]}-{k_values[-1]}"
+            f"（拟合点数 {len(X_fit):,}"
+            f"{'，全量' if len(X_fit) == len(X) else f'/{len(X):,}'}）"
+        )
+        t_scan = time.time()
+        for k in k_values:
+            model = WKMeans(
+                n_clusters=int(k),
+                beta=float(cfg['beta']),
+                n_init=int(ksel['scan_n_init']),
+                max_iter=int(cfg['max_iter']),
+                random_state=int(cfg['random_state']),
+            ).fit(X_fit)
+            labels_k = model.predict(X_fit)
+            sse.append(float(model.inertia_))
+            m, sd = self._silhouette_repeated(X_fit, labels_k)
+            sil.append(m)
+            sil_sd.append(sd)
+            self.logger.info(
+                f"    K={k:>2}: SSE={sse[-1]:.5f}  "
+                f"silhouette={m:.4f}±{sd:.4f}  ({time.time() - t_scan:.0f}s)"
+            )
+
+        sse_arr = np.asarray(sse)
+        sil_arr = np.asarray(sil)
+        sil_sd_arr = np.asarray(sil_sd)
+        k_elbow = self._elbow_k(k_values, sse_arr)
+        k_sil = (
+            int(k_values[int(np.nanargmax(sil_arr))])
+            if np.any(np.isfinite(sil_arr)) else k_elbow
+        )
+
+        k_local = self._silhouette_local_maxima(k_values, sil_arr)
+        method = str(ksel.get('method', 'elbow')).lower()
+
+        if method == 'silhouette':
+            optimal_n = k_sil
+        elif method == 'fixed':
+            optimal_n = int(ksel.get('fixed_k') or k_elbow)
+        elif method == 'elbow_silhouette':
+            # Hao et al. (2026) 图 S39a 的做法：肘点划定下界，其后取轮廓系数的
+            # 局部极大。连续速度场的轮廓曲线常无局部极大，此时回退到肘点。
+            cands = [k for k in k_local if k >= k_elbow]
+            optimal_n = (
+                max(cands, key=lambda k: sil_arr[k_values == k][0])
+                if cands else k_elbow
+            )
+        elif method == 'sse_threshold':
+            optimal_n = self._sse_threshold_k(
+                k_values, sse_arr, float(ksel.get('sse_improvement_threshold', 0.05))
+            )
+        else:
+            optimal_n = k_elbow
+
+        sil_at_opt = float(sil_arr[k_values == optimal_n][0])
+        agree = k_elbow == k_sil
+        self.logger.info(
+            f"  📌 {tag}肘部 K={k_elbow}，轮廓全局最优 K={k_sil}"
+            f"，轮廓局部极大 K={k_local if k_local else '无'}"
+            f" → 采用 K={optimal_n}（{method}），轮廓系数={sil_at_opt:.4f}"
+        )
+
+        return optimal_n, {
+            'band_name': band_name,
+            'k_values': k_values.tolist(),
+            'sse': sse_arr.tolist(),
+            'silhouette': sil_arr.tolist(),
+            'silhouette_sd': sil_sd_arr.tolist(),
+            'n_points_scanned': int(len(X_fit)),
+            'k_elbow': int(k_elbow),
+            'k_silhouette': int(k_sil),
+            'k_local_maxima': [int(k) for k in k_local],
+            'optimal_n': int(optimal_n),
+            'silhouette_at_optimal': sil_at_opt,
+            'selection_rule': method,
+            'elbow_silhouette_agree': bool(agree),
+        }
+
+    @staticmethod
+    def _silhouette_local_maxima(
+        k_values: np.ndarray, sil: np.ndarray
+    ) -> List[int]:
+        """
+        找出轮廓系数曲线的内部局部极大点
+
+        Hao et al. (2026) 在 SE Tibet 的 5 维特征空间（含经纬度、深度）里，
+        轮廓曲线有明确的局部峰，故可据此定 K。空间坐标把数据切成有间隙的
+        团块是该峰出现的前提；纯速度特征的连续场点云无此间隙，曲线通常单调
+        下降。返回空列表即表明该带不具备这一结构。
+        """
+        return [
+            int(k_values[i])
+            for i in range(1, len(sil) - 1)
+            if sil[i] > sil[i - 1] and sil[i] > sil[i + 1]
+        ]
+
+    @staticmethod
+    def _sse_threshold_k(
+        k_values: np.ndarray, sse: np.ndarray, threshold: float
+    ) -> int:
+        """
+        取边际 SSE 改善首次低于总降幅给定比例处的 K
+
+        判据为 (SSE[k-1] - SSE[k]) / (SSE[k_min] - SSE[k_max]) < threshold。
+        与 Kneedle 相比不依赖曲线整体形状，只看逐步收益，在光滑凸曲线上
+        通常给出比拐点更大的 K。
+        """
+        total = float(sse[0] - sse[-1])
+        if total <= 0:
+            return int(k_values[0])
+        gains = -np.diff(sse) / total
+        below = np.where(gains < threshold)[0]
+        return int(k_values[below[0] + 1]) if below.size else int(k_values[-1])
+
+    def scan_beta(
+        self,
+        X: np.ndarray,
+        n_clusters: int,
+        band_name: str = '',
+    ) -> Dict[str, Any]:
+        """
+        扫描权重指数 β 并按平均轮廓系数定值（Hao et al., 2026 图 S39b）
+
+        β 控制权重分布的锐度：β→1⁺ 时权重塌缩到方差贡献最小的单一特征，
+        β 增大则权重趋于均分，中间存在一个轮廓系数的平台区。本项目默认沿用
+        原文的 β=6.5，但该值是在 SE Tibet 的 5 维特征空间上标定的，特征数与
+        量纲都与本项目不同，直接沿用缺乏依据——本方法即用于自行标定。
+
+        Args:
+            X: 标准化特征矩阵
+            n_clusters: 扫描时固定的簇数
+            band_name: 深度带名（日志用）
+
+        Returns:
+            含 beta_values / silhouette / best_beta 的诊断字典
+        """
+        cfg = self.config.wkmeans
+        bcfg = cfg['beta_selection']
+        tag = f"[{band_name}] " if band_name else ""
+
+        betas = np.arange(
+            float(bcfg['beta_min']),
+            float(bcfg['beta_max']) + 1e-9,
+            float(bcfg['beta_step']),
+        )
+        X_fit = self._subsample(X, bcfg['scan_max_points'], seed_offset=1)
+        self.logger.info(
+            f"  🔍 {tag}扫描 β={betas[0]:.1f}-{betas[-1]:.1f}"
+            f"（{len(betas)} 点，K={n_clusters}）"
+        )
+
+        sils: List[float] = []
+        weights: List[List[float]] = []
+        for b in betas:
+            try:
+                m = WKMeans(
+                    n_clusters=int(n_clusters), beta=float(b),
+                    n_init=1, max_iter=int(cfg['max_iter']),
+                    random_state=int(cfg['random_state']),
+                ).fit(X_fit)
+                lab = m.predict(X_fit)
+                sils.append(self._silhouette_repeated(X_fit, lab)[0])
+                weights.append(np.asarray(m.feature_weights_).tolist())
+            except Exception as e:
+                self.logger.debug(f"    β={b:.1f} 失败: {e}")
+                sils.append(float('nan'))
+                weights.append([])
+
+        sil_arr = np.asarray(sils)
+        best_beta = float(betas[int(np.nanargmax(sil_arr))])
+        self.logger.info(
+            f"  📌 {tag}最优 β={best_beta:.1f}"
+            f"（轮廓系数={np.nanmax(sil_arr):.4f}；当前采用 β={cfg['beta']}）"
+        )
+        return {
+            'band_name': band_name,
+            'n_clusters': int(n_clusters),
+            'beta_values': betas.tolist(),
+            'silhouette': sil_arr.tolist(),
+            'feature_weights': weights,
+            'best_beta': best_beta,
+            'beta_in_use': float(cfg['beta']),
+        }
+
+    # ==================== 单次聚类 ====================
+
+    def _subsample(
+        self, X: np.ndarray, max_points: Optional[int], seed_offset: int = 0
+    ) -> np.ndarray:
+        """
+        按需抽样以控制拟合开销
+
+        max_points 为 None 或 0 时返回全量数据——这是本项目的默认设置：
+        W-k-means 的每次迭代是 O(n·k·d)，全量拟合只增加线性时间。
+        """
+        if not max_points or len(X) <= int(max_points):
+            return X
+        rng = np.random.default_rng(
+            int(self.config.wkmeans['random_state']) + seed_offset
+        )
+        return X[rng.choice(len(X), int(max_points), replace=False)]
+
+    def _silhouette_repeated(
+        self, X: np.ndarray, labels: np.ndarray
+    ) -> Tuple[float, float]:
+        """
+        在多个独立子样本上重复估计轮廓系数
+
+        轮廓系数需要全部点对距离，复杂度 O(n²)，单带体元数达百万量级时
+        无法全量计算。重复抽样给出估计量的均值与标准差：标准差远小于不同
+        K 之间的差异时，即可确证子样本规模足以支撑选 K 判断。
+
+        Args:
+            X: 特征矩阵（全量）
+            labels: 对应的簇标签（全量）
+
+        Returns:
+            (均值, 标准差)；无法计算时返回 (nan, nan)
+        """
+        ksel = self.config.wkmeans['k_selection']
+        size = min(int(ksel['silhouette_sample_size']), len(X))
+        n_rep = int(ksel.get('silhouette_n_repeats', 1))
+        vals: List[float] = []
+        for r in range(n_rep):
+            try:
+                vals.append(float(silhouette_score(
+                    X, labels, sample_size=size,
+                    random_state=RANDOM_SEED + r,
+                )))
+            except Exception as e:
+                self.logger.debug(f"    轮廓系数第 {r} 次估计失败: {e}")
+        if not vals:
+            return float('nan'), float('nan')
+        return float(np.mean(vals)), float(np.std(vals))
+
+    def perform_clustering(
+        self,
+        X: np.ndarray,
+        n_clusters: int,
+        band_name: str = '',
+        sort_col: Optional[int] = None,
+    ) -> Tuple[np.ndarray, WKMeans, Dict[str, Any]]:
+        """
+        以给定 K 执行一次 W-k-means
+
+        Args:
+            X: 标准化特征矩阵
+            n_clusters: 簇数
+            band_name: 深度带名（日志用）
+            sort_col: 簇编号排序依据的特征列（通常为 Vs 列）；None 则不排序
+
+        Returns:
+            (标签, 已拟合模型, 指标字典)
+        """
+        cfg = self.config.wkmeans
+        tag = f"[{band_name}] " if band_name else ""
+        t0 = time.time()
+
+        X_fit = self._subsample(X, cfg['fit_max_points'])
+        model = WKMeans(
+            n_clusters=int(n_clusters),
+            beta=float(cfg['beta']),
+            n_init=int(cfg['n_init']),
+            max_iter=int(cfg['max_iter']),
+            random_state=int(cfg['random_state']),
+        ).fit(X_fit)
+        labels = model.predict(X)
+
+        if sort_col is not None:
+            labels = self._order_clusters(labels, model, int(sort_col))
+
+        fit_time = time.time() - t0
+        metrics = self._compute_metrics(X, labels, model, fit_time)
+        self.logger.info(
+            f"  ✅ {tag}K={n_clusters}  N={len(X_fit):,}"
+            f"  轮廓系数={metrics['silhouette_score']:.4f}"
+            f"±{metrics['silhouette_score_sd']:.4f}"
+            f"  收敛={'是' if model.converged_ else '否'}"
+            f"  迭代={model.n_iter_}  用时={fit_time:.1f}s"
+        )
+        return labels, model, metrics
+
+    @staticmethod
+    def _order_clusters(
+        labels: np.ndarray, model: WKMeans, sort_col: int
+    ) -> np.ndarray:
+        """
+        按簇中心在指定特征列上的取值升序重排簇编号（就地同步模型参数）
+
+        k-means 的簇索引由初始化随机决定，本身不含信息。按 Vs 升序重排后
+        C0 = 最慢、C_{K-1} = 最快，编号即携带物理含义，配色可固定，跨带与
+        跨模型的簇也能直接对应。标准化是单调仿射变换，故在标准化域上排序
+        等价于在物理速度上排序。
+        """
+        centers = np.asarray(model.cluster_centers_)
+        if sort_col >= centers.shape[1]:
+            return labels
+
+        order = np.argsort(centers[:, sort_col], kind='stable')
+        if np.array_equal(order, np.arange(order.size)):
+            return labels
+
+        remap = np.empty(order.size, dtype=labels.dtype)
+        remap[order] = np.arange(order.size, dtype=labels.dtype)
+        model.cluster_centers_ = centers[order]
+        return remap[labels]
+
+    def _compute_metrics(
+        self,
+        X: np.ndarray,
+        labels: np.ndarray,
+        model: WKMeans,
+        fit_time: float,
+    ) -> Dict[str, Any]:
+        """
+        计算聚类质量指标
+
+        Davies-Bouldin 与 Calinski-Harabasz 只需簇心与簇内离散度，复杂度
+        O(n·k)，故在全量体元上计算。轮廓系数需全部点对距离，复杂度 O(n²)，
+        改用重复子样本估计并同时报告标准差。
+        """
+        metrics: Dict[str, Any] = {
+            'inertia': float(model.inertia_),
+            'converged': bool(model.converged_),
+            'n_iter': int(model.n_iter_),
+            'fit_time': float(fit_time),
+            'n_points': int(len(X)),
+            'feature_weights': np.asarray(model.feature_weights_).tolist(),
+        }
+        for name, fn in (
+            ('davies_bouldin_score', davies_bouldin_score),
+            ('calinski_harabasz_score', calinski_harabasz_score),
+        ):
+            try:
+                metrics[name] = float(fn(X, labels))
+            except Exception as e:
+                self.logger.warning(f"    ⚠️ {name} 计算失败: {e}")
+                metrics[name] = float('nan')
+
+        sil_mean, sil_sd = self._silhouette_repeated(X, labels)
+        metrics['silhouette_score'] = sil_mean
+        metrics['silhouette_score_sd'] = sil_sd
+
+        _, counts = np.unique(labels[labels >= 0], return_counts=True)
+        metrics['cluster_balance'] = (
+            float(np.std(counts) / np.mean(counts)) if counts.size else float('nan')
+        )
+        return metrics
+
+    # ==================== 深度分带 ====================
+
+    def perform_depth_stratified_clustering(
+        self,
+        X: np.ndarray,
+        spatial_indices: np.ndarray,
+        metadata: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """
+        按深度带分别做 W-k-means，再拼回全局标签
+
+        分带与 GMM 路径共用同一套带定义与 Moho 面，故两条路径的结果可以
+        逐带对照。每带独立选 K（肘部法 + 轮廓系数），带内簇按 Vs 升序编号，
+        带间用 label_offset 隔开以保证全局标签唯一。
+
+        Args:
+            X: (n_points, n_features) 标准化特征矩阵
+            spatial_indices: (n_points, 3) → [lat_idx, lon_idx, depth_idx]
+            metadata: 含 lats / lons / depths / dims / features 的元数据
+
+        Returns:
+            聚类结果字典（mode='depth_stratified'）
+        """
+        depths = np.asarray(metadata['depths'], dtype=float)
+        dims = metadata['dims']
+
+        feature_names = [str(f).lower() for f in metadata.get('features', [])]
+        sort_col = feature_names.index('vs') if 'vs' in feature_names else None
+        if sort_col is None and feature_names:
+            sort_col = 0
+            self.logger.warning("  ⚠️ 特征中无 vs，簇排序退回首个特征列")
+
+        scheme, scheme_cfg = self._active_scheme()
+        bands = scheme_cfg['bands']
+        offset_labels = self.config.depth_stratified.get(
+            'offset_labels_across_bands', True
+        )
+        ksel = self.config.wkmeans['k_selection']
+
+        self.logger.info(f"  📚 分层方案: {scheme}（{len(bands)} 带）")
+
+        needs_moho = any(
+            b.get('mask') in ('above_moho', 'moho_to_depth') for b in bands
+        )
+        moho_z = (
+            self._moho_depth_per_point(spatial_indices, metadata)
+            if needs_moho else None
+        )
+
+        global_labels = np.full(len(X), -1, dtype=np.int32)
+        per_band: Dict[str, Any] = {}
+        label_offset = 0
+        total_fit_time = 0.0
+        point_depths = depths[spatial_indices[:, 2]]
+        model_z_max = float(np.nanmax(depths))
+
+        for i_band, band in enumerate(bands):
+            name = band['name']
+            is_last = i_band == len(bands) - 1
+            mask, z_ref, desc = self._build_band_mask(
+                band, point_depths, moho_z, is_last, model_z_max
+            )
+
+            n_band = int(np.sum(mask))
+            self.logger.info(f"  📦 [{name}] {desc}, N={n_band:,}")
+            if n_band < max(int(band['min_clusters']) * 10, 50):
+                self.logger.warning(f"  ⚠️ 深度带 {name} 有效点过少 ({n_band})，跳过")
+                continue
+
+            X_band = X[mask]
+
+            # K 搜索区间：默认沿用分带配置，保证与 GMM 路径的扫描范围一致
+            if ksel.get('use_band_k_range', True):
+                k_lo = int(band['min_clusters'])
+                k_hi = int(band['max_clusters'])
+            else:
+                k_lo = int(ksel['min_clusters'])
+                k_hi = int(ksel['max_clusters'])
+
+            # 分带配置里的 fixed_k 是为 GMM 设的地质省先验，W-k-means 路径
+            # 默认忽略它，由肘部法自行定 K；置 respect_fixed_k=True 可沿用。
+            fixed_k = band.get('fixed_k') if ksel.get('respect_fixed_k', False) else None
+            if fixed_k:
+                optimal_n = int(fixed_k)
+                k_selection = {
+                    'band_name': name,
+                    'optimal_n': optimal_n,
+                    'selection_rule': 'fixed_k',
+                }
+                self.logger.info(f"  📌 [{name}] 先验固定 K={optimal_n}")
+            else:
+                optimal_n, k_selection = self.find_optimal_k(
+                    X_band, k_lo, k_hi, band_name=name
+                )
+
+            if self.config.wkmeans['beta_selection'].get('enabled', False):
+                bsel = self.config.wkmeans['beta_selection']
+                k_selection['beta_scan'] = self.scan_beta(
+                    X_band,
+                    n_clusters=int(bsel.get('n_clusters') or optimal_n),
+                    band_name=name,
+                )
+
+            labels_b, model_b, metrics_b = self.perform_clustering(
+                X_band, n_clusters=optimal_n, band_name=name, sort_col=sort_col
+            )
+            total_fit_time += float(metrics_b.get('fit_time', 0.0))
+
+            if offset_labels:
+                labels_global_b = labels_b + label_offset
+                label_offset += optimal_n
+            else:
+                labels_global_b = labels_b
+
+            global_labels[mask] = labels_global_b
+
+            per_band[name] = {
+                'depth_range': [float(z_ref[0]), float(z_ref[1])],
+                'mask_type': band.get('mask', 'depth_range'),
+                'description': desc,
+                'n_points': n_band,
+                'n_clusters': optimal_n,
+                'labels_local': labels_b,
+                'labels_global': labels_global_b,
+                'model': model_b,
+                'metrics': metrics_b,
+                'k_selection': k_selection,
+                'feature_weights': np.asarray(model_b.feature_weights_),
+                'cluster_centers': self._to_physical(model_b.cluster_centers_),
+                'label_offset': label_offset - optimal_n if offset_labels else 0,
+                'point_mask': mask,
+            }
+
+        if not per_band:
+            raise ValueError("所有深度带均无法完成聚类")
+
+        n_global = int(global_labels.max()) + 1 if global_labels.max() >= 0 else 1
+        labels_3d = Reconstruction3DHelper.reconstruct_3d_labels(
+            global_labels, spatial_indices, dims
+        )
+        valid = global_labels >= 0
+
+        overall_metrics = {
+            'n_clusters': n_global,
+            'n_bands': len(per_band),
+            'scheme': scheme,
+            'fit_time': total_fit_time,
+            'band_optimal_k': {k: v['n_clusters'] for k, v in per_band.items()},
+            'band_feature_weights': {
+                k: v['feature_weights'].tolist() for k, v in per_band.items()
+            },
+            'converged': all(
+                v['metrics'].get('converged', False) for v in per_band.values()
+            ),
+            'n_iter': int(
+                np.sum([v['metrics'].get('n_iter', 0) for v in per_band.values()])
+            ),
+            'inertia': float(
+                np.nansum([v['metrics'].get('inertia', np.nan) for v in per_band.values()])
+            ),
+            'cluster_sizes': {
+                int(k): int(v)
+                for k, v in zip(*np.unique(global_labels[valid], return_counts=True))
+            },
+        }
+        for key in ('silhouette_score', 'davies_bouldin_score',
+                    'calinski_harabasz_score', 'cluster_balance'):
+            overall_metrics[key] = float(np.nanmean(
+                [v['metrics'].get(key, np.nan) for v in per_band.values()]
+            ))
+
+        self.logger.info(
+            f"  📊 全局: {n_global} 簇 / {len(per_band)} 带，"
+            f"各带 K={overall_metrics['band_optimal_k']}，"
+            f"平均轮廓系数={overall_metrics['silhouette_score']:.4f}"
+        )
+
+        return {
+            'algorithm': 'wkmeans',
+            'n_clusters': n_global,
+            'labels': global_labels,
+            'labels_3d': labels_3d,
+            'probabilities': None,
+            'probabilities_3d': None,
+            'model': None,
+            'metrics': overall_metrics,
+            'per_band': per_band,
+            'k_selection': {k: v['k_selection'] for k, v in per_band.items()},
+            'mode': 'depth_stratified',
+            'scheme': scheme,
+        }
+
+    # ==================== 全深度（径向分层） ====================
+
+    def perform_full_depth_clustering(
+        self,
+        X: np.ndarray,
+        spatial_indices: np.ndarray,
+        metadata: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """
+        0-1000 km 一次性聚类，簇按平均深度重排为径向序列
+
+        不分带时绝对速度的深度趋势主导特征空间，簇必然构成径向壳层。这不是
+        缺陷而是另一种用法：层界深度是有量纲的物理量，其横向起伏可直接与
+        410/660 km 相变面对照，且不受簇编号任意性影响，跨模型可比。
+
+        Args:
+            X: 标准化特征矩阵
+            spatial_indices: (n_points, 3) 空间索引
+            metadata: 含 depths / dims / features 的元数据
+
+        Returns:
+            聚类结果字典（mode='full_depth'），另含 feature_weights 与 radial_stats
+        """
+        cfg = self.config.wkmeans
+        ksel = cfg['k_selection']
+
+        if str(ksel.get('method', 'elbow')).lower() == 'fixed':
+            k = int(ksel.get('fixed_k') or cfg['n_clusters'])
+            k_selection = {'optimal_n': k, 'selection_rule': 'fixed_k'}
+        else:
+            k, k_selection = self.find_optimal_k(
+                X, int(ksel['min_clusters']), int(ksel['max_clusters'])
+            )
+
+        labels, model, metrics = self.perform_clustering(X, n_clusters=k)
+
+        depths = np.asarray(metadata['depths'], dtype=float)
+        point_depth = depths[spatial_indices[:, 2]]
+        centers = np.asarray(model.cluster_centers_, dtype=float)
+        if cfg.get('order_by_depth', True):
+            labels, centers = self._order_by_depth(labels, centers, point_depth, k)
+
+        centers_physical = self._to_physical(centers)
+        radial_stats = self._radial_stats(
+            labels, centers_physical, point_depth, metadata, k
+        )
+        labels_3d = Reconstruction3DHelper.reconstruct_3d_labels(
+            labels, spatial_indices, metadata['dims']
+        )
+
+        weights = np.asarray(model.feature_weights_, dtype=float)
+        metrics['band_optimal_k'] = None
+        self.logger.info(
+            "    特征权重: " + '  '.join(
+                f'{n}={w:.3f}' for n, w in zip(
+                    metadata.get('feature_display_names',
+                                 metadata.get('features', [])), weights)
+            )
+        )
+
+        return {
+            'algorithm': 'wkmeans',
+            'n_clusters': k,
+            'labels': labels,
+            'labels_3d': labels_3d,
+            'probabilities': None,
+            'probabilities_3d': None,
+            'model': model,
+            'metrics': metrics,
+            'per_band': None,
+            'k_selection': {'all': k_selection},
+            'mode': 'full_depth',
+            'feature_weights': weights,
+            'cluster_centers': centers_physical,
+            'radial_stats': radial_stats,
+        }
+
+    def _to_physical(self, centers: Any) -> np.ndarray:
+        """把标准化域的簇中心反变换回物理量纲，供解释与作图"""
+        centers = np.asarray(centers, dtype=float)
+        if self.feature_inverse_transform is None:
+            return centers
+        try:
+            return self.feature_inverse_transform(centers)
+        except Exception as e:
+            self.logger.warning(f"    ⚠️ 簇中心反标准化失败: {e}")
+            return centers
+
+    @staticmethod
+    def _order_by_depth(
+        labels: np.ndarray,
+        centers: np.ndarray,
+        point_depth: np.ndarray,
+        k: int,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """按簇平均深度重排簇编号，0 为最浅"""
+        mean_depth = np.array([
+            point_depth[labels == l].mean() if np.any(labels == l) else np.inf
+            for l in range(k)
+        ])
+        order = np.argsort(mean_depth)
+        remap = np.empty(k, dtype=labels.dtype)
+        remap[order] = np.arange(k, dtype=labels.dtype)
+        return remap[labels], centers[order]
+
+    def _radial_stats(
+        self,
+        labels: np.ndarray,
+        centers_physical: np.ndarray,
+        point_depth: np.ndarray,
+        metadata: Dict[str, Any],
+        k: int,
+    ) -> pd.DataFrame:
+        """
+        统计各簇的深度占位与物理量纲簇中心
+
+        Returns:
+            含 cluster / 各特征中心 / depth_p05 / depth_mean / depth_p95 /
+            volume_frac 的数据表，按径向次序排列
+        """
+        names = list(
+            metadata.get('feature_display_names')
+            or metadata.get('features', [])
+        )
+        rows: List[Dict[str, Any]] = []
+        for l in range(k):
+            m = labels == l
+            if not np.any(m):
+                continue
+            zl = point_depth[m]
+            row: Dict[str, Any] = {'cluster': l}
+            for j, name in enumerate(names[:centers_physical.shape[1]]):
+                row[f'center_{name}'] = float(centers_physical[l, j])
+            row.update({
+                'depth_p05': float(np.percentile(zl, 5)),
+                'depth_mean': float(zl.mean()),
+                'depth_p95': float(np.percentile(zl, 95)),
+                'volume_frac': float(m.mean()),
+            })
+            rows.append(row)
+        return pd.DataFrame(rows)
+
+
+# ==================== 密度/层次聚类共用工具 ====================
+
+def _clustering_subsample(
+    X: np.ndarray,
+    max_points: Optional[int],
+    seed: int,
+    seed_offset: int = 0,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    按需子采样并返回 (子样本, 在原数组中的索引)
+
+    max_points 为 None 或 0 时返回全量。
+    """
+    if not max_points or len(X) <= int(max_points):
+        return X, np.arange(len(X), dtype=np.int64)
+    rng = np.random.default_rng(int(seed) + seed_offset)
+    idx = rng.choice(len(X), int(max_points), replace=False)
+    return X[idx], idx
+
+
+def _sort_labels_by_feature(
+    X: np.ndarray,
+    labels: np.ndarray,
+    sort_col: int,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """按指定特征列的簇均值升序重排标签"""
+    valid = labels >= 0
+    uniq = np.unique(labels[valid])
+    if uniq.size == 0:
+        return labels, np.zeros((0, X.shape[1]), dtype=float)
+    means = np.array([
+        X[labels == c, sort_col].mean() if np.any(labels == c) else np.inf
+        for c in uniq
+    ])
+    order = np.argsort(means)
+    remap = {int(old): int(new) for new, old in enumerate(uniq[order])}
+    new_labels = labels.copy()
+    for old, new in remap.items():
+        new_labels[labels == old] = new
+    centers = np.array([
+        X[new_labels == new].mean(axis=0) for new in range(len(uniq))
+    ])
+    return new_labels, centers
+
+
+def _assign_nearest_centroid(X: np.ndarray, centers: np.ndarray) -> np.ndarray:
+    """将每个点指派到最近簇心"""
+    if centers.size == 0:
+        return np.full(len(X), -1, dtype=np.int32)
+    d2 = ((X[:, None, :] - centers[None, :, :]) ** 2).sum(axis=2)
+    return np.argmin(d2, axis=1).astype(np.int32)
+
+
+def compute_cross_algorithm_ari(
+    labels_a: np.ndarray,
+    labels_b: np.ndarray,
+    per_band: Dict[str, Any],
+) -> Dict[str, Any]:
+    """
+    逐深度带比较两套硬指派标签的分区一致性（ARI / NMI）。
+
+    标签编号任意，ARI/NMI 对置换不变；不要用原始 label 相等比例代替 ARI。
+    """
+    labels_a = np.asarray(labels_a)
+    labels_b = np.asarray(labels_b)
+    if len(labels_a) != len(labels_b):
+        raise ValueError(
+            f'标签长度不一致: {len(labels_a)} vs {len(labels_b)}'
+        )
+
+    results: Dict[str, Any] = {'overall': {}, 'bands': {}}
+    valid = (labels_a >= 0) & (labels_b >= 0)
+    if np.any(valid):
+        results['overall'] = {
+            'ari': float(adjusted_rand_score(labels_a[valid], labels_b[valid])),
+            'nmi': float(normalized_mutual_info_score(labels_a[valid], labels_b[valid])),
+            'n_points': int(np.sum(valid)),
+        }
+
+    for bname, binfo in per_band.items():
+        pmask = binfo.get('point_mask')
+        if pmask is None:
+            continue
+        pmask = np.asarray(pmask, dtype=bool)
+        m = pmask & valid
+        if not np.any(m):
+            continue
+        la, lb = labels_a[m], labels_b[m]
+        results['bands'][bname] = {
+            'ari': float(adjusted_rand_score(la, lb)),
+            'nmi': float(normalized_mutual_info_score(la, lb)),
+            'n_points': int(np.sum(m)),
+            'n_clusters_a': int(len(np.unique(la))),
+            'n_clusters_b': int(len(np.unique(lb))),
+        }
+    return results
+
+
+class AlternativeClusteringBase(DepthBandPartitioner):
+    """
+    HDBSCAN / 层次聚类共用基类
+
+    提供子采样、轮廓系数估计、分带编排与标签拼合，子类只需实现单带聚类逻辑。
+    """
+
+    algorithm_name: str = 'alt'
+
+    def __init__(self, config: ClusteringConfig, logger: logging.Logger):
+        self.config = config
+        self.logger = logger
+        self.concordance_eval: Optional[GeologyConcordanceEvaluator] = None
+        self.feature_inverse_transform: Optional[Any] = None
+
+    def _sil_cfg(self) -> Dict[str, Any]:
+        """轮廓系数子样本配置（与 W-k-means 共用 wkmeans.k_selection 项）"""
+        return self.config.wkmeans['k_selection']
+
+    def _silhouette_repeated(
+        self, X: np.ndarray, labels: np.ndarray
+    ) -> Tuple[float, float]:
+        ksel = self._sil_cfg()
+        valid = labels >= 0
+        if int(np.sum(valid)) < 3 or len(np.unique(labels[valid])) < 2:
+            return float('nan'), float('nan')
+        size = min(int(ksel['silhouette_sample_size']), int(np.sum(valid)))
+        n_rep = int(ksel.get('silhouette_n_repeats', 1))
+        vals: List[float] = []
+        for r in range(n_rep):
+            try:
+                vals.append(float(silhouette_score(
+                    X[valid], labels[valid],
+                    sample_size=size,
+                    random_state=RANDOM_SEED + r,
+                )))
+            except Exception as e:
+                self.logger.debug(f"    轮廓系数估计失败: {e}")
+        if not vals:
+            return float('nan'), float('nan')
+        return float(np.mean(vals)), float(np.std(vals))
+
+    def _compute_metrics(
+        self,
+        X: np.ndarray,
+        labels: np.ndarray,
+        fit_time: float,
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        metrics: Dict[str, Any] = {
+            'fit_time': float(fit_time),
+            'n_points': int(len(X)),
+        }
+        valid = labels >= 0
+        n_clu = len(np.unique(labels[valid])) if np.any(valid) else 0
+        metrics['n_clusters_found'] = int(n_clu)
+        metrics['noise_fraction'] = float(np.mean(labels < 0)) if len(labels) else 0.0
+
+        for name, fn in (
+            ('davies_bouldin_score', davies_bouldin_score),
+            ('calinski_harabasz_score', calinski_harabasz_score),
+        ):
+            try:
+                if n_clu >= 2 and np.sum(valid) >= n_clu + 1:
+                    metrics[name] = float(fn(X[valid], labels[valid]))
+                else:
+                    metrics[name] = float('nan')
+            except Exception as e:
+                self.logger.debug(f"    {name} 失败: {e}")
+                metrics[name] = float('nan')
+
+        sil_m, sil_s = self._silhouette_repeated(X, labels)
+        metrics['silhouette_score'] = sil_m
+        metrics['silhouette_score_sd'] = sil_s
+
+        if np.any(valid):
+            uniq, counts = np.unique(labels[valid], return_counts=True)
+            metrics['cluster_balance'] = float(np.std(counts) / np.mean(counts))
+            metrics['cluster_sizes'] = {
+                int(k): int(v) for k, v in zip(uniq.tolist(), counts.tolist())
+            }
+        else:
+            metrics['cluster_balance'] = float('nan')
+            metrics['cluster_sizes'] = {}
+
+        if extra:
+            metrics.update(extra)
+        return metrics
+
+    def _band_target_k(self, band: Dict[str, Any]) -> Optional[int]:
+        """读取分带 fixed_k 先验（若配置允许）"""
+        cfg = getattr(self.config, self.algorithm_name, {})
+        if not cfg.get('respect_fixed_k', True):
+            return None
+        fk = band.get('fixed_k')
+        return int(fk) if fk else None
+
+    def _cluster_band(
+        self,
+        X: np.ndarray,
+        spatial_indices: np.ndarray,
+        metadata: Dict[str, Any],
+        band: Dict[str, Any],
+        band_name: str,
+    ) -> Tuple[np.ndarray, Dict[str, Any], Dict[str, Any]]:
+        raise NotImplementedError
+
+    def perform_depth_stratified_clustering(
+        self,
+        X: np.ndarray,
+        spatial_indices: np.ndarray,
+        metadata: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """按深度带分别聚类并拼合全局标签"""
+        depths = np.asarray(metadata['depths'], dtype=float)
+        dims = metadata['dims']
+        feature_names = [str(f).lower() for f in metadata.get('features', [])]
+        sort_col = feature_names.index('vs') if 'vs' in feature_names else 0
+
+        scheme, scheme_cfg = self._active_scheme()
+        bands = scheme_cfg['bands']
+        offset_labels = self.config.depth_stratified.get(
+            'offset_labels_across_bands', True
+        )
+
+        self.logger.info(f"  📚 分层方案: {scheme}（{len(bands)} 带）")
+
+        needs_moho = any(
+            b.get('mask') in ('above_moho', 'moho_to_depth') for b in bands
+        )
+        moho_z = (
+            self._moho_depth_per_point(spatial_indices, metadata)
+            if needs_moho else None
+        )
+
+        global_labels = np.full(len(X), -1, dtype=np.int32)
+        per_band: Dict[str, Any] = {}
+        method_diagnostics: Dict[str, Any] = {}
+        label_offset = 0
+        total_fit_time = 0.0
+        point_depths = depths[spatial_indices[:, 2]]
+        model_z_max = float(np.nanmax(depths))
+
+        for i_band, band in enumerate(bands):
+            name = band['name']
+            is_last = i_band == len(bands) - 1
+            mask, z_ref, desc = self._build_band_mask(
+                band, point_depths, moho_z, is_last, model_z_max
+            )
+            n_band = int(np.sum(mask))
+            self.logger.info(f"  📦 [{name}] {desc}, N={n_band:,}")
+            if n_band < max(int(band.get('min_clusters', 2)) * 10, 50):
+                self.logger.warning(f"  ⚠️ 深度带 {name} 有效点过少 ({n_band})，跳过")
+                continue
+
+            X_band = X[mask]
+            si_band = spatial_indices[mask]
+            labels_b, diag_b, metrics_b = self._cluster_band(
+                X_band, si_band, metadata, band, name
+            )
+            labels_b, centers_b = _sort_labels_by_feature(X_band, labels_b, sort_col)
+            n_clu = int(len(np.unique(labels_b[labels_b >= 0])))
+            total_fit_time += float(metrics_b.get('fit_time', 0.0))
+
+            if offset_labels and n_clu > 0:
+                lb = labels_b.copy()
+                lb[lb >= 0] += label_offset
+                label_offset += n_clu
+            else:
+                lb = labels_b
+
+            global_labels[mask] = lb
+            per_band[name] = {
+                'depth_range': [float(z_ref[0]), float(z_ref[1])],
+                'mask_type': band.get('mask', 'depth_range'),
+                'description': desc,
+                'n_points': n_band,
+                'n_clusters': n_clu,
+                'labels_local': labels_b,
+                'labels_global': lb,
+                'metrics': metrics_b,
+                'cluster_centers': centers_b,
+                'label_offset': label_offset - n_clu if offset_labels else 0,
+                'point_mask': mask,
+                'method_diagnostics': diag_b,
+            }
+            method_diagnostics[name] = diag_b
+
+        if not per_band:
+            raise ValueError("所有深度带均无法完成聚类")
+
+        valid = global_labels >= 0
+        n_global = int(global_labels[valid].max()) + 1 if np.any(valid) else 0
+        labels_3d = Reconstruction3DHelper.reconstruct_3d_labels(
+            global_labels, spatial_indices, dims
+        )
+
+        overall_metrics = {
+            'n_clusters': n_global,
+            'n_bands': len(per_band),
+            'scheme': scheme,
+            'fit_time': total_fit_time,
+            'band_n_clusters': {k: v['n_clusters'] for k, v in per_band.items()},
+            'cluster_sizes': {
+                int(k): int(v)
+                for k, v in zip(*np.unique(global_labels[valid], return_counts=True))
+            } if np.any(valid) else {},
+        }
+        for key in (
+            'silhouette_score', 'davies_bouldin_score',
+            'calinski_harabasz_score', 'cluster_balance', 'noise_fraction',
+        ):
+            overall_metrics[key] = float(np.nanmean([
+                v['metrics'].get(key, np.nan) for v in per_band.values()
+            ]))
+
+        self.logger.info(
+            f"  📊 全局: {n_global} 簇 / {len(per_band)} 带，"
+            f"各带 K={overall_metrics['band_n_clusters']}，"
+            f"平均轮廓系数={overall_metrics['silhouette_score']:.4f}"
+        )
+
+        return {
+            'algorithm': self.algorithm_name,
+            'n_clusters': n_global,
+            'labels': global_labels,
+            'labels_3d': labels_3d,
+            'probabilities': None,
+            'probabilities_3d': None,
+            'model': None,
+            'metrics': overall_metrics,
+            'per_band': per_band,
+            'method_diagnostics': method_diagnostics,
+            'mode': 'depth_stratified',
+            'scheme': scheme,
+        }
+
+
+class HDBSCANClusteringOptimizer(AlternativeClusteringBase):
+    """
+    HDBSCAN 密度聚类（Campello et al., 2013）
+
+    自动确定簇数并标记噪声点。大带在子样本上拟合，全量标签用
+    approximate_predict 或最近簇心指派。
+    """
+
+    algorithm_name = 'hdbscan'
+
+    def _cluster_band(
+        self,
+        X: np.ndarray,
+        spatial_indices: np.ndarray,
+        metadata: Dict[str, Any],
+        band: Dict[str, Any],
+        band_name: str,
+    ) -> Tuple[np.ndarray, Dict[str, Any], Dict[str, Any]]:
+        cfg = self.config.hdbscan
+        t0 = time.time()
+        n_band = len(X)
+        mcs = cfg.get('min_cluster_size')
+        if mcs is None:
+            mcs = max(50, int(round(n_band * 0.0005)))
+        ms = cfg.get('min_samples')
+        if ms is None:
+            ms = max(10, mcs // 5)
+
+        X_fit, fit_idx = _clustering_subsample(
+            X, cfg.get('fit_max_points'), int(cfg.get('random_state', RANDOM_SEED))
+        )
+        clusterer = hdbscan.HDBSCAN(
+            min_cluster_size=int(mcs),
+            min_samples=int(ms),
+            metric=str(cfg.get('metric', 'euclidean')),
+            cluster_selection_epsilon=float(cfg.get('cluster_selection_epsilon', 0.0)),
+            core_dist_n_jobs=1,
+        )
+        fit_labels = clusterer.fit_predict(X_fit)
+
+        if len(X_fit) < len(X):
+            try:
+                labels, _ = hdbscan.approximate_predict(clusterer, X)
+            except Exception:
+                valid = fit_labels >= 0
+                if np.any(valid):
+                    centers = np.array([
+                        X_fit[fit_labels == c].mean(axis=0)
+                        for c in np.unique(fit_labels[valid])
+                    ])
+                    labels = _assign_nearest_centroid(X, centers)
+                    # 重映射到 0..k-1
+                    uniq = np.unique(labels)
+                    remap = {int(o): i for i, o in enumerate(uniq)}
+                    labels = np.array([remap[int(l)] for l in labels], dtype=np.int32)
+                else:
+                    labels = np.zeros(len(X), dtype=np.int32)
+        else:
+            labels = fit_labels.astype(np.int32)
+
+        n_noise = int(np.sum(labels < 0))
+        if n_noise and cfg.get('assign_noise_to_nearest', True):
+            valid = labels >= 0
+            if np.any(valid):
+                centers = np.array([
+                    X[labels == c].mean(axis=0) for c in np.unique(labels[valid])
+                ])
+                noise = labels < 0
+                labels[noise] = _assign_nearest_centroid(X[noise], centers)
+
+        # 压缩标签到 0..k-1
+        valid = labels >= 0
+        if np.any(valid):
+            uniq = np.unique(labels[valid])
+            remap = {int(o): i for i, o in enumerate(uniq)}
+            new_lab = labels.copy()
+            for o, n in remap.items():
+                new_lab[labels == o] = n
+            labels = new_lab
+
+        prob = getattr(clusterer, 'probabilities_', None)
+        diag = {
+            'min_cluster_size': int(mcs),
+            'min_samples': int(ms),
+            'n_noise_fit': int(np.sum(fit_labels < 0)),
+            'n_clusters_fit': int(len(np.unique(fit_labels[fit_labels >= 0]))),
+            'fit_n_points': int(len(X_fit)),
+            'probabilities_fit': prob.tolist() if prob is not None else None,
+        }
+        metrics = self._compute_metrics(
+            X, labels, time.time() - t0,
+            extra={'min_cluster_size': int(mcs), 'min_samples': int(ms)},
+        )
+        self.logger.info(
+            f"  📌 [{band_name}] HDBSCAN: K={metrics['n_clusters_found']}, "
+            f"noise={metrics['noise_fraction']:.2%}, "
+            f"min_cluster_size={mcs}"
+        )
+        return labels, diag, metrics
+
+
+class HierarchicalClusteringOptimizer(AlternativeClusteringBase):
+    """
+    凝聚层次聚类（Ward / average / complete linkage）
+
+    在子样本上完成 linkage 与切分，全量体元按最近簇心指派。
+    树状图在更小样本上绘制供方法学展示。
+    """
+
+    algorithm_name = 'hierarchical'
+
+    def _cluster_band(
+        self,
+        X: np.ndarray,
+        spatial_indices: np.ndarray,
+        metadata: Dict[str, Any],
+        band: Dict[str, Any],
+        band_name: str,
+    ) -> Tuple[np.ndarray, Dict[str, Any], Dict[str, Any]]:
+        cfg = self.config.hierarchical
+        t0 = time.time()
+        target_k = (
+            int(cfg['n_clusters']) if cfg.get('n_clusters') else self._band_target_k(band)
+        )
+        if target_k is None:
+            target_k = int(band.get('min_clusters', 2))
+
+        X_fit, _ = _clustering_subsample(
+            X, cfg.get('fit_max_points'), int(cfg.get('random_state', RANDOM_SEED))
+        )
+        linkage_method = str(cfg.get('linkage', 'ward'))
+        model = AgglomerativeClustering(
+            n_clusters=int(target_k),
+            linkage=linkage_method,
+        )
+        fit_labels = model.fit_predict(X_fit)
+        centers = np.array([
+            X_fit[fit_labels == c].mean(axis=0) for c in range(target_k)
+        ])
+        labels = _assign_nearest_centroid(X, centers)
+
+        # 树状图用更小样本
+        n_dend = min(int(cfg.get('dendrogram_sample', 5000)), len(X_fit))
+        rng = np.random.default_rng(int(cfg.get('random_state', RANDOM_SEED)))
+        d_idx = rng.choice(len(X_fit), n_dend, replace=False) if len(X_fit) > n_dend else np.arange(len(X_fit))
+        X_d = X_fit[d_idx]
+        if linkage_method == 'ward':
+            Z = linkage(X_d, method='ward')
+        else:
+            Z = linkage(pdist(X_d, metric='euclidean'), method=linkage_method)
+
+        diag = {
+            'n_clusters': int(target_k),
+            'linkage': linkage_method,
+            'fit_n_points': int(len(X_fit)),
+            'dendrogram_n_points': int(n_dend),
+            'linkage_matrix': Z.tolist(),
+        }
+        metrics = self._compute_metrics(
+            X, labels, time.time() - t0,
+            extra={'linkage': linkage_method, 'n_clusters_target': int(target_k)},
+        )
+        self.logger.info(
+            f"  📌 [{band_name}] Hierarchical ({linkage_method}): K={target_k}"
+        )
+        return labels, diag, metrics
+
+
+class GMMAutoClusteringOptimizer(DepthBandPartitioner):
     """GMM 自动聚类优化器（BIC 选 K + 深度分层 + 模型缓存）"""
 
     def __init__(self, config: ClusteringConfig, logger: logging.Logger):
@@ -794,6 +2680,34 @@ class GMMAutoClusteringOptimizer:
         # 由 pipeline 注入（processor.scaler.inverse_transform），把标准化簇均值
         # 还原为物理 δlnV，供 K 扫描的快/慢三分类使用
         self.feature_inverse_transform: Optional[Any] = None
+
+    def _sil_cfg(self) -> Dict[str, Any]:
+        """轮廓系数子样本配置（与 W-k-means 共用 wkmeans.k_selection 项）"""
+        return self.config.wkmeans['k_selection']
+
+    def _silhouette_repeated(
+        self, X: np.ndarray, labels: np.ndarray
+    ) -> Tuple[float, float]:
+        """在多个独立子样本上重复估计轮廓系数（与 W-k-means 路径一致）"""
+        ksel = self._sil_cfg()
+        valid = labels >= 0
+        if int(np.sum(valid)) < 3 or len(np.unique(labels[valid])) < 2:
+            return float('nan'), float('nan')
+        size = min(int(ksel['silhouette_sample_size']), int(np.sum(valid)))
+        n_rep = int(ksel.get('silhouette_n_repeats', 1))
+        vals: List[float] = []
+        for r in range(n_rep):
+            try:
+                vals.append(float(silhouette_score(
+                    X[valid], labels[valid],
+                    sample_size=size,
+                    random_state=RANDOM_SEED + r,
+                )))
+            except Exception as e:
+                self.logger.debug(f"    轮廓系数估计失败: {e}")
+        if not vals:
+            return float('nan'), float('nan')
+        return float(np.mean(vals)), float(np.std(vals))
 
     @staticmethod
     def _repair_loglik_monotone(
@@ -930,6 +2844,8 @@ class GMMAutoClusteringOptimizer:
         aics: List[float] = []
         log_likelihoods: List[float] = []
         n_params_list: List[float] = []
+        silhouettes: List[float] = []
+        silhouette_sds: List[float] = []
 
         # BIC/拟合可用子样本加速；最终 predict 仍在全量 X 上
         X_fit = self._subsample_for_fit(X, spatial_depth_indices=None)
@@ -962,6 +2878,10 @@ class GMMAutoClusteringOptimizer:
                 n_params_list.append(
                     (bic_n + 2.0 * ll_total) / float(np.log(len(X_fit)))
                 )
+                labels_k = gmm.predict(X_fit)
+                sil_m, sil_sd = self._silhouette_repeated(X_fit, labels_k)
+                silhouettes.append(sil_m)
+                silhouette_sds.append(sil_sd)
 
             except Exception as e:
                 self.logger.warning(f"    n={n} 失败: {e}")
@@ -969,6 +2889,8 @@ class GMMAutoClusteringOptimizer:
                 aics.append(float('inf'))
                 log_likelihoods.append(-float('inf'))
                 n_params_list.append(float('nan'))
+                silhouettes.append(float('nan'))
+                silhouette_sds.append(float('nan'))
 
         valid_indices = [i for i, bic in enumerate(bics) if np.isfinite(bic)]
         if not valid_indices:
@@ -995,6 +2917,17 @@ class GMMAutoClusteringOptimizer:
         knee_idx: Optional[int] = None
         optimal_idx: Optional[int] = None
         selection_rule = rule
+        k_values_arr = np.asarray(n_clusters_range[: len(bics)], dtype=int)
+        sil_arr = np.asarray(silhouettes, dtype=float)
+        sil_sd_arr = np.asarray(silhouette_sds, dtype=float)
+        k_sil = (
+            int(k_values_arr[int(np.nanargmax(sil_arr))])
+            if np.any(np.isfinite(sil_arr)) else int(k_values_arr[argmin_idx])
+        )
+        k_local = WKMeansClusteringOptimizer._silhouette_local_maxima(
+            k_values_arr, sil_arr
+        )
+        k_bic_knee = argmin_clusters
 
         # ── 判据 1：BIC 拐点（默认）──────────────────────────────────
         # 体元数 N 不是独立观测数：层析模型经正则化平滑，δlnV 的空间自相关
@@ -1011,11 +2944,33 @@ class GMMAutoClusteringOptimizer:
             if knee_idx is not None:
                 optimal_idx = knee_idx
                 selection_rule = 'bic_knee'
+                k_bic_knee = int(k_values_arr[knee_idx])
+
+        # ── 判据 1b：BIC 拐点 + 轮廓系数局部极大（混合，与 W-k-means 对齐）──
+        elif rule == 'bic_knee_silhouette':
+            knee_idx, knee_distances = self._knee_select(bics, valid_indices)
+            if knee_idx is not None:
+                k_bic_knee = int(k_values_arr[knee_idx])
+                cands = [k for k in k_local if k >= k_bic_knee]
+                if cands:
+                    optimal_n_h = max(
+                        cands,
+                        key=lambda k: sil_arr[k_values_arr == k][0],
+                    )
+                    optimal_idx = int(np.where(k_values_arr == optimal_n_h)[0][0])
+                else:
+                    optimal_idx = knee_idx
+                selection_rule = 'bic_knee_silhouette'
+            else:
+                optimal_idx = argmin_idx
+                selection_rule = 'bic_min'
 
         # ── 判据 2：argmin(BIC)（拐点不可用时的回退）────────────
         if optimal_idx is None:
             optimal_idx = argmin_idx
             selection_rule = 'bic_min'
+        if knee_idx is not None:
+            k_bic_knee = int(k_values_arr[knee_idx])
         optimal_clusters = int(n_clusters_range[optimal_idx])
 
         # 选中的 K 若属于被单调修复者，其缓存模型是坏的局部最优 → 弃用缓存，
@@ -1035,7 +2990,7 @@ class GMMAutoClusteringOptimizer:
             'aics': aics,
             'log_likelihoods': log_likelihoods,
             'knee_distances': knee_distances,
-            'knee_n': int(n_clusters_range[knee_idx]) if knee_idx is not None else None,
+            'knee_n': k_bic_knee if knee_idx is not None else None,
             'repaired_ks': [int(n_clusters_range[i]) for i in repaired_idx],
             'selection_rule': selection_rule,
             'k_upper': k_upper,
@@ -1044,6 +2999,11 @@ class GMMAutoClusteringOptimizer:
             'optimal_aic': aics[optimal_idx],
             'argmin_n': argmin_clusters,
             'argmin_bic': bics[argmin_idx],
+            'silhouette': sil_arr.tolist(),
+            'silhouette_sd': sil_sd_arr.tolist(),
+            'k_silhouette': int(k_sil),
+            'k_local_maxima': [int(k) for k in k_local],
+            'n_points_scanned': int(len(X_fit)),
             'convergence_info': {
                 'n_tested': len(bics),
             },
@@ -1051,9 +3011,19 @@ class GMMAutoClusteringOptimizer:
 
         if selection_rule == 'bic_knee':
             self.logger.info(
-                f"  ✅ [{band_name}] 选定 K={optimal_clusters} (BIC 拐点, "
+                f"  ✅ [{band_name}] 建议 K={optimal_clusters} (BIC 拐点, "
                 f"弦距={knee_distances[optimal_idx]:.3f}, K 上界={k_upper}); "
-                f"argmin(BIC)=K{argmin_clusters}（仅作诊断，不稳定）"
+                f"轮廓全局最优 K={k_sil}，局部极大 K={k_local or '无'}; "
+                f"argmin(BIC)=K{argmin_clusters}（诊断）— 请结合 2-3-1 图复核"
+            )
+        elif selection_rule == 'bic_knee_silhouette':
+            sil_at_opt = float(sil_arr[optimal_idx])
+            self.logger.info(
+                f"  ✅ [{band_name}] 建议 K={optimal_clusters} "
+                f"(BIC 拐点 K={k_bic_knee} + 轮廓局部极大, "
+                f"轮廓={sil_at_opt:.4f}); "
+                f"轮廓全局最优 K={k_sil}; argmin(BIC)=K{argmin_clusters} "
+                f"（诊断）— 请结合 2-3-1 图复核"
             )
         else:
             self.logger.info(
@@ -1666,106 +3636,6 @@ class GMMAutoClusteringOptimizer:
             'update_params': update_params,
         }
 
-    def _active_scheme(self) -> Tuple[str, Dict[str, Any]]:
-        """返回当前分层方案名与方案配置"""
-        cfg = self.config.depth_stratified
-        scheme = str(cfg.get('scheme', 'fixed_3band'))
-        schemes = cfg.get('schemes', {})
-        if scheme not in schemes:
-            raise ValueError(
-                f"未知分层方案 '{scheme}'，可选: {list(schemes.keys())}"
-            )
-        return scheme, schemes[scheme]
-
-    def _moho_depth_per_point(
-        self,
-        spatial_indices: np.ndarray,
-        metadata: Dict[str, Any],
-    ) -> np.ndarray:
-        """
-        为每个体素取 Moho 深度（km）。
-
-        无覆盖处用 moho_fallback_km，并裁剪到 moho_clip_km。
-        """
-        if self.concordance_eval is None:
-            self.concordance_eval = GeologyConcordanceEvaluator(
-                self.config, self.logger
-            )
-
-        lons = np.asarray(metadata['lons'], dtype=float)
-        lats = np.asarray(metadata['lats'], dtype=float)
-        moho_grid = self.concordance_eval.get_moho_grid(lons, lats)
-        if moho_grid is None:
-            raise RuntimeError(
-                "moho_4band 需要 Moho 数据，但插值失败；请检查 "
-                f"{self.config.geology_concordance.get('moho_file')}"
-            )
-
-        cfg = self.config.depth_stratified
-        fallback = float(cfg.get('moho_fallback_km', 35.0))
-        z_lo, z_hi = cfg.get('moho_clip_km', [10.0, 80.0])
-
-        lat_i = spatial_indices[:, 0].astype(int)
-        lon_i = spatial_indices[:, 1].astype(int)
-        moho_z = moho_grid[lat_i, lon_i].astype(np.float64)
-        n_fallback = int(np.sum(~np.isfinite(moho_z)))
-        moho_z[~np.isfinite(moho_z)] = fallback
-        moho_z = np.clip(moho_z, float(z_lo), float(z_hi))
-
-        self.logger.info(
-            f"  🧭 Moho 分带: 点位={len(moho_z):,}, "
-            f"深度[{moho_z.min():.1f}, {moho_z.max():.1f}] km, "
-            f"回退填充 {n_fallback:,} 点 → {fallback:.1f} km"
-        )
-        return moho_z
-
-    def _build_band_mask(
-        self,
-        band: Dict[str, Any],
-        point_depths: np.ndarray,
-        moho_z: Optional[np.ndarray],
-        is_last: bool,
-        model_z_max: float,
-    ) -> Tuple[np.ndarray, List[float], str]:
-        """
-        构造深度带布尔掩膜。
-
-        Returns:
-            (mask, depth_range_for_log, description)
-        """
-        mask_type = band.get('mask', 'depth_range')
-
-        if mask_type == 'above_moho':
-            if moho_z is None:
-                raise ValueError(f"带 {band['name']} 需要 Moho 场")
-            cap = float(band.get('depth_cap', 410))
-            mask = (point_depths < moho_z) & (point_depths < cap)
-            z_ref = [0.0, float(np.nanmedian(moho_z))]
-            desc = f"z < Moho (median={z_ref[1]:.1f} km, cap={cap:.0f})"
-            return mask, z_ref, desc
-
-        if mask_type == 'moho_to_depth':
-            if moho_z is None:
-                raise ValueError(f"带 {band['name']} 需要 Moho 场")
-            _, z1 = band['depth_range']
-            z1_eff = model_z_max if z1 is None else float(z1)
-            mask = (point_depths >= moho_z) & (point_depths < z1_eff)
-            if is_last:
-                mask = (point_depths >= moho_z) & (point_depths <= z1_eff)
-            z_ref = [float(np.nanmedian(moho_z)), z1_eff]
-            desc = f"Moho ≤ z < {z1_eff:.0f} km (median Moho={z_ref[0]:.1f})"
-            return mask, z_ref, desc
-
-        # 固定深度区间
-        z0, z1 = band['depth_range']
-        z0_eff = 0.0 if z0 is None else float(z0)
-        z1_eff = model_z_max if z1 is None else float(z1)
-        mask = (point_depths >= z0_eff) & (point_depths < z1_eff)
-        if is_last:
-            mask = (point_depths >= z0_eff) & (point_depths <= z1_eff)
-        desc = f"{z0_eff:.0f}-{z1_eff:.0f} km"
-        return mask, [z0_eff, z1_eff], desc
-
     def perform_depth_stratified_clustering(
         self,
         X: np.ndarray,
@@ -2011,6 +3881,7 @@ class GMMAutoClusteringOptimizer:
 
         first_band = next(iter(per_band.values()))
         return {
+            'algorithm': 'gmm',
             'n_clusters': n_global,
             'labels': global_labels,
             'labels_3d': labels_3d,
@@ -2328,8 +4199,19 @@ class SmartClusteringPipeline:
         self.loader = NetCDF3DLoader(self.config, self.logger)
         self.processor = DataCube3DProcessor(self.config, self.logger)
         self.gmm_optimizer = GMMAutoClusteringOptimizer(self.config, self.logger)
+        self.wkmeans_optimizer = WKMeansClusteringOptimizer(self.config, self.logger)
+        self.hdbscan_optimizer = HDBSCANClusteringOptimizer(self.config, self.logger)
+        self.hierarchical_optimizer = HierarchicalClusteringOptimizer(
+            self.config, self.logger
+        )
         self.concordance_eval = GeologyConcordanceEvaluator(self.config, self.logger)
         self.gmm_optimizer.concordance_eval = self.concordance_eval
+        for opt in (
+            self.hdbscan_optimizer,
+            self.hierarchical_optimizer,
+            self.wkmeans_optimizer,
+        ):
+            opt.concordance_eval = self.concordance_eval
 
         self.enhanced_visualizer = EnhancedClusteringVisualizer(self.config, self.logger)
         self.enhanced_visualizer.set_processor(self.processor)
@@ -2343,18 +4225,62 @@ class SmartClusteringPipeline:
 
         self.all_results: Dict[str, Any] = {}
 
-    def _scheme_output_root(self) -> Path:
-        """数据根目录：results/model_clustering/{scheme}/（标签、概率、NetCDF、统计）"""
+    def _algo_name(self) -> str:
+        """当前聚类算法名，用于输出文件名与元数据，避免把 W-k-means 结果标成 GMM"""
+        return str(getattr(self.config, 'algorithm', 'gmm')).lower()
+
+    def _scheme_tag(self) -> str:
+        """
+        输出目录名：GMM 路径用分带方案名；其余算法编码分带方案与特征域。
+
+        非 GMM 算法的目录名形如 {algo}_{dln|raw}_{band}，确保不同设置的
+        测试结果互不覆盖，也不会覆盖正文依赖的 GMM 分带结果。
+        """
         scheme = str(self.config.depth_stratified.get('scheme', 'fixed_3band'))
-        return self.base_config.dirs['results'] / 'model_clustering' / scheme
+        algo = self._algo_name()
+        coord_suffix = (
+            '_xyz'
+            if self.config.preprocessing.get('coordinates', {}).get(
+                'enabled', False
+            )
+            else ''
+        )
+        if algo == 'gmm':
+            domain = (
+                'dln'
+                if self.config.preprocessing.get('perturbation', {}).get(
+                    'enabled', True
+                )
+                else 'raw'
+            )
+            if bool(getattr(self.config, 'k_scan', False)):
+                return f'gmm_{domain}_{scheme}{coord_suffix}'
+            # 正文 dln 固定 K → moho_4band/；raw 对照 → gmm_raw_moho_4band/，互不覆盖
+            if domain == 'raw':
+                return f'gmm_raw_{scheme}{coord_suffix}'
+            return f'{scheme}{coord_suffix}'
+
+        band = scheme if self.config.depth_stratified.get('enabled', True) else 'fulldepth'
+        domain = (
+            'dln'
+            if self.config.preprocessing.get('perturbation', {}).get('enabled', True)
+            else 'raw'
+        )
+        tag = f'{algo}_{domain}_{band}'
+        if self.config.preprocessing.get('coordinates', {}).get('enabled', False):
+            tag += '_xyz'
+        return tag
+
+    def _scheme_output_root(self) -> Path:
+        """数据根目录：results/model_clustering/{tag}/（标签、概率、NetCDF、统计）"""
+        return self.base_config.dirs['results'] / 'model_clustering' / self._scheme_tag()
 
     def _scheme_figure_root(self) -> Path:
-        """图件根目录：figures/model_clustering/{scheme}/
+        """图件根目录：figures/model_clustering/{tag}/
 
         图件与数据分置：图件集中在 figures/ 便于取用与投稿，数据留在 results/。
         """
-        scheme = str(self.config.depth_stratified.get('scheme', 'fixed_3band'))
-        return self.base_config.dirs['figures'] / 'model_clustering' / scheme
+        return self.base_config.dirs['figures'] / 'model_clustering' / self._scheme_tag()
 
     def _setup_logger(self) -> logging.Logger:
         """回退日志初始化"""
@@ -2391,14 +4317,24 @@ class SmartClusteringPipeline:
             if features_to_use is None:
                 features_to_use = self.config.data['default_features']
 
+            algorithm = str(getattr(self.config, 'algorithm', 'gmm')).lower()
             stratified = self.config.depth_stratified.get('enabled', True)
             scheme = str(self.config.depth_stratified.get('scheme', 'fixed_3band'))
             pert_on = self.config.preprocessing.get('perturbation', {}).get(
                 'enabled', True
             )
+            coord_on = self.config.preprocessing.get('coordinates', {}).get(
+                'enabled', False
+            )
+            algo_label = {
+                'gmm': 'GMM',
+                'wkmeans': 'W-k-means',
+                'hdbscan': 'HDBSCAN',
+                'hierarchical': 'Hierarchical',
+            }.get(algorithm, algorithm.upper())
 
             self.logger.info("\n" + "=" * 80)
-            self.logger.info("🚀 EASTASIA-FWI 单模型速度相聚类 (v7.5)")
+            self.logger.info("🚀 EASTASIA-FWI 单模型速度簇聚类 (v7.5)")
             self.logger.info("=" * 80)
             self.logger.info(
                 f"📅 开始时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
@@ -2407,7 +4343,9 @@ class SmartClusteringPipeline:
             for i, model in enumerate(model_names, 1):
                 self.logger.info(f"  {i}. {model}")
             self.logger.info(f"\n🔬 特征: {', '.join(features_to_use)}")
+            self.logger.info(f"🧮 算法: {algo_label}")
             self.logger.info(f"📐 扰动域: {'ON' if pert_on else 'OFF'}")
+            self.logger.info(f"🧭 坐标增广: {'ON' if coord_on else 'OFF'}")
             self.logger.info(
                 f"📚 深度分层: {'ON' if stratified else 'OFF'} ({scheme})"
             )
@@ -2440,20 +4378,51 @@ class SmartClusteringPipeline:
                         'spatial_indices': spatial_indices,
                         'metadata': metadata,
                         'preprocessing_info': prep_info,
-                        'gmm_results': None,
+                        'cluster_results': None,
                         'kmeans_results': None,
                     }
 
-                    # 注入标准化反变换：K 扫描的快/慢三分类须在物理 δlnV 上判定
-                    self.gmm_optimizer.feature_inverse_transform = (
+                    inv_transform = (
                         self.processor.scaler.inverse_transform
                         if getattr(self.processor, 'scaler', None) is not None
                         else None
                     )
+                    self.gmm_optimizer.feature_inverse_transform = inv_transform
 
-                    self.logger.info("\n🤖 执行 GMM 速度相聚类...")
-                    if stratified:
-                        gmm_results = self.gmm_optimizer.perform_depth_stratified_clustering(
+                    self.logger.info(
+                        f"\n🤖 执行 {algo_label} 速度簇聚类"
+                        f"（{'深度分带' if stratified else '全深度'}）..."
+                    )
+
+                    if algorithm == 'wkmeans':
+                        self.wkmeans_optimizer.feature_inverse_transform = inv_transform
+                        cluster_res = (
+                            self.wkmeans_optimizer.perform_depth_stratified_clustering(
+                                X, spatial_indices, metadata
+                            )
+                            if stratified else
+                            self.wkmeans_optimizer.perform_full_depth_clustering(
+                                X, spatial_indices, metadata
+                            )
+                        )
+                    elif algorithm == 'hdbscan':
+                        if not stratified:
+                            raise ValueError("HDBSCAN 聚类需启用深度分带")
+                        cluster_res = (
+                            self.hdbscan_optimizer.perform_depth_stratified_clustering(
+                                X, spatial_indices, metadata
+                            )
+                        )
+                    elif algorithm == 'hierarchical':
+                        if not stratified:
+                            raise ValueError("层次聚类需启用深度分带")
+                        cluster_res = (
+                            self.hierarchical_optimizer.perform_depth_stratified_clustering(
+                                X, spatial_indices, metadata
+                            )
+                        )
+                    elif stratified:
+                        cluster_res = self.gmm_optimizer.perform_depth_stratified_clustering(
                             X, spatial_indices, metadata
                         )
                     else:
@@ -2473,7 +4442,8 @@ class SmartClusteringPipeline:
                                 probabilities, spatial_indices, metadata['dims']
                             )
                         )
-                        gmm_results = {
+                        cluster_res = {
+                            'algorithm': 'gmm',
                             'n_clusters': optimal_n,
                             'labels': labels,
                             'labels_3d': labels_3d,
@@ -2486,14 +4456,14 @@ class SmartClusteringPipeline:
                             'mode': 'full_depth',
                         }
 
-                    results['gmm_results'] = gmm_results
+                    results['cluster_results'] = cluster_res
 
                     # K-means（可选）
-                    if self.kmeans_analyzer and gmm_results.get('mode') != 'depth_stratified':
+                    if self.kmeans_analyzer and cluster_res.get('mode') != 'depth_stratified':
                         self.logger.info("\n📊 执行 K-means 对比...")
                         results['kmeans_results'] = (
                             self.kmeans_analyzer.run_kmeans_comparison(
-                                X, gmm_results['labels'], gmm_results['n_clusters']
+                                X, cluster_res['labels'], cluster_res['n_clusters']
                             )
                         )
 
@@ -2520,24 +4490,112 @@ class SmartClusteringPipeline:
             self.logger.error(traceback.format_exc())
             raise
 
+    def _viz_metadata(self, results: Dict[str, Any]) -> Dict[str, Any]:
+        """可视化用元数据：合并 feature_space / 展示名，区分 raw 与 δln。"""
+        meta = dict(results['metadata'])
+        prep = results.get('preprocessing_info') or {}
+        meta['feature_space'] = prep.get(
+            'feature_space', meta.get('feature_space', 'absolute')
+        )
+        if prep.get('feature_names'):
+            meta['feature_display_names'] = prep['feature_names']
+        return meta
+
     def _visualize_all_results(self, results: Dict[str, Any], model_name: str) -> None:
         """生成可视化"""
         viz_dir = self._scheme_figure_root() / model_name
         viz_dir.mkdir(parents=True, exist_ok=True)
+        meta_viz = self._viz_metadata(results)
 
-        gmm_results = results['gmm_results']
+        cluster_res = results['cluster_results']
         kmeans_results = results.get('kmeans_results')
         vis_config = self.config.visualization['plot_types']
-        stratified = gmm_results.get('mode') == 'depth_stratified'
+        stratified = cluster_res.get('mode') == 'depth_stratified'
+        algo = str(cluster_res.get('algorithm', 'gmm'))
+        is_wkmeans = algo == 'wkmeans'
+        is_gmm = algo == 'gmm'
+        is_alt = algo in ('hdbscan', 'hierarchical')
+
+        # W-k-means 选 K 图：肘部法 SSE 曲线 + 轮廓系数曲线（逐带）
+        if is_wkmeans and cluster_res.get('k_selection'):
+            try:
+                self.enhanced_visualizer.plot_wkmeans_k_selection(
+                    cluster_res['k_selection'], viz_dir, model_name
+                )
+                self._save_k_selection(cluster_res['k_selection'], model_name)
+            except Exception as e:
+                self.logger.warning(f"  ⚠️ W-k-means 选 K 图失败: {e}")
+
+        # W-k-means 特征权重图：各带权重分布是"哪个特征在分簇中起作用"的定量答案
+        if is_wkmeans and cluster_res.get('per_band'):
+            try:
+                self.basic_visualizer.plot_wkmeans_feature_weights(
+                    cluster_res['per_band'], results['metadata'],
+                    viz_dir, model_name,
+                )
+            except Exception as e:
+                self.logger.warning(f"  ⚠️ W-k-means 特征权重图失败: {e}")
+
+        # W-k-means 全深度模式：径向分层分析（深度占位、层界深度与横向起伏）
+        if (
+            is_wkmeans and not stratified
+            and self.config.wkmeans['radial_analysis'].get('enabled', True)
+        ):
+            try:
+                cluster_res['boundary_depths'] = (
+                    self.basic_visualizer.plot_radial_stratification(
+                        cluster_res,
+                        results['metadata'],
+                        viz_dir,
+                        model_name,
+                        self.config.wkmeans['radial_analysis'],
+                    )
+                )
+            except Exception as e:
+                self.logger.warning(f"  ⚠️ 径向分层图失败: {e}")
+
+        # 替代聚类算法的方法学诊断图
+        if is_alt and cluster_res.get('method_diagnostics'):
+            try:
+                self.enhanced_visualizer.plot_alt_clustering_diagnostics(
+                    algo, cluster_res['method_diagnostics'],
+                    cluster_res.get('per_band'), viz_dir, model_name,
+                )
+                self._save_method_diagnostics(
+                    cluster_res['method_diagnostics'], model_name, algo
+                )
+            except Exception as e:
+                self.logger.warning(f"  ⚠️ {algo} 方法学诊断图失败: {e}")
 
         # 选 K 判据图：分层时优先合成一张（BIC 拐点模式），否则逐带绘制
-        if vis_config.get('bic_analysis'):
-            if stratified and gmm_results.get('per_band'):
+        # 非 GMM 算法无 BIC，已由 W-k-means 肘部法图或上方诊断图替代
+        if vis_config.get('bic_analysis') and is_gmm:
+            if stratified and cluster_res.get('per_band'):
                 merged = self.enhanced_visualizer.plot_k_selection_panels(
-                    gmm_results['per_band'], viz_dir, model_name
+                    cluster_res['per_band'], viz_dir, model_name
                 )
+                k_plot_per_band = cluster_res['per_band']
                 if not merged:
-                    for band_name, band_res in gmm_results['per_band'].items():
+                    # 固定 K 且跳过 BIC 扫描时，从 k-scan 归档重绘诊断曲线
+                    k_overrides = cluster_res.get('metrics', {}).get(
+                        'band_optimal_k'
+                    )
+                    archive_pb = self._per_band_bic_from_kscan_archive(
+                        model_name, k_overrides
+                    )
+                    if archive_pb:
+                        merged = self.enhanced_visualizer.plot_k_selection_panels(
+                            archive_pb, viz_dir, model_name
+                        )
+                        if merged:
+                            k_plot_per_band = archive_pb
+                            self.logger.info(
+                                '  📊 选 K 图来自 k-scan 归档'
+                                f'（标注固定 K={k_overrides}）'
+                            )
+                self._save_gmm_k_selection(k_plot_per_band, model_name)
+                if not merged:
+                    for band_name, band_res in cluster_res['per_band'].items():
                         self.enhanced_visualizer.plot_bic_analysis(
                             band_res['bic_analysis'],
                             viz_dir,
@@ -2545,60 +4603,63 @@ class SmartClusteringPipeline:
                         )
             else:
                 self.enhanced_visualizer.plot_bic_analysis(
-                    gmm_results['bic_analysis'], viz_dir, model_name
+                    cluster_res['bic_analysis'], viz_dir, model_name
                 )
 
         # K 扫描稳健性图（k_robustness 开启时才有数据）
-        if gmm_results.get('k_robustness'):
+        if cluster_res.get('k_robustness'):
             self.enhanced_visualizer.plot_k_robustness(
-                gmm_results['k_robustness'], viz_dir, model_name
+                cluster_res['k_robustness'], viz_dir, model_name
             )
 
         # 概率分析：分层时用 max_probability 构造伪概率分布
-        if vis_config.get('probability_distribution') or vis_config.get(
-            'confidence_analysis'
+        # 硬指派算法（W-k-means / HDBSCAN / 层次）跳过
+        if is_gmm and (
+            vis_config.get('probability_distribution')
+            or vis_config.get('confidence_analysis')
         ):
             if stratified:
-                max_p = gmm_results.get('max_probability')
+                max_p = cluster_res.get('max_probability')
                 if max_p is not None:
                     # 用两列伪概率 [1-p, p] 兼容原绘图接口
                     pseudo = np.column_stack([1.0 - max_p, max_p])
                     self.enhanced_visualizer.plot_probability_distribution(
-                        pseudo, gmm_results['labels'], viz_dir, model_name
+                        pseudo, cluster_res['labels'], viz_dir, model_name
                     )
             else:
                 self.enhanced_visualizer.plot_probability_distribution(
-                    gmm_results['probabilities'],
-                    gmm_results['labels'],
+                    cluster_res['probabilities'],
+                    cluster_res['labels'],
                     viz_dir,
                     model_name,
                 )
 
-        if vis_config.get('gmm_vs_kmeans') and kmeans_results:
+        # GMM 与 K-means 的判据对比图依赖 BIC/后验，仅 GMM 路径可用
+        if vis_config.get('gmm_vs_kmeans') and kmeans_results and is_gmm:
             self.enhanced_visualizer.plot_gmm_vs_kmeans_comparison(
-                gmm_results, kmeans_results, viz_dir, model_name
+                cluster_res, kmeans_results, viz_dir, model_name
             )
 
         if vis_config.get('depth_slices'):
             # 3×3：第1排地质，第2–3排 Slab2（替代原 2-3-9 / 2-3-10）
             self.basic_visualizer.plot_depth_slices(
-                gmm_results['labels_3d'],
-                results['metadata'],
+                cluster_res['labels_3d'],
+                meta_viz,
                 viz_dir,
-                'gmm',
+                algo,
                 model_name,
                 concordance_eval=self.concordance_eval,
             )
 
-        # 未标准化扰动立方体（供 2-3-5 / 2-3-11 叠 δlnVp/δlnVs）
+        # 未标准化特征立方体（δln 或 raw Vp/Vs，供 2-3-5 / 2-3-11）
         pert_cube = getattr(self.processor, 'last_feature_cube', None)
 
         # 三维同维度：聚类体 vs Slab2(dep+thk) 体掩膜（独立于切片 MI/ρ）
         if vis_config.get('slab_volume_3d', True):
             try:
                 self.concordance_eval.plot_slab_volume_comparison(
-                    gmm_results['labels_3d'],
-                    results['metadata'],
+                    cluster_res['labels_3d'],
+                    meta_viz,
                     viz_dir,
                     model_name,
                     pert_cube=pert_cube,
@@ -2608,10 +4669,10 @@ class SmartClusteringPipeline:
 
         if vis_config.get('vertical_sections'):
             self.basic_visualizer.plot_vertical_sections(
-                gmm_results['labels_3d'],
-                results['metadata'],
+                cluster_res['labels_3d'],
+                meta_viz,
                 viz_dir,
-                'gmm',
+                algo,
                 model_name,
                 concordance_eval=self.concordance_eval,
                 pert_cube=pert_cube,
@@ -2620,64 +4681,435 @@ class SmartClusteringPipeline:
         if vis_config.get('cluster_profiles'):
             self.basic_visualizer.plot_cluster_profiles(
                 results['features'],
-                gmm_results['labels'],
+                cluster_res['labels'],
                 results['spatial_indices'],
                 results['metadata'],
                 viz_dir,
-                'gmm',
+                algo,
                 model_name,
-                per_band=gmm_results.get('per_band'),
+                per_band=cluster_res.get('per_band'),
             )
+
+        # GMM 簇心谱系：Ward on μ_k + 启发式 facies 短标签（附录用）
+        if (
+            is_gmm
+            and stratified
+            and vis_config.get('centroid_phylogeny', True)
+            and cluster_res.get('per_band')
+        ):
+            try:
+                phylo = self.enhanced_visualizer.plot_centroid_phylogeny(
+                    results['features'],
+                    cluster_res['labels'],
+                    results['metadata'],
+                    cluster_res['per_band'],
+                    viz_dir,
+                    model_name,
+                    algorithm_name=algo,
+                )
+                if phylo:
+                    self._save_centroid_phylogeny(phylo, model_name)
+            except Exception as e:
+                self.logger.warning(f"  ⚠️ 簇心谱系图失败: {e}")
 
         if vis_config.get('feature_distributions'):
             self.basic_visualizer.plot_feature_distributions(
                 results['features'],
-                gmm_results['labels'],
+                cluster_res['labels'],
                 results['metadata'],
                 viz_dir,
-                'gmm',
+                algo,
                 model_name,
-                per_band=gmm_results.get('per_band'),
+                per_band=cluster_res.get('per_band'),
             )
 
-        if vis_config.get('cluster_centers') and gmm_results.get('model') is not None:
+        if vis_config.get('cluster_centers') and cluster_res.get('model') is not None:
             self.basic_visualizer.plot_cluster_centers(
                 results['features'],
-                gmm_results['labels'],
+                cluster_res['labels'],
                 results['metadata'],
-                gmm_results['model'],
+                cluster_res['model'],
                 viz_dir,
-                'gmm',
+                algo,
                 model_name,
             )
 
+        if vis_config.get('cluster_crossplot', True):
+            try:
+                diagnostics = self.basic_visualizer.plot_cluster_crossplot(
+                    results['features'],
+                    cluster_res['labels'],
+                    meta_viz,
+                    viz_dir,
+                    algo,
+                    model_name,
+                    per_band=cluster_res.get('per_band'),
+                    spatial_indices=results.get('spatial_indices'),
+                )
+                cluster_res['crossplot_diagnostics'] = diagnostics
+                self._save_crossplot_diagnostics(diagnostics, model_name)
+            except Exception as e:
+                self.logger.warning(f"  ⚠️ 特征空间交会图失败: {e}")
+
+        if vis_config.get('cluster_crossplot_3d', True):
+            try:
+                self.basic_visualizer.plot_cluster_crossplot_3d(
+                    results['features'],
+                    cluster_res['labels'],
+                    meta_viz,
+                    viz_dir,
+                    algo,
+                    model_name,
+                    per_band=cluster_res.get('per_band'),
+                    spatial_indices=results.get('spatial_indices'),
+                )
+            except Exception as e:
+                self.logger.warning(f"  ⚠️ 三维特征空间交会图失败: {e}")
+
         self.logger.info(f"  ✅ 所有可视化已保存到: {viz_dir}")
+
+    def _save_k_selection(
+        self, k_selection: Dict[str, Dict[str, Any]], model_name: str
+    ) -> None:
+        """
+        把 W-k-means 各带的选 K 扫描结果写入 CSV，供方法学章节引用。
+
+        每行是一个 (深度带, K) 组合，记录 SSE 与轮廓系数，以及该带最终采用的
+        K 及其来源（肘部法/轮廓系数/先验固定），使选 K 过程完全可复核。
+
+        Args:
+            k_selection: {深度带名: 选 K 诊断字典}
+            model_name: 模型名
+        """
+        rows: List[Dict[str, Any]] = []
+        for band, diag in k_selection.items():
+            k_values = diag.get('k_values')
+            if not k_values:
+                continue
+            sds = diag.get('silhouette_sd') or [float('nan')] * len(k_values)
+            for k, sse, sil, sd in zip(
+                k_values, diag['sse'], diag['silhouette'], sds
+            ):
+                rows.append({
+                    'model': model_name,
+                    'band': band,
+                    'k': int(k),
+                    'n_points': diag.get('n_points_scanned'),
+                    'sse': float(sse),
+                    'silhouette': float(sil),
+                    'silhouette_sd': float(sd),
+                    'k_elbow': diag['k_elbow'],
+                    'k_silhouette': diag['k_silhouette'],
+                    'k_selected': diag['optimal_n'],
+                    'selection_rule': diag['selection_rule'],
+                })
+        if not rows:
+            return
+
+        output_dir = self._scheme_output_root() / model_name
+        output_dir.mkdir(parents=True, exist_ok=True)
+        filepath = output_dir / 'wkmeans_k_selection.csv'
+        pd.DataFrame(rows).to_csv(filepath, index=False, float_format='%.6f')
+        self.logger.info(f"  💾 选 K 扫描: {filepath.name}")
+
+    def _kscan_archive_root(self) -> Optional[Path]:
+        """
+        对应域/分带方案的 GMM k-scan 结果目录（固定 K 正文跑批时复用 BIC 曲线）。
+
+        Returns:
+            results/model_clustering/gmm_{dln|raw}_{scheme}/；不存在则 None
+        """
+        if self._algo_name() != 'gmm' or bool(getattr(self.config, 'k_scan', False)):
+            return None
+        body_tag = self._scheme_tag()
+        domain = (
+            'dln'
+            if self.config.preprocessing.get('perturbation', {}).get(
+                'enabled', True
+            )
+            else 'raw'
+        )
+        # 正文 moho_4band[_xyz] → k-scan 归档 gmm_dln_moho_4band[_xyz]
+        archive_scheme = body_tag
+        if not archive_scheme.startswith('gmm_'):
+            archive_scheme = f'gmm_{domain}_{body_tag}'
+        root = (
+            self.base_config.dirs['results']
+            / 'model_clustering'
+            / archive_scheme
+        )
+        return root if root.is_dir() else None
+
+    def _per_band_bic_from_kscan_csv(
+        self,
+        csv_path: Path,
+        k_overrides: Optional[Dict[str, int]] = None,
+    ) -> Dict[str, Any]:
+        """
+        从 gmm_k_selection.csv 重建 per_band['bic_analysis']，供固定 K 跑批重绘 2-3-1。
+
+        Args:
+            csv_path: k-scan 输出的 CSV 路径
+            k_overrides: 各带最终采用的 K（覆盖 CSV 中的 k_selected）
+
+        Returns:
+            {深度带: {'bic_analysis': {...}}}；文件无效则空 dict
+        """
+        if not csv_path.is_file():
+            return {}
+        try:
+            df = pd.read_csv(csv_path)
+        except Exception as exc:
+            self.logger.warning(f'  ⚠️ 读取 k-scan CSV 失败: {exc}')
+            return {}
+        if df.empty or 'band' not in df.columns:
+            return {}
+
+        per_band: Dict[str, Any] = {}
+        for band, grp in df.groupby('band', sort=False):
+            grp = grp.sort_values('k')
+            k_sel = int(grp['k_selected'].iloc[0])
+            if k_overrides and band in k_overrides:
+                k_sel = int(k_overrides[band])
+            ba: Dict[str, Any] = {
+                'band_name': str(band),
+                'n_clusters_range': grp['k'].astype(int).tolist(),
+                'bics': grp['bic'].astype(float).tolist(),
+                'silhouette': grp['silhouette'].astype(float).tolist(),
+                'silhouette_sd': grp['silhouette_sd'].astype(float).tolist(),
+                'n_points_scanned': (
+                    int(grp['n_points'].iloc[0])
+                    if 'n_points' in grp.columns
+                    else None
+                ),
+                'optimal_n': k_sel,
+                'selection_rule': (
+                    'fixed_k' if k_overrides else str(
+                        grp['selection_rule'].iloc[0]
+                    )
+                ),
+            }
+            for src, dst in (
+                ('k_bic_knee', 'knee_n'),
+                ('k_silhouette', 'k_silhouette'),
+                ('argmin_bic_k', 'argmin_n'),
+            ):
+                if src in grp.columns and pd.notna(grp[src].iloc[0]):
+                    ba[dst] = int(grp[src].iloc[0])
+            per_band[str(band)] = {'bic_analysis': ba}
+        return per_band
+
+    def _per_band_bic_from_kscan_archive(
+        self,
+        model_name: str,
+        k_overrides: Optional[Dict[str, int]] = None,
+    ) -> Dict[str, Any]:
+        """
+        从 k-scan 归档目录加载 BIC 诊断，供固定 K 正文结果补绘选 K 图。
+
+        Args:
+            model_name: 模型名
+            k_overrides: 各带最终 K
+
+        Returns:
+            per_band 字典；归档不存在则空 dict
+        """
+        root = self._kscan_archive_root()
+        if root is None:
+            return {}
+        csv_path = root / model_name / 'gmm_k_selection.csv'
+        return self._per_band_bic_from_kscan_csv(csv_path, k_overrides)
+
+    def _save_gmm_k_selection(
+        self, per_band: Dict[str, Any], model_name: str
+    ) -> None:
+        """
+        把 GMM 各带的 BIC + 轮廓系数 K 扫描结果写入 CSV，供方法学复核。
+
+        Args:
+            per_band: 分层聚类 per_band 字典
+            model_name: 模型名
+        """
+        rows: List[Dict[str, Any]] = []
+        for band, info in per_band.items():
+            ba = info.get('bic_analysis') if isinstance(info, dict) else None
+            if not isinstance(ba, dict) or 'bics' not in ba:
+                continue
+            sils = ba.get('silhouette') or [float('nan')] * len(ba['bics'])
+            sds = ba.get('silhouette_sd') or [float('nan')] * len(ba['bics'])
+            for k, bic, sil, sd in zip(
+                ba['n_clusters_range'], ba['bics'], sils, sds
+            ):
+                rows.append({
+                    'model': model_name,
+                    'band': band,
+                    'k': int(k),
+                    'n_points': ba.get('n_points_scanned'),
+                    'bic': float(bic),
+                    'silhouette': float(sil),
+                    'silhouette_sd': float(sd),
+                    'k_bic_knee': ba.get('knee_n'),
+                    'k_silhouette': ba.get('k_silhouette'),
+                    'k_selected': ba.get('optimal_n'),
+                    'selection_rule': ba.get('selection_rule'),
+                    'argmin_bic_k': ba.get('argmin_n'),
+                })
+        if not rows:
+            return
+        output_dir = self._scheme_output_root() / model_name
+        output_dir.mkdir(parents=True, exist_ok=True)
+        filepath = output_dir / 'gmm_k_selection.csv'
+        pd.DataFrame(rows).to_csv(filepath, index=False, float_format='%.6f')
+        self.logger.info(f"  💾 GMM 选 K 扫描: {filepath.name}")
+
+    def _save_crossplot_diagnostics(
+        self, diagnostics: Dict[str, Dict[str, float]], model_name: str
+    ) -> None:
+        """
+        将交会图诊断量写入 CSV，供跨模型汇总与论文引用。
+
+        Args:
+            diagnostics: {深度带名: 诊断量字典}
+            model_name: 模型名
+        """
+        if not diagnostics:
+            return
+        output_dir = self._scheme_output_root() / model_name
+        output_dir.mkdir(parents=True, exist_ok=True)
+        df = pd.DataFrame.from_dict(diagnostics, orient='index')
+        df.index.name = 'band'
+        df.insert(0, 'model', model_name)
+        filepath = output_dir / 'crossplot_diagnostics.csv'
+        df.to_csv(filepath, float_format='%.4f')
+        self.logger.info(f"  💾 交会图诊断量: {filepath.name}")
+
+    def _save_method_diagnostics(
+        self,
+        diagnostics: Dict[str, Dict[str, Any]],
+        model_name: str,
+        algorithm: str,
+    ) -> None:
+        """
+        将 HDBSCAN / 层次聚类的方法学诊断写入 JSON
+
+        Args:
+            diagnostics: {深度带名: 诊断字典}
+            model_name: 模型名
+            algorithm: 算法名
+        """
+        if not diagnostics:
+            return
+        output_dir = self._scheme_output_root() / model_name
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        def _jsonify(obj: Any) -> Any:
+            if isinstance(obj, dict):
+                return {str(k): _jsonify(v) for k, v in obj.items()}
+            if isinstance(obj, (list, tuple)):
+                return [_jsonify(v) for v in obj]
+            if isinstance(obj, (np.floating, float)):
+                return float(obj)
+            if isinstance(obj, (np.integer, int)):
+                return int(obj)
+            if isinstance(obj, np.ndarray):
+                return obj.tolist()
+            if isinstance(obj, (str, bool)) or obj is None:
+                return obj
+            return str(obj)
+
+        out = {
+            'model': model_name,
+            'algorithm': algorithm,
+            'bands': _jsonify(diagnostics),
+        }
+        filepath = output_dir / f'{algorithm}_method_diagnostics.json'
+        with open(filepath, 'w', encoding='utf-8') as f:
+            json.dump(out, f, ensure_ascii=False, indent=2)
+        self.logger.info(f"  💾 方法学诊断: {filepath.name}")
+
+    def _save_centroid_phylogeny(
+        self, phylo: Dict[str, Any], model_name: str
+    ) -> None:
+        """保存簇心谱系与 facies 解释 JSON"""
+        output_dir = self._scheme_output_root() / model_name
+        output_dir.mkdir(parents=True, exist_ok=True)
+        filepath = output_dir / 'gmm_centroid_phylogeny.json'
+        with open(filepath, 'w', encoding='utf-8') as f:
+            json.dump(phylo, f, ensure_ascii=False, indent=2)
+        self.logger.info(f"  💾 簇心谱系: {filepath.name}")
+
+    def _save_cross_algorithm_ari(
+        self, comparison: Dict[str, Any], model_name: str
+    ) -> None:
+        """保存 GMM vs 对照算法的 ARI/NMI"""
+        output_dir = self._scheme_output_root() / model_name
+        output_dir.mkdir(parents=True, exist_ok=True)
+        filepath = output_dir / 'cross_algorithm_ari.json'
+        with open(filepath, 'w', encoding='utf-8') as f:
+            json.dump(comparison, f, ensure_ascii=False, indent=2)
+        self.logger.info(f"  💾 算法一致率: {filepath.name}")
     
     def _save_results(self, results: Dict[str, Any], model_name: str) -> None:
         """保存聚类结果"""
         output_dir = self._scheme_output_root() / model_name
         output_dir.mkdir(parents=True, exist_ok=True)
         
-        gmm_results = results['gmm_results']
+        cluster_res = results['cluster_results']
+        # 文件名带算法前缀：W-k-means 的结果不应被读成 GMM 的
+        algo = self._algo_name()
         
         # 1. 保存标签
         if self.config.output['save_labels']:
+            fname = f'{algo}_labels.npz'
             np.savez_compressed(
-                output_dir / 'gmm_labels.npz',
-                labels_1d=gmm_results['labels'],
-                labels_3d=gmm_results['labels_3d'],
+                output_dir / fname,
+                labels_1d=cluster_res['labels'],
+                labels_3d=cluster_res['labels_3d'],
                 spatial_indices=results['spatial_indices']
             )
-            self.logger.info(f"  ✅ 保存标签: gmm_labels.npz")
-        
-        # 2. 保存概率
-        if self.config.output['save_probabilities']:
+            self.logger.info(f"  ✅ 保存标签: {fname}")
+
+        # 2. 保存概率（W-k-means 为硬指派，无后验概率，跳过）
+        if (
+            self.config.output['save_probabilities']
+            and cluster_res.get('probabilities_3d') is not None
+        ):
+            fname = f'{algo}_probabilities.npz'
             np.savez_compressed(
-                output_dir / 'gmm_probabilities.npz',
-                probabilities=gmm_results['probabilities'],
-                probabilities_3d=gmm_results['probabilities_3d']
+                output_dir / fname,
+                probabilities=cluster_res['probabilities'],
+                probabilities_3d=cluster_res['probabilities_3d']
             )
-            self.logger.info(f"  ✅ 保存概率: gmm_probabilities.npz")
+            self.logger.info(f"  ✅ 保存概率: {fname}")
+
+        # 2b. W-k-means 专属输出：特征权重、径向统计、层界深度
+        if cluster_res.get('per_band') and algo == 'wkmeans':
+            names = list(results['metadata'].get('feature_display_names')
+                         or results['metadata'].get('features', []))
+            rows = [
+                {'model': model_name, 'band': b, 'n_clusters': v['n_clusters'],
+                 **{f'w_{n}': float(w)
+                    for n, w in zip(names, v['feature_weights'])}}
+                for b, v in cluster_res['per_band'].items()
+            ]
+            pd.DataFrame(rows).to_csv(
+                output_dir / 'wkmeans_feature_weights.csv',
+                index=False, float_format='%.6f',
+            )
+            self.logger.info("  ✅ 保存特征权重: wkmeans_feature_weights.csv")
+
+        if cluster_res.get('radial_stats') is not None:
+            stats_df = cluster_res['radial_stats'].copy()
+            stats_df.insert(0, 'model', model_name)
+            stats_df.to_csv(output_dir / 'wkmeans_radial_stats.csv',
+                            index=False, float_format='%.4f')
+            self.logger.info("  ✅ 保存径向统计: wkmeans_radial_stats.csv")
+        if cluster_res.get('boundary_depths') is not None:
+            cluster_res['boundary_depths'].to_csv(
+                output_dir / 'wkmeans_boundary_depths.csv', index=False,
+                float_format='%.2f',
+            )
+            self.logger.info("  ✅ 保存层界深度: wkmeans_boundary_depths.csv")
         
         # 3. 保存NetCDF格式
         if 'nc' in self.config.output['result_formats']:
@@ -2706,26 +5138,43 @@ class SmartClusteringPipeline:
         meta_out = {
             'model_name': model_name,
             'version': 'v7.5',
+            'algorithm': algo,
             'analysis_date': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            'mode': gmm_results.get('mode', 'full_depth'),
-            'n_clusters': int(gmm_results['n_clusters']),
+            'mode': cluster_res.get('mode', 'full_depth'),
+            'n_clusters': int(cluster_res['n_clusters']),
             'features_used': results['metadata']['features'],
             'feature_space': results['preprocessing_info'].get('feature_space'),
             'spatial_range': results['metadata']['spatial_range'],
             'preprocessing': _jsonify(results['preprocessing_info']),
-            'gmm_metrics': _jsonify(
+            'cluster_metrics': _jsonify(
                 {
                     k: v
-                    for k, v in gmm_results['metrics'].items()
+                    for k, v in cluster_res['metrics'].items()
                     if not isinstance(v, (GaussianMixture,))
                 }
             ),
-            'bic_analysis': {
-                'optimal_n': int(gmm_results['bic_analysis']['optimal_n']),
-                'optimal_bic': float(gmm_results['bic_analysis']['optimal_bic']),
-            },
-            'band_optimal_k': gmm_results['metrics'].get('band_optimal_k'),
+            'bic_analysis': (
+                {
+                    'optimal_n': int(cluster_res['bic_analysis']['optimal_n']),
+                    'optimal_bic': float(
+                        cluster_res['bic_analysis']['optimal_bic']
+                    ),
+                }
+                if cluster_res.get('bic_analysis') else None
+            ),
+            'band_optimal_k': cluster_res['metrics'].get('band_optimal_k'),
         }
+        if algo == 'wkmeans':
+            meta_out['wkmeans'] = _jsonify({
+                'beta': self.config.wkmeans['beta'],
+                'k_selection': self.config.wkmeans['k_selection'],
+                'band_k_selection': cluster_res.get('k_selection'),
+                'feature_weights': cluster_res.get('feature_weights'),
+                'band_feature_weights': cluster_res['metrics'].get(
+                    'band_feature_weights'
+                ),
+                'cluster_centers': cluster_res.get('cluster_centers'),
+            })
 
         with open(output_dir / 'analysis_metadata.json', 'w', encoding='utf-8') as f:
             json.dump(meta_out, f, indent=2, ensure_ascii=False)
@@ -2736,18 +5185,21 @@ class SmartClusteringPipeline:
         """保存为NetCDF格式"""
         try:
             metadata = results['metadata']
-            gmm_results = results['gmm_results']
-            probs_3d = gmm_results['probabilities_3d']
-            if gmm_results.get('max_probability_3d') is not None:
-                max_prob_3d = gmm_results['max_probability_3d']
-            else:
+            cluster_res = results['cluster_results']
+            probs_3d = cluster_res.get('probabilities_3d')
+            if cluster_res.get('max_probability_3d') is not None:
+                max_prob_3d = cluster_res['max_probability_3d']
+            elif probs_3d is not None:
                 max_prob_3d = np.max(probs_3d, axis=-1)
+            else:
+                # 硬指派（W-k-means）：有效体元置信度记为 1
+                max_prob_3d = (cluster_res['labels_3d'] >= 0).astype(np.float32)
 
             ds = xr.Dataset(
                 {
                     'cluster_labels': (
                         ['latitude', 'longitude', 'depth'],
-                        gmm_results['labels_3d'].astype(np.int16),
+                        cluster_res['labels_3d'].astype(np.int16),
                     ),
                     'max_probability': (
                         ['latitude', 'longitude', 'depth'],
@@ -2761,8 +5213,9 @@ class SmartClusteringPipeline:
                 },
                 attrs={
                     'title': f'Velocity Facies GMM — {results["model_name"]}',
-                    'n_clusters': int(gmm_results['n_clusters']),
-                    'method': gmm_results.get('mode', 'gmm'),
+                    'n_clusters': int(cluster_res['n_clusters']),
+                    'algorithm': self._algo_name(),
+                    'method': cluster_res.get('mode', 'full_depth'),
                     'feature_space': results['preprocessing_info'].get(
                         'feature_space', 'absolute'
                     ),
@@ -2771,30 +5224,31 @@ class SmartClusteringPipeline:
                 },
             )
 
-            # 全深度模式保存各簇概率；分层模式仅保留 max_probability
+            # 全深度模式保存各簇概率；分层与硬指派模式仅保留 max_probability
             if (
-                gmm_results.get('mode') != 'depth_stratified'
+                cluster_res.get('mode') != 'depth_stratified'
+                and probs_3d is not None
                 and probs_3d.ndim == 4
-                and probs_3d.shape[-1] == gmm_results['n_clusters']
+                and probs_3d.shape[-1] == cluster_res['n_clusters']
             ):
-                for i in range(gmm_results['n_clusters']):
+                for i in range(cluster_res['n_clusters']):
                     ds[f'probability_cluster_{i}'] = (
                         ['latitude', 'longitude', 'depth'],
                         probs_3d[:, :, :, i].astype(np.float32),
                     )
 
-            output_file = output_dir / 'gmm_clustering_results.nc'
+            output_file = output_dir / f'{self._algo_name()}_clustering_results.nc'
             ds.to_netcdf(output_file)
             ds.close()
-            self.logger.info("  ✅ 保存NetCDF: gmm_clustering_results.nc")
+            self.logger.info(f"  ✅ 保存NetCDF: {output_file.name}")
 
         except Exception as e:
             self.logger.warning(f"  ⚠️ NetCDF保存失败: {e}")
     
     def _save_cluster_statistics(self, results: Dict[str, Any], output_dir: Path) -> None:
         """保存聚类统计信息"""
-        gmm_results = results['gmm_results']
-        labels = gmm_results['labels']
+        cluster_res = results['cluster_results']
+        labels = cluster_res['labels']
         X = results['features']
         metadata = results['metadata']
         
@@ -2879,27 +5333,50 @@ class SmartClusteringPipeline:
                 f.write("=" * 80 + "\n\n")
                 
                 for model_name, results in self.all_results.items():
-                    gmm_results = results['gmm_results']
-                    metrics = gmm_results['metrics']
+                    cluster_res = results['cluster_results']
+                    metrics = cluster_res['metrics']
                     
                     f.write(f"\n模型: {model_name}\n")
                     f.write("-" * 40 + "\n")
-                    f.write(f"聚类数: {gmm_results['n_clusters']}\n")
+                    f.write(f"聚类数: {cluster_res['n_clusters']}\n")
                     f.write(f"特征: {', '.join(results['metadata']['features'])}\n")
-                    f.write(f"数据点数: {len(gmm_results['labels']):,}\n")
+                    f.write(f"数据点数: {len(cluster_res['labels']):,}\n")
                     f.write(f"\n性能指标:\n")
-                    f.write(f"  - BIC: {metrics['bic']:.2f}\n")
+                    if 'bic' in metrics:
+                        f.write(f"  - BIC: {metrics['bic']:.2f}\n")
+                    if 'inertia' in metrics:
+                        f.write(f"  - 目标函数: {metrics['inertia']:.6f}\n")
                     f.write(f"  - 轮廓系数: {metrics.get('silhouette_score', 0):.4f}\n")
                     f.write(f"  - Davies-Bouldin: {metrics.get('davies_bouldin_score', 0):.4f}\n")
                     f.write(f"  - Calinski-Harabasz: {metrics.get('calinski_harabasz_score', 0):.2f}\n")
-                    f.write(f"\n概率分析:\n")
-                    f.write(f"  - 平均最大概率: {metrics['mean_max_probability']:.4f}\n")
-                    f.write(f"  - 高置信度比例: {metrics['high_confidence_ratio']:.2%}\n")
-                    f.write(f"  - 平均熵: {metrics['mean_entropy']:.4f}\n")
+
+                    # W-k-means 为硬指派，无后验概率
+                    if 'mean_max_probability' in metrics:
+                        f.write(f"\n概率分析:\n")
+                        f.write(f"  - 平均最大概率: {metrics['mean_max_probability']:.4f}\n")
+                        f.write(f"  - 高置信度比例: {metrics['high_confidence_ratio']:.2%}\n")
+                        f.write(f"  - 平均熵: {metrics['mean_entropy']:.4f}\n")
+                    if metrics.get('feature_weights') is not None:
+                        weights = ', '.join(
+                            f'{w:.4f}' for w in metrics['feature_weights']
+                        )
+                        f.write(f"\n特征权重: {weights}\n")
+
                     f.write(f"\n计算信息:\n")
-                    f.write(f"  - 拟合时间: {metrics['fit_time']:.2f}秒\n")
-                    f.write(f"  - 是否收敛: {'是' if metrics['converged'] else '否'}\n")
-                    f.write(f"  - 迭代次数: {metrics['n_iter']}\n")
+                    if 'fit_time' in metrics:
+                        f.write(f"  - 拟合时间: {metrics['fit_time']:.2f}秒\n")
+                    if 'converged' in metrics:
+                        f.write(
+                            f"  - 是否收敛: {'是' if metrics['converged'] else '否'}\n"
+                        )
+                    if 'n_iter' in metrics:
+                        f.write(f"  - 迭代次数: {metrics['n_iter']}\n")
+                    if metrics.get('noise_fraction') is not None:
+                        f.write(
+                            f"  - 噪声体元比例: {metrics['noise_fraction']:.2%}\n"
+                        )
+                    if metrics.get('band_n_clusters'):
+                        f.write(f"  - 各带簇数: {metrics['band_n_clusters']}\n")
             
             if failed_models:
                 f.write("\n\n" + "=" * 80 + "\n")
@@ -2934,7 +5411,7 @@ class SmartClusteringPipeline:
 EASTASIA-FWI 单模型速度相聚类  v7.6
 ================================================================================
   - 数据: 各模型 original.nc（原生 lon/lat，深度 ≤1000 km）
-  - 特征: 相对水平平均 1D 参考的 δlnV（消除深度主趋势）
+  - 特征: 默认 δlnVp/δlnVs（模型原生 vp0/vs0；SinoScope 回退水平平均 1D）；--raw 用 Vp/Vs 绝对值
   - 分层方案: {scheme}
   - 分层: {band_desc}
   - 算法: 深度分层 GMM，选 K 判据 = {rule_desc}
@@ -2947,8 +5424,76 @@ EASTASIA-FWI 单模型速度相聚类  v7.6
         print(header)
 
 
+def _build_arg_parser() -> argparse.ArgumentParser:
+    """命令行参数：用于在不改代码的前提下切换算法与特征空间做对照测试"""
+    p = argparse.ArgumentParser(
+        description='EASTASIA-FWI 单模型速度聚类分析',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            '示例:\n'
+            '  # 正文主路径：扰动域 + 分带 GMM\n'
+            '  python 2_3_Model_clustering.py\n\n'
+            '  # 对照测试：原始速度值 + 全深度 W-k-means（Hao et al. 2026 方案）\n'
+            '  python 2_3_Model_clustering.py --algorithm wkmeans --raw -k 8\n\n'
+            '  # 再加坐标增广（经度/纬度/深度并入特征空间）\n'
+            '  python 2_3_Model_clustering.py --algorithm wkmeans --raw --coords\n'
+        ),
+    )
+    p.add_argument('--algorithm',
+                   choices=['gmm', 'wkmeans', 'hdbscan', 'hierarchical'],
+                   default='gmm',
+                   help='聚类算法（默认 gmm）')
+    p.add_argument('--raw', action='store_true',
+                   help='用原始速度值而非 δlnV 扰动域')
+    p.add_argument('--coords', action='store_true',
+                   help='把经度/纬度/深度并入特征空间')
+    p.add_argument('--full-depth', action='store_true',
+                   help='关闭深度分带，0-1000 km 一次性聚类（径向分层分析）')
+    p.add_argument('-k', '--n-clusters', type=int, default=None,
+                   help='固定 W-k-means 的簇数 K，跳过自动选 K')
+    p.add_argument('--k-method',
+                   choices=['elbow', 'elbow_silhouette', 'sse_threshold',
+                            'silhouette'],
+                   default=None,
+                   help='选 K 判据（默认 elbow）')
+    p.add_argument('--k-max', type=int, default=None,
+                   help='K 搜索上界（moho_4band 四带统一；fixed_3band 见分带参数）')
+    p.add_argument(
+        '--scheme', choices=['moho_4band', 'fixed_3band'], default=None,
+        help='深度分带方案（默认 moho_4band）',
+    )
+    p.add_argument('--k-scan', action='store_true',
+                   help='GMM BIC 拐点自动选 K（清除分带 fixed_k 先验）')
+    p.add_argument('--k-max-shallow', type=int, default=None,
+                   help='fixed_3band 浅部(0-410 km) K 上界')
+    p.add_argument('--k-max-crust', type=int, default=None,
+                   help='moho_4band 地壳(z<Moho) K 上界')
+    p.add_argument('--k-max-lithosphere', type=int, default=None,
+                   help='moho_4band 岩石圈(Moho→410 km) K 上界')
+    p.add_argument('--k-max-transition', type=int, default=None,
+                   help='过渡带(410-660 km) K 上界')
+    p.add_argument('--k-max-lower', type=int, default=None,
+                   help='下地幔(660-1000 km) K 上界')
+    p.add_argument('--k-crust', type=int, default=None,
+                   help='moho_4band 地壳固定 K（跳过 BIC 选 K，直接聚类）')
+    p.add_argument('--k-lithosphere', type=int, default=None,
+                   help='moho_4band 岩石圈固定 K')
+    p.add_argument('--k-transition', type=int, default=None,
+                   help='过渡带(410-660 km) 固定 K')
+    p.add_argument('--k-lower', type=int, default=None,
+                   help='下地幔(660-1000 km) 固定 K')
+    p.add_argument('--beta', type=float, default=None,
+                   help='W-k-means 的权重调节参数（默认 6.5，须在 [0,1] 之外）')
+    p.add_argument('--scan-beta', action='store_true',
+                   help='扫描 β 并按平均轮廓系数标定（Hao et al. 2026 图 S39b）')
+    p.add_argument('--models', nargs='+', default=None,
+                   help='指定模型名，默认使用配置中的三个模型')
+    return p
+
+
 def main() -> int:
     """主函数"""
+    args = _build_arg_parser().parse_args()
     try:
         config = ClusteringConfig()
 
@@ -2978,24 +5523,120 @@ def main() -> int:
         # 速度相默认用各向同性 Vp/Vs
         features_to_use = ['vp', 'vs']
 
+        # ===== 命令行覆盖：对照测试路径 =====
+        config.algorithm = args.algorithm
+        if args.scheme is not None:
+            config.depth_stratified['scheme'] = args.scheme
+        active_scheme = str(config.depth_stratified.get('scheme', 'moho_4band'))
+        active_bands = config.depth_stratified['schemes'][active_scheme]['bands']
+
+        if args.algorithm in ('hdbscan', 'hierarchical'):
+            # HDBSCAN 完全自动定 K；层次聚类默认 respect_fixed_k=True 对齐先验
+            if args.algorithm == 'hdbscan':
+                for band in active_bands:
+                    band['fixed_k'] = None
+        if args.raw:
+            config.preprocessing['perturbation']['enabled'] = False
+        if args.coords:
+            config.preprocessing['coordinates']['enabled'] = True
+        if args.full_depth:
+            config.depth_stratified['enabled'] = False
+        if args.k_method is not None:
+            config.wkmeans['k_selection']['method'] = args.k_method
+        if args.k_max is not None:
+            for band in active_bands:
+                band['max_clusters'] = args.k_max
+            config.wkmeans['k_selection']['max_clusters'] = args.k_max
+        # 分带 K 上界（GMM BIC 扫描 / W-k-means 肘部扫描）
+        k_band_map = {
+            'shallow': args.k_max_shallow,
+            'crust': args.k_max_crust,
+            'lithosphere': args.k_max_lithosphere,
+            'transition_zone': args.k_max_transition,
+            'lower_mantle': args.k_max_lower,
+        }
+        k_fixed_map = {
+            'crust': args.k_crust,
+            'lithosphere': args.k_lithosphere,
+            'transition_zone': args.k_transition,
+            'lower_mantle': args.k_lower,
+            'shallow': None,
+        }
+        if args.k_scan:
+            config.k_scan = True
+            config.auto_gmm['k_selection'] = 'bic_knee_silhouette'
+            for band in active_bands:
+                band.pop('fixed_k', None)
+            config.auto_gmm['bic_diagnostic_when_fixed'] = False
+        elif any(v is not None for v in k_fixed_map.values()):
+            # 人工裁定 K：跳过 BIC 扫描，直接按 fixed_k 聚类（快）
+            config.auto_gmm['bic_diagnostic_when_fixed'] = False
+            for band in active_bands:
+                k_fix = k_fixed_map.get(band['name'])
+                if k_fix is not None:
+                    band['fixed_k'] = int(k_fix)
+        for band in active_bands:
+            k_hi = k_band_map.get(band['name'])
+            if k_hi is not None:
+                band['max_clusters'] = int(k_hi)
+            if args.algorithm == 'wkmeans' and not config.wkmeans['k_selection'].get(
+                'respect_fixed_k', False
+            ):
+                band.pop('fixed_k', None)
+        if args.n_clusters is not None:
+            config.wkmeans['k_selection']['method'] = 'fixed'
+            config.wkmeans['k_selection']['fixed_k'] = args.n_clusters
+        if args.beta is not None:
+            config.wkmeans['beta'] = args.beta
+        if args.scan_beta:
+            config.wkmeans['beta_selection']['enabled'] = True
+
         pipeline = SmartClusteringPipeline(config)
-        results = pipeline.run_analysis(features_to_use=features_to_use)
+        results = pipeline.run_analysis(
+            model_names=args.models, features_to_use=features_to_use
+        )
 
         print(f"\n{'=' * 80}")
         print(f"✅ 分析完成！共处理 {len(results)} 个模型")
         print(f"{'=' * 80}\n")
 
         for model_name, result in results.items():
-            gmm = result['gmm_results']
+            res = result['cluster_results']
             print(f"\n模型: {model_name}")
-            print(f"  模式: {gmm.get('mode')} / {gmm.get('scheme', gmm['metrics'].get('scheme'))}")
-            print(f"  全局簇数: {gmm['n_clusters']}")
-            if gmm['metrics'].get('band_optimal_k'):
-                print(f"  各带 K: {gmm['metrics']['band_optimal_k']}")
-            print(
-                f"  平均最大概率: "
-                f"{gmm['metrics'].get('mean_max_probability', 0):.4f}"
-            )
+            print(f"  模式: {res.get('mode')} / "
+                  f"{res.get('scheme', res['metrics'].get('scheme'))}")
+            print(f"  全局簇数: {res['n_clusters']}")
+
+            if res['metrics'].get('band_optimal_k'):
+                print(f"  各带 K: {res['metrics']['band_optimal_k']}")
+
+            if str(res.get('algorithm')) == 'wkmeans':
+                names = result['metadata'].get('feature_display_names', [])
+                print(f"  平均轮廓系数: "
+                      f"{res['metrics'].get('silhouette_score', float('nan')):.4f}")
+                for band, diag in (res.get('k_selection') or {}).items():
+                    if 'k_elbow' not in diag:
+                        continue
+                    print(f"  [{band}] 肘部 K={diag['k_elbow']}, "
+                          f"轮廓最优 K={diag['k_silhouette']}, "
+                          f"采用 K={diag['optimal_n']} "
+                          f"(轮廓系数 {diag['silhouette_at_optimal']:.4f})")
+                for band, v in (res.get('per_band') or {}).items():
+                    print(f"  [{band}] 特征权重: " + '  '.join(
+                        f'{n}={w:.3f}'
+                        for n, w in zip(names, v['feature_weights'])
+                    ))
+                bnd = res.get('boundary_depths')
+                if bnd is not None and not bnd.empty:
+                    print("  层界深度 (km，中位数 / 横向起伏):")
+                    for _, r in bnd.iterrows():
+                        print(f"    界{int(r['boundary'])}: "
+                              f"{r['depth_median']:>6.1f} / {r['relief']:>5.1f}")
+            else:
+                print(
+                    f"  平均最大概率: "
+                    f"{res['metrics'].get('mean_max_probability', 0):.4f}"
+                )
         return 0
 
     except KeyboardInterrupt:
