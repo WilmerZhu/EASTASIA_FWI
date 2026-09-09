@@ -1,0 +1,77 @@
+flowchart TB
+    subgraph Sel["0. Event selection"]
+        GCMT["GCMT3D catalog"] --> SEL["select_test_events.py<br/>by tectonic province"]
+        SEL --> E10["10 events<br/>5 shallow / 2 intermediate / 3 deep<br/>ECEF CMTSOLUTION"]
+    end
+
+    subgraph Prep["1. prepare on Sugon"]
+        P1["run_all_test.sh prepare"]
+        P1 --> P2["check paths / CMT / compile"]
+        P2 --> P3["write Slurm scripts<br/>jobs/run_MESH0.slurm<br/>jobs/run_TAG.slurm"]
+    end
+
+    subgraph Mesh0["2. MESH0 — coordinate baseline once"]
+        M0["MODEL = s362ani<br/>xmeshfem3D"] --> M0OK["mesh0/DATABASES_MPI<br/>.mesh_ok"]
+        M0OK --> NOTE0["sole interpolation grid<br/>also CRUST1.0 + s362ani base"]
+    end
+
+    subgraph Groups["3. Five model groups — mesh once, solve x10"]
+        direction TB
+        DEP["each group waits for MESH0 .mesh_ok"]
+
+        subgraph GBuild["Stage A — build DATA/GLL"]
+            BASE["BASE<br/>symlink model_updated<br/>no rebuild"]
+            HYB["S362ANI_c1 / FWEA23_c1<br/>EARA2024_c1 / SinoScope_c1<br/>build_hybrid_gll.py"]
+            HYB --> HYB2["coords from mesh0<br/>crust = CRUST1.0 to Moho<br/>mantle = regional model<br/>latlon box + cosine taper"]
+        end
+
+        subgraph GMesh["Stage B — mesher once per group"]
+            MESH["MODEL = GLL<br/>xmeshfem3D"]
+            CHK["check_mesh_diff.py<br/>vs mesh0 coords"]
+            MESH --> CHK
+            CHK --> COK[".coord_ok"]
+        end
+
+        subgraph GSolv["Stage C — solver loop over 10 events"]
+            LOOP["for each event in events.list"]
+            LOOP --> SKIP{"sac/TAG/EVENT/.done?"}
+            SKIP -->|yes| NEXT["skip"]
+            SKIP -->|no| CMT["swap DATA/CMTSOLUTION"]
+            CMT --> SOL["mpirun xspecfem3D<br/>~70 min / event"]
+            SOL --> SAC["mv SAC → sac/TAG/EVENT/<br/>write .done"]
+            SAC --> NEXT
+            NEXT --> LOOP
+        end
+
+        DEP --> GBuild --> GMesh --> GSolv
+    end
+
+    subgraph Ref["4. Optional control — S362ANI_ref"]
+        R1["reuse mesh0 DATABASES_MPI<br/>no GLL rebuild / no mesher"] --> R2["solver once<br/>ROUNDTRIP_EVENT only"]
+        R2 --> R3["vs S362ANI_c1<br/>quantify GLL round-trip cost"]
+    end
+
+    subgraph Out["5. Outputs"]
+        O1["sac/BASE/EVENT/*.sac"]
+        O2["sac/S362ANI_c1/EVENT/*.sac"]
+        O3["sac/FWEA23_c1/EVENT/*.sac"]
+        O4["sac/EARA2024_c1/EVENT/*.sac"]
+        O5["sac/SinoScope_c1/EVENT/*.sac"]
+        O6["5 groups x 10 events<br/>+ 1 ref solver = 51 runs"]
+    end
+
+    Sel --> Prep --> Mesh0
+    Mesh0 --> Groups
+    Mesh0 --> Ref
+    Groups --> Out
+    Ref --> Out
+
+    style Sel fill:#e3f2fd
+    style Prep fill:#fff8e1
+    style Mesh0 fill:#fce4ec
+    style Groups fill:#e8f5e9
+    style GBuild fill:#f1f8e9
+    style GMesh fill:#e0f2f1
+    style GSolv fill:#e8eaf6
+    style Ref fill:#f3e5f5
+    style Out fill:#efebe9

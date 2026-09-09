@@ -1,0 +1,27 @@
+flowchart LR
+    A["1. Select<br/>10 events"] --> B["2. MESH0 once<br/>s362ani grid"]
+    B --> C
+
+    subgraph C["3. Per model — build DATA/GLL"]
+        direction TB
+        C0["coords from mesh0"]
+        C1["BASE = original FWEA23_Chujie<br/>symlink model_updated<br/>no rebuild"]
+        C2["S362ANI_c1<br/>FWEA23_c1 / EARA2024_c1<br/>SinoScope_c1<br/>build_hybrid_gll.py<br/>CRUST1.0 to Moho<br/>+ regional mantle<br/>box + cosine taper"]
+        C0 --> C1
+        C0 --> C2
+    end
+
+    C --> D["4. Mesher once<br/>+ coord check"]
+    D --> E["5. Solver x10<br/>swap CMT only"]
+    E --> F["6. sac/TAG/EVENT"]
+
+    B -.-> G["S362ANI_ref<br/>1 event only<br/>GLL round-trip"]
+    G -.-> F
+
+    style A fill:#e3f2fd
+    style B fill:#fce4ec
+    style C fill:#e8f5e9
+    style D fill:#e0f2f1
+    style E fill:#e8eaf6
+    style F fill:#efebe9
+    style G fill:#f3e5f5

@@ -1,0 +1,59 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 3141.1500000000005 312" width="3141.1500000000005" height="312" style="--bg:#ffffff;--fg:#1f2328;--line:#d1d9e0;--accent:#0969da;--muted:#59636e;background:var(--bg)">
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;display=swap');
+  text { font-family: 'Inter', system-ui, sans-serif; }
+  svg {
+    /* Derived from --bg and --fg (overridable via --line, --accent, etc.) */
+    --_text:          var(--fg);
+    --_text-sec:      var(--muted, color-mix(in srgb, var(--fg) 60%, var(--bg)));
+    --_text-muted:    var(--muted, color-mix(in srgb, var(--fg) 40%, var(--bg)));
+    --_text-faint:    color-mix(in srgb, var(--fg) 25%, var(--bg));
+    --_line:          var(--line, color-mix(in srgb, var(--fg) 30%, var(--bg)));
+    --_arrow:         var(--accent, color-mix(in srgb, var(--fg) 50%, var(--bg)));
+    --_node-fill:     var(--surface, color-mix(in srgb, var(--fg) 3%, var(--bg)));
+    --_node-stroke:   var(--border, color-mix(in srgb, var(--fg) 20%, var(--bg)));
+    --_group-fill:    var(--bg);
+    --_group-hdr:     color-mix(in srgb, var(--fg) 5%, var(--bg));
+    --_inner-stroke:  color-mix(in srgb, var(--fg) 12%, var(--bg));
+    --_key-badge:     color-mix(in srgb, var(--fg) 10%, var(--bg));
+  }
+</style>
+<defs>
+  <marker id="arrowhead" markerWidth="8" markerHeight="4.8" refX="8" refY="2.4" orient="auto">
+    <polygon points="0 0, 8 2.4, 0 4.8" fill="var(--_arrow)" />
+  </marker>
+  <marker id="arrowhead-start" markerWidth="8" markerHeight="4.8" refX="0" refY="2.4" orient="auto-start-reverse">
+    <polygon points="8 0, 0 2.4, 8 4.8" fill="var(--_arrow)" />
+  </marker>
+</defs>
+<rect x="591.5500000000002" y="40" width="1685.8500000000004" height="172" rx="0" ry="0" fill="var(--_group-fill)" stroke="var(--_node-stroke)" stroke-width="1" />
+<rect x="591.5500000000002" y="40" width="1685.8500000000004" height="28" rx="0" ry="0" fill="var(--_group-hdr)" stroke="var(--_node-stroke)" stroke-width="1" />
+<text x="603.5500000000002" y="54" dy="0.35em" font-size="12" font-weight="600" fill="var(--_text-sec)">&quot;3. Per model — build DATA/GLL&quot;</text>
+<polyline points="250.75,199 290.75,199" fill="none" stroke="var(--_line)" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="551.5500000000001,199 571.5500000000001,199 571.5500000000001,144 591.5500000000002,144" fill="none" stroke="var(--_line)" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="2277.4000000000005,144 2317.4000000000005,144" fill="none" stroke="var(--_line)" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="2592.500000000001,144 2632.5000000000005,144" fill="none" stroke="var(--_line)" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="2900.4500000000003,144 3020.8000000000006,144 3020.8000000000006,181" fill="none" stroke="var(--_line)" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="551.5500000000001,199 571.5500000000001,199 571.5500000000001,254 1243.3000000000004,254" fill="none" stroke="var(--_line)" stroke-width="0.75" stroke-dasharray="4 4" marker-end="url(#arrowhead)" />
+<polyline points="1625.6500000000003,254 3020.8000000000006,254 3020.8000000000006,217" fill="none" stroke="var(--_line)" stroke-width="0.75" stroke-dasharray="4 4" marker-end="url(#arrowhead)" />
+<polyline points="1300.4125000000004,124 1300.4125000000004,144 880.9500000000003,144 880.9500000000003,164" fill="none" stroke="var(--_line)" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="1300.4125000000004,124 1300.4125000000004,144 1719.8750000000005,144 1719.8750000000005,164" fill="none" stroke="var(--_line)" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<rect x="39.999999999999986" y="181" width="210.75000000000003" height="36" rx="0" ry="0" fill="#e3f2fd" stroke="var(--_node-stroke)" stroke-width="0.75" />
+<rect x="290.75" y="181" width="260.8" height="36" rx="0" ry="0" fill="#fce4ec" stroke="var(--_node-stroke)" stroke-width="0.75" />
+<rect x="2317.4000000000005" y="126" width="275.1" height="36" rx="0" ry="0" fill="#e0f2f1" stroke="var(--_node-stroke)" stroke-width="0.75" />
+<rect x="2632.5000000000005" y="126" width="267.95000000000005" height="36" rx="0" ry="0" fill="#e8eaf6" stroke="var(--_node-stroke)" stroke-width="0.75" />
+<rect x="2940.4500000000007" y="181" width="160.70000000000002" height="36" rx="0" ry="0" fill="#efebe9" stroke="var(--_node-stroke)" stroke-width="0.75" />
+<rect x="1243.3000000000004" y="236" width="382.35" height="36" rx="0" ry="0" fill="#f3e5f5" stroke="var(--_node-stroke)" stroke-width="0.75" />
+<rect x="1216.4875000000004" y="88" width="167.85000000000002" height="36" rx="0" ry="0" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+<rect x="607.5500000000002" y="164" width="546.8000000000001" height="36" rx="0" ry="0" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+<rect x="1178.3500000000004" y="164" width="1083.0500000000002" height="36" rx="0" ry="0" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+<text x="145.375" y="199" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="var(--_text)">&quot;1. Select&lt;br/&gt;10 events&quot;</text>
+<text x="421.15" y="199" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="var(--_text)">&quot;2. MESH0 once&lt;br/&gt;s362ani grid&quot;</text>
+<text x="2454.9500000000007" y="144" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="var(--_text)">&quot;4. Mesher once&lt;br/&gt;+ coord check&quot;</text>
+<text x="2766.4750000000004" y="144" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="var(--_text)">&quot;5. Solver x10&lt;br/&gt;swap CMT only&quot;</text>
+<text x="3020.8000000000006" y="199" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="var(--_text)">&quot;6. sac/TAG/EVENT&quot;</text>
+<text x="1434.4750000000004" y="254" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="var(--_text)">&quot;S362ANI_ref&lt;br/&gt;1 event only&lt;br/&gt;GLL round-trip&quot;</text>
+<text x="1300.4125000000004" y="106" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="var(--_text)">&quot;coords from mesh0&quot;</text>
+<text x="880.9500000000003" y="182" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="var(--_text)">&quot;BASE = original FWEA23_Chujie&lt;br/&gt;symlink model_updated&lt;br/&gt;no rebuild&quot;</text>
+<text x="1719.8750000000005" y="182" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="var(--_text)">&quot;S362ANI_c1&lt;br/&gt;FWEA23_c1 / EARA2024_c1&lt;br/&gt;SinoScope_c1&lt;br/&gt;build_hybrid_gll.py&lt;br/&gt;CRUST1.0 to Moho&lt;br/&gt;+ regional mantle&lt;br/&gt;box + cosine taper&quot;</text>
+</svg>

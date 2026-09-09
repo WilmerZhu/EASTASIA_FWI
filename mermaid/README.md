@@ -18,6 +18,8 @@ Scientific workflow diagrams for the EASTASIA-FWI project.
 | `10_pgm_fusion.mmd` | PGM probabilistic fusion | github-light |
 | `11_complete_dataflow.mmd` | Complete project data flow | zinc-light |
 | `12_fusion_pipeline.mmd` | Full fusion pipeline v2.0 | catppuccin-latte |
+| `13_hybrid_10event_forward.mmd` | 10-event hybrid forward (`run_all_test.sh`) | github-light |
+| `13_hybrid_10event_forward_simple.mmd` | Same pipeline, simplified 6-step view | github-light |
 
 ## Rendered Outputs
 
