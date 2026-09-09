@@ -7,6 +7,7 @@ import os
 import sys
 import shutil
 import numpy as np
+import pandas as pd
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 import logging
@@ -16,11 +17,11 @@ import yaml
 
 # 添加项目路径
 sys.path.append(str(Path(__file__).parent.parent))
-from config.config import config
+from config.base_config import BaseConfig
 
 logger = logging.getLogger(__name__)
 
-# type: ignore
+
 class SPECFEM3DSetup:
     """SPECFEM3D Global 设置类"""
     
@@ -36,15 +37,27 @@ class SPECFEM3DSetup:
             simulation_dir: 模拟输出目录  
             region_config: 区域配置参数
         """
-        self.specfem_root = Path(specfem_root) if specfem_root else config.SPECFEM_ROOT
-        self.simulation_dir = Path(simulation_dir) if simulation_dir else config.DIRS['SIMULATIONS']
-        self.region = region_config or config.REGION
+        self.base_config = BaseConfig()
+        self.specfem_root = Path(specfem_root) if specfem_root else self.base_config.dirs['specfem3d_globe']
+        self.simulation_dir = Path(simulation_dir) if simulation_dir else self.base_config.dirs['simulations']
+        self.region = region_config or self._region_from_base()
         
         # 确保目录存在
         self.simulation_dir.mkdir(parents=True, exist_ok=True)
         
         # 东亚区域默认参数
         self.default_params = self._get_eastasia_defaults()
+    
+    def _region_from_base(self) -> Dict:
+        """从 base_config 构建 SPECFEM3D 兼容的区域字典"""
+        r = self.base_config.region
+        return {
+            'NAME': r.get('name', 'EastAsia'),
+            'LAT_MIN': r['lat_min'],
+            'LAT_MAX': r['lat_max'],
+            'LON_MIN': r['lon_min'],
+            'LON_MAX': r['lon_max'],
+        }
         
         # 模板文件路径
         self.templates_dir = Path(__file__).parent / "templates"
@@ -88,7 +101,9 @@ class SPECFEM3DSetup:
             'WRITE_SEISMOGRAMS_BY_MASTER': '.false.', # 主进程写入
             
             # === 地球模型 ===
-            'MODEL': 'prem',                          # 默认地球模型
+            'MODEL': 'EMC_model',                     # EMC NetCDF 模型 (prem 为参考模型)
+            'REGIONAL_MESH_CUTOFF': '.true.',         # EMC 区域截断
+            'REGIONAL_MESH_CUTOFF_DEPTH': 1000.0,     # 深度 1000 km
             'OCEANS': '.true.',                       # 包含海洋
             'ELLIPTICITY': '.true.',                  # 椭球校正
             'TOPOGRAPHY': '.true.',                   # 地形
@@ -330,6 +345,8 @@ HDUR_MOVIE                      = {params['HDUR_MOVIE']}
 
 # Reference Earth model
 MODEL                           = {params['MODEL']}
+REGIONAL_MESH_CUTOFF            = {params.get('REGIONAL_MESH_CUTOFF', '.false.')}
+REGIONAL_MESH_CUTOFF_DEPTH      = {params.get('REGIONAL_MESH_CUTOFF_DEPTH', 1000.0)}d0
 OCEANS                          = {params['OCEANS']}
 ELLIPTICITY                     = {params['ELLIPTICITY']}
 TOPOGRAPHY                      = {params['TOPOGRAPHY']}
@@ -556,9 +573,9 @@ THICKNESS_OF_Z_PML              = {params['THICKNESS_OF_Z_PML']}
         specfem_bin = self.specfem_root / "bin"
         sim_bin = sim_dir / "bin"
         
+        # SPECFEM3D Globe 区域模拟: xmeshfem3D + xspecfem3D (无 xgenerate_databases)
         executables = [
             "xmeshfem3D",
-            "xgenerate_databases", 
             "xspecfem3D"
         ]
         
@@ -611,18 +628,8 @@ else
     exit 1
 fi
 
-# 步骤2: 生成数据库
-echo "Step 2: Generating databases..."
-mpirun -np {nproc_total} ./bin/xgenerate_databases
-if [ $? -eq 0 ]; then
-    echo "✅ Database generation completed successfully"
-else
-    echo "❌ Database generation failed"
-    exit 1
-fi
-
-# 步骤3: 正演计算
-echo "Step 3: Running forward simulation..."
+# 步骤2: 正演计算 (Globe 区域模拟无 xgenerate_databases)
+echo "Step 2: Running forward simulation..."
 mpirun -np {nproc_total} ./bin/xspecfem3D
 if [ $? -eq 0 ]; then
     echo "✅ Forward simulation completed successfully"
@@ -652,7 +659,6 @@ echo "======================================"
 
 cd {sim_dir}
 mpirun -np {nproc_total} ./bin/xmeshfem3D
-mpirun -np {nproc_total} ./bin/xgenerate_databases  
 mpirun -np {nproc_total} ./bin/xspecfem3D
 """
         
@@ -672,7 +678,7 @@ mpirun -np {nproc_total} ./bin/xspecfem3D
             'stations_exists': (sim_path / "STATIONS").exists(),
             'cmtsolution_exists': (sim_path / "CMTSOLUTION").exists(),
             'executables_exist': all((sim_path / "bin" / exe).exists() 
-                                   for exe in ["xmeshfem3D", "xgenerate_databases", "xspecfem3D"]),
+                                   for exe in ["xmeshfem3D", "xspecfem3D"]),
             'output_dirs_exist': all((sim_path / d).exists() 
                                    for d in ["OUTPUT_FILES", "DATABASES_MPI"]),
             'job_scripts_exist': (sim_path / "run_specfem.sh").exists()
@@ -713,7 +719,7 @@ def main():
     }
     
     # 设置模拟目录
-    stations_file = config.DIRS['STATIONS'] / f"{config.REGION['NAME']}_stations.csv"
+    stations_file = setup.base_config.dirs['stations'] / f"{setup.region['NAME']}_stations.csv"
     
     if stations_file.exists():
         sim_dir = setup.setup_simulation_directory(
