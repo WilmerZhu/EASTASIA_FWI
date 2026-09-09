@@ -27,7 +27,7 @@
 
 3. ✅ 参数标准化
    - 统一参数命名 (vpv, vph, vsv, vsh, rho, vs, vp)
-   - 单位标准化 (速度: km/s, 密度: kg/m³)
+   - 单位标准化 (速度: km/s, 密度: 保留原始单位)
    - 坐标系统统一 (WGS84, latitude/longitude/depth)
    - 深度单位自动转换和验证
 
@@ -174,7 +174,7 @@ class VelocityModelConfig:
         
         # ============ 路径配置 ============
         self.paths = {
-            'input_dir': Path('data/models'),
+            'input_dir': Path('data/models/metadata'),  # 与 metadata_dir 相同，模型文件存放于此
             'output_dir': Path('data/models/processed'),
             'metadata_dir': Path('data/models/metadata'),
             'log_dir': Path('logs'),
@@ -208,15 +208,15 @@ class VelocityModelConfig:
                 'reference': 'Xi et al., 2024, GJI',
                 'region': 'East Asia and northwestern Pacific',
                 'depth_shift': 0.0,
-                'params': ['vpv', 'vph', 'vsv', 'vsh', 'rho', 'vs_ref', 'vp_ref']
+                'params': ['vpv', 'vph', 'vsv', 'vsh', 'eta', 'rho', 'vs', 'vp', 'vs_ref', 'vp_ref']
             },
             '2024_FWEA23': {
-                'file': '2024_FWEA23/FWEA23.r0.0-n4.nc',
+                'file': '2024_FWEA23/FWEA23.r0.0.nc',
                 'format': 'nc',
                 'reference': 'Liu et al., 2024, EPSL',
                 'region': 'East Asia FWI model',
                 'depth_shift': 0.0,
-                'params': ['vpv', 'vph', 'vsv', 'vsh', 'rho', 'vs0', 'vp0']
+                'params': ['vpv', 'vph', 'vsv', 'vsh', 'eta', 'rho', 'qmu', 'vs0', 'vp0']
             },
             
             # ========== GeoCSV 格式 (| 分隔符) ==========
@@ -349,6 +349,28 @@ class VelocityModelConfig:
                 'separator': r'\s+',
                 'skiprows': 1
             },
+            '2026_Li_NEChina': {
+                'file': '2026_Li_NEChina/Dongbei_ZW.csv',
+                'format': 'txt',
+                'reference': 'Li et al., 2026',
+                'region': 'Northeast China',
+                'depth_shift': 0.0,
+                'depth_negate': True,  # 深度定义为负向下（0~-62.5 km），取反后得正常深度
+                'params': ['vs'],
+                'columns': ['longitude', 'latitude', 'depth', 'vs'],
+                'separator': ',',
+                'skiprows': 1  # 跳过表头行
+            },
+            '2026_Li_SChina': {
+                'file': '2026_Li_SChina/Huanan_CJQ.txt',
+                'format': 'txt',
+                'reference': 'Li et al., 2026',
+                'region': 'South China',
+                'depth_shift': 0.0,
+                'params': ['vs'],
+                'columns': ['longitude', 'latitude', 'depth', 'vs'],
+                'separator': r'\s+'
+            },
             
             # ========== 特殊文本格式 ==========
             '2024_CSES_VM1.0': {
@@ -435,7 +457,8 @@ class VelocityModelConfig:
         self.standard_parameters = [
             'latitude', 'longitude', 'depth',
             'vpv', 'vph', 'vsv', 'vsh',
-            'rho',
+            'eta',
+            'rho', 'qmu',
             'vs0', 'vp0',
             'vs', 'vp'
         ]
@@ -492,8 +515,9 @@ class VelocityModelConfig:
         self.runtime = {
             # 'model_names': None,  # None表示处理所有模型，或指定模型名称列表，如 ['2022_SinoScope1.0', '2024_EARA2024']
             # 'compute_common_region': False,  # 是否计算共同覆盖区域（需要多个模型）
-            'model_names': ['2022_SinoScope1.0', '2024_EARA2024', '2024_FWEA23'],  # 处理3个模型
-            'compute_common_region': True,  # 计算共同覆盖区域（需要多个模型）
+            'model_names': ['2026_Li_NEChina', '2026_Li_SChina'],  # None 表示处理所有模型；或指定列表如 ['2022_SinoScope1.0', '2024_EARA2024']
+            # 'model_names': ['2022_SinoScope1.0', '2024_EARA2024', '2024_FWEA23'],  # 处理3个模型
+            'compute_common_region': False,  # 计算共同覆盖区域（需要多个模型）
             'list_models': False,  # 是否只列出模型列表（不执行处理）
             'single_model': None  # 处理单个模型（优先级高于model_names），如 '2022_SinoScope1.0'
         }
@@ -1164,7 +1188,11 @@ class VelocityModelProcessor:
             df.rename(columns={'lon': 'longitude'}, inplace=True)
         if 'latitude' not in df.columns:
             df.rename(columns={'lat': 'latitude'}, inplace=True)
-        
+
+        # depth_negate: 部分模型深度定义为负向下（如 0~-62.5 km），取反转为正常约定
+        if model_info.get('depth_negate', False):
+            df['depth'] = -df['depth']
+
         # 提取坐标
         lon = np.sort(df['longitude'].unique())
         lat = np.sort(df['latitude'].unique())
@@ -1809,6 +1837,14 @@ class VelocityModelProcessor:
         else:
             std_data['rho'] = np.full(shape, np.nan, dtype=np.float32)
         
+        # ========== 处理 eta 各向异性参数 ==========
+        if 'eta' in data_3d:
+            std_data['eta'] = data_3d['eta'].copy()
+        
+        # ========== 处理 Qmu 衰减参数 ==========
+        if 'qmu' in data_3d:
+            std_data['qmu'] = data_3d['qmu'].copy()
+        
         # ========== 处理参考速度 ==========
         if 'vs_ref' in data_3d:
             std_data['vs0'] = data_3d['vs_ref']
@@ -1847,13 +1883,19 @@ class VelocityModelProcessor:
             else:
                 std_data['vp'] = np.full(shape, np.nan, dtype=np.float32)
         
-        # ========== 密度单位转换 ==========
+        # ========== 密度单位检查 ==========
+        # 不再自动转换单位，保留原始值。
+        # NC 模型 rho 通常为 g/cm³（1~6），CSV 模型在 load 阶段已根据 rho_unit 配置转换。
+        # convert_nc_to_gll.py 会根据实际单位做最终转换。
         rho = std_data['rho']
         if not np.isnan(rho).all():
-            # 如果密度值较小 (< 100)，说明单位是 g/cm3，需要转换为 kg/m3
-            if np.nanmean(rho) < 100:
-                self.logger.info("  密度单位转换: g/cm3 -> kg/m3")
-                std_data['rho'] = rho * 1000
+            rho_mean = np.nanmean(rho)
+            if rho_mean < 10:
+                self.logger.info(f"  密度单位: g/cm³ (mean={rho_mean:.2f})")
+            elif rho_mean < 10000:
+                self.logger.info(f"  密度单位: kg/m³ (mean={rho_mean:.1f})")
+            else:
+                self.logger.warning(f"  密度值异常 (mean={rho_mean:.1f})，请检查")
         
         # ========== 质量控制 ==========
         std_data = self._quality_control_3d(std_data, coords, model_name)

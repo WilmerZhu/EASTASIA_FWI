@@ -17,16 +17,16 @@ EASTASIA-FWI 波形数据预处理模块
    - 自动处理缺失响应文件的情况
 
 2. ✅ 多分量数据处理
-   - 自动旋转1-2分量到N-E分量
-   - 支持BH1/BH2到BHN/BHE的转换
-   - 分量映射和标准化
+   - 按台站合并三分量后，用 StationXML 方位角真旋转到 Z/N/E
+   - 支持 BH1/BH2（及 HH*）经 inventory 旋转，禁止仅改通道名的假旋转
    - 多分量数据一致性检查
 
 3. ✅ 数据质量控制
    - 采样率验证（0.5-100 Hz）
-   - 数据长度比例检查（最小80%）
-   - 尖峰检测和去除
-   - 数据间隙容忍度检查
+   - StationXML 完整性（最少响应级数、输出须为 COUNTS）
+   - 去响应后位移振幅/有限性门限（拒绝残缺响应伪位移）
+   - 去响应前 counts 上做单点毛刺检测（不用全迹振幅离群，避免误杀面波）
+   - 台站级完整 ZNE 门槛：缺水平向整台丢弃，禁止写出残缺三分量
 
 4. ✅ SAC格式输出
    - 标准SAC格式输出
@@ -78,30 +78,31 @@ station_id, success_msg, error_msg = preprocessor.process_single_waveform(
 
 输出文件:
 ----------
-- events/vel_data/{event_name}/: 每个事件的预处理后波形数据
+- events/disp_data/{event_name}/: 每个事件的预处理后位移 SAC（与 SPECFEM 正演 DISP 对齐）
 - preprocessing/preprocessing_report.txt: 详细处理报告
 - preprocessing/preprocessing_stats.json: 处理统计信息
 - preprocessing_progress.json: 处理进度文件
 
 科学原理:
 ----------
-- 仪器响应去除: 将观测数据从计数转换为物理量（速度/位移），消除仪器频率响应影响
+- 仪器响应去除: 将观测数据从计数转换为物理位移（DISP），消除仪器频率响应影响
 - 预滤波: 在响应去除前应用预滤波，避免频率域边缘的数值不稳定
 - 分量旋转: 将仪器坐标系转换为地理坐标系（N-E），便于后续处理和分析
 - 质量控制: 确保数据质量满足全波形反演的要求，避免低质量数据影响反演结果
-- SAC格式: 地震学标准数据格式，兼容性强，便于后续分析和可视化
+- SAC格式: 地震学标准数据格式；输出位移以便与 SPECFEM3D Globe 合成波形直接对比
 
 作者: EASTASIA-FWI Team
 日期: 2025-02-01
-版本: v2.6
+版本: v2.8
 """
 
 import os
 import sys
+import argparse
 import warnings
 import multiprocessing as mp
 from pathlib import Path
-from typing import List, Dict, Tuple, Optional, Union, Any
+from typing import List, Dict, Tuple, Optional, Union, Any, Set
 from datetime import datetime
 import subprocess
 import gc
@@ -185,16 +186,21 @@ class PreprocessingConfig:
     
     def __init__(self):
         """初始化预处理配置参数"""
-        # 输入目录配置
+        # 输入目录配置（相对 data/）
+        # 优先用下载会话 events/<YYYYMMDD>_download_XX/{waveforms,responses}；
+        # 若无会话则回退到 events/waveforms 与 events/responses。
         self.input_directories = {
             'events': 'events/',
             'waveforms': 'events/waveforms',
-            'responses': 'events/responses'
+            'responses': 'events/responses',
+            # 非空则强制使用该会话子目录名，如 '20260805_download_01'
+            'download_session': '20260805_download_02',
         }
         
         # 输出目录配置
         self.output_directories = {
-            'vel_data': 'events/vel_data',
+            # 位移 SAC：与 SPECFEM 正演 *.sem.sac（DISP）物理量一致
+            'disp_data': 'events/disp_data',
             'reports': 'preprocessing',
         }
         
@@ -209,9 +215,9 @@ class PreprocessingConfig:
             'response_patterns': ["*.xml", "*.XML"]
         }
         
-        # 响应去除参数
+        # 响应去除参数（输出位移，便于合成 vs 观测直接对比）
         self.response_removal = {
-            'output_type': 'VEL',
+            'output_type': 'DISP',
             'pre_filt': [0.008, 0.012, 8.0, 10.0],
             'water_level': 60.0,
             'remove_mean': True,
@@ -219,11 +225,11 @@ class PreprocessingConfig:
             'taper_fraction': 0.05
         }
         
-        # 通道处理配置
+        # 通道处理配置（按台站合并后用 inventory 真旋转到 ZNE）
         self.channel_processing = {
-            'auto_rotate_12_to_ne': True,
-            'preferred_channels': ['BHZ', 'BHN', 'BHE', 'BH1', 'BH2'],
-            'component_mapping': {'1': 'N', '2': 'E'}
+            'auto_rotate_to_zne': True,
+            'preferred_channels': ['BHZ', 'BHN', 'BHE', 'BH1', 'BH2', 'HHZ', 'HHN', 'HHE', 'HH1', 'HH2'],
+            'component_mapping': {'1': 'N', '2': 'E'},
         }
         
         # 数据质量控制
@@ -231,9 +237,23 @@ class PreprocessingConfig:
             'min_sample_rate': 0.5,
             'max_sample_rate': 100.0,
             'min_length_ratio': 0.8,
+            # 毛刺检测：仅在去响应前的 counts 上做；用邻域残差抓单点尖峰，
+            # 避免“全迹均值±kσ”把地震面波当成尖峰误杀水平向
             'spike_detection': True,
-            'spike_threshold': 5.0,
-            'gap_tolerance': 0.1
+            'spike_threshold': 12.0,
+            'spike_max_ratio': 0.005,
+            'gap_tolerance': 0.1,
+            # StationXML 完整性：残缺响应（如仅 1 级 PAZ、输出非 COUNTS）禁止去响应
+            'min_response_stages': 3,
+            'require_counts_output': True,
+            # 去响应后位移振幅门限（米）；残缺响应常给出 ~1e3 m 量级伪位移
+            'disp_amp_min_m': 1.0e-12,
+            'disp_amp_max_m': 1.0e-1,
+            'max_nonfinite_ratio': 0.01,
+            # 禁止去掉 pre_filt 的“简化”去响应（易在 DISP 上爆炸）
+            'allow_simplified_response_removal': False,
+            # 波形对比需要 NE→RT：必须完整垂直+水平，禁止写出残缺三分量
+            'require_complete_zne': True,
         }
         
         # 输出格式配置
@@ -281,48 +301,85 @@ class PreprocessingConfig:
 class WaveformPreprocessor:
     """波形数据预处理器"""
     
-    def __init__(self):
-        """初始化波形预处理器"""
-        # 加载基础配置
+    def __init__(
+        self,
+        download_session: Optional[str] = None,
+        skip_existing: Optional[bool] = None,
+    ):
+        """
+        初始化波形预处理器。
+
+        Args:
+            download_session: 覆盖配置中的下载会话名（如 20260805_download_02）
+            skip_existing: 覆盖断点续传跳过已处理事件；False 强制重跑
+        """
         self.base_config = BaseConfig()
-        
-        # 加载模块配置
         self.config = PreprocessingConfig()
-        
-        # 设置日志
+
+        if download_session is not None:
+            self.config.input_directories['download_session'] = download_session.strip()
+        if skip_existing is not None:
+            self.config.resume['skip_existing'] = bool(skip_existing)
+
         self.logger = self.base_config.setup_logger(
             'EASTASIA-FWI.WaveformPreprocessor',
             self.config.logging['level']
         )
-        
-        # 设置输入输出目录
+
         self._setup_directories()
-        
-        # 初始化统计信息
         self.stats = self._initialize_statistics()
-        
-        # 创建输出目录
         self._create_output_directories()
-        
-        # Inventory 缓存
         self.inventory_cache = {} if self.config.performance['cache_inventory'] else None
-        
-        # 进度文件
         self.progress_file = self.input_dirs['events'] / 'preprocessing_progress.json'
-        
+
         self.logger.info("🔬 波形预处理器初始化完成")
         self._print_config_summary()
     
+    def _resolve_download_session(self, events_dir: Path) -> Optional[Path]:
+        """
+        解析下载会话目录（含 waveforms/ 与 responses/）。
+
+        优先用配置里的 download_session；否则取 events/ 下最新的 *_download_*。
+        """
+        session_name = (self.config.input_directories.get('download_session') or '').strip()
+        if session_name:
+            cand = events_dir / session_name
+            if (cand / 'waveforms').is_dir() and (cand / 'responses').is_dir():
+                return cand
+            self.logger.warning(
+                f"配置的 download_session 不存在或不完整: {cand}，改为自动探测")
+
+        sessions = [
+            p for p in events_dir.glob('*_download_*')
+            if p.is_dir() and (p / 'waveforms').is_dir() and (p / 'responses').is_dir()
+        ]
+        if not sessions:
+            return None
+        sessions.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        return sessions[0]
+
     def _setup_directories(self):
-        """设置输入输出目录"""
+        """设置输入输出目录；hybrid 数据在下载会话子目录内时自动对齐。"""
+        events_dir = self.base_config.dirs['data'] / self.config.input_directories['events']
+        wf_default = self.base_config.dirs['data'] / self.config.input_directories['waveforms']
+        resp_default = self.base_config.dirs['data'] / self.config.input_directories['responses']
+
+        session = self._resolve_download_session(events_dir)
+        if session is not None:
+            wf_dir = session / 'waveforms'
+            resp_dir = session / 'responses'
+            self.logger.info(f"使用下载会话输入: {session.name}")
+        else:
+            wf_dir, resp_dir = wf_default, resp_default
+
         self.input_dirs = {
-            'events': self.base_config.dirs['data'] / self.config.input_directories['events'],
-            'waveforms': self.base_config.dirs['data'] / self.config.input_directories['waveforms'],
-            'responses': self.base_config.dirs['data'] / self.config.input_directories['responses']
+            'events': events_dir,
+            'waveforms': wf_dir,
+            'responses': resp_dir,
         }
-        
+
         self.output_dirs = {
-            'vel_data': self.base_config.dirs['data'] / self.config.output_directories['vel_data'],
+            'disp_data': self.base_config.dirs['data'] / self.config.output_directories['disp_data'],
             'reports': self.base_config.dirs['results'] / self.config.output_directories['reports']
         }
     
@@ -349,7 +406,11 @@ class WaveformPreprocessor:
         print(f"   输出类型: {self.config.response_removal['output_type']}")
         print(f"   水位参数: {self.config.response_removal['water_level']}")
         print(f"   预滤波器: {self.config.response_removal['pre_filt']}")
-        print(f"   1,2分量转换: {'启用' if self.config.channel_processing['auto_rotate_12_to_ne'] else '禁用'}")
+        print(f"   ZNE真旋转: {'启用' if self.config.channel_processing.get('auto_rotate_to_zne', True) else '禁用'}")
+        print(f"   完整ZNE门槛: {'启用' if self.config.quality_control.get('require_complete_zne', True) else '禁用'}")
+        print(f"   响应完整性QC: stages>={self.config.quality_control.get('min_response_stages', 3)}, "
+              f"振幅门限 [{self.config.quality_control.get('disp_amp_min_m')}, "
+              f"{self.config.quality_control.get('disp_amp_max_m')}] m")
         print(f"   断点续传: {'启用' if self.config.resume['enable'] else '禁用'}")
         print(f"   Inventory缓存: {'启用' if self.config.performance['cache_inventory'] else '禁用'}")
         print(f"   警告抑制: {'启用' if self.config.performance['suppress_all_warnings'] else '禁用'}")
@@ -372,7 +433,10 @@ class WaveformPreprocessor:
             'inventory_cache_hits': 0,
             'inventory_cache_misses': 0,
             'simplified_response_removal': 0,
-            # 🆕 警告统计
+            'incomplete_response_rejected': 0,
+            'amplitude_qc_rejected': 0,
+            'incomplete_zne_rejected': 0,
+            # 警告统计
             'warning_stats': {
                 'response_warnings_suppressed': 0,
                 'total_response_removal_calls': 0
@@ -385,7 +449,10 @@ class WaveformPreprocessor:
                 'saving_failed': 0,
                 'no_response_file': 0,
                 'no_matching_response': 0,
-                'response_error': 0
+                'response_error': 0,
+                'incomplete_response': 0,
+                'amplitude_qc_failed': 0,
+                'incomplete_zne': 0,
             },
             'processing_summary': {
                 'start_time': None,
@@ -479,7 +546,7 @@ class WaveformPreprocessor:
         if not self.config.resume['enable']:
             return False
         
-        event_output_dir = self.output_dirs['vel_data'] / event_name
+        event_output_dir = self.output_dirs['disp_data'] / event_name
         
         if not event_output_dir.exists():
             return False
@@ -585,394 +652,797 @@ class WaveformPreprocessor:
         except Exception:
             return None
     
-    def rotate_12_to_ne(self, st: Stream, inventory_file: Path) -> Tuple[Stream, bool]:
-        """将1、2分量转换为N、E分量"""
+    def _station_key_from_waveform_path(self, waveform_file: Path) -> Optional[str]:
+        """从 mseed 文件名解析 network.station。"""
         try:
-            components = [tr.stats.channel[-1] for tr in st]
-            if '1' not in components and '2' not in components:
-                return st, False
-            
-            groups = {}
-            for tr in st:
-                key = f"{tr.stats.network}.{tr.stats.station}.{tr.stats.location}.{tr.stats.channel[:-1]}"
-                if key not in groups:
-                    groups[key] = {}
-                component = tr.stats.channel[-1]
-                groups[key][component] = tr
-            
-            new_st = Stream()
-            conversion_successful = False
-            
-            for group_key, traces in groups.items():
-                if '1' in traces and '2' in traces:
-                    tr1 = traces['1']
-                    tr2 = traces['2']
-                    
-                    tr_n = tr1.copy()
-                    tr_e = tr2.copy()
-                    
-                    tr_n.stats.channel = tr1.stats.channel[:-1] + 'N'
-                    tr_e.stats.channel = tr2.stats.channel[:-1] + 'E'
-                    
-                    new_st.append(tr_n)
-                    new_st.append(tr_e)
-                    
-                    self.stats['component_conversions'] += 1
-                    conversion_successful = True
-                else:
-                    for component, tr in traces.items():
-                        new_st.append(tr)
-            
-            return new_st if len(new_st) > 0 else st, conversion_successful
-            
+            parts = waveform_file.stem.split('__')[0].split('.')
+            if len(parts) >= 2:
+                return f"{parts[0]}.{parts[1]}"
         except Exception:
-            self.stats['error_types']['rotation_failed'] += 1
-            return st, False
-    
-    def remove_instrument_response(self, st: Stream, inventory_file: Path, 
-                                 event_info: Dict[str, Any]) -> Tuple[bool, str]:
-        """🆕 去除仪器响应（完全抑制输出 + 统计）"""
+            pass
+        return None
+
+    def group_waveforms_by_station(
+        self, waveform_files: List[Path]
+    ) -> Dict[str, List[Path]]:
+        """按 network.station 分组波形文件（三分量需合并后再旋转/去响应）。"""
+        groups: Dict[str, List[Path]] = {}
+        for wf in waveform_files:
+            key = self._station_key_from_waveform_path(wf)
+            if key is None:
+                continue
+            groups.setdefault(key, []).append(wf)
+        return groups
+
+    def validate_response_inventory(
+        self, inv: Any, st: Stream
+    ) -> Tuple[bool, str]:
+        """
+        检查 StationXML 是否足够完整，可安全去响应到物理量。
+
+        残缺响应（如仅 1 级 PolesZeros、输出为 V 而非 COUNTS）会导致
+        DISP 振幅偏差达数个数量级，必须拒绝而非静默处理。
+        """
+        qc = self.config.quality_control
+        min_stages = int(qc.get('min_response_stages', 3))
+        require_counts = bool(qc.get('require_counts_output', True))
+
+        if inv is None or len(inv) == 0:
+            return False, "empty_inventory"
+
+        for tr in st:
+            resp = self._get_channel_response(inv, tr)
+            if resp is None:
+                return False, f"no_matching_response:{tr.id}"
+
+            stages = getattr(resp, 'response_stages', None) or []
+            n_stages = len(stages)
+            if n_stages < min_stages:
+                return False, f"too_few_stages:{tr.id}:{n_stages}<{min_stages}"
+
+            if require_counts:
+                out_units = ''
+                # 优先用最后一级输出单位；完整响应应为 COUNTS
+                if stages:
+                    last_out = str(getattr(stages[-1], 'output_units', '') or '')
+                    if last_out:
+                        out_units = last_out
+                if not out_units:
+                    sens = getattr(resp, 'instrument_sensitivity', None)
+                    if sens is not None:
+                        out_units = str(getattr(sens, 'output_units', '') or '')
+                units_u = out_units.upper()
+                if 'COUNT' not in units_u and 'DIGIT' not in units_u:
+                    return False, f"non_counts_output:{tr.id}:{out_units or 'unknown'}"
+
+        return True, "ok"
+
+    def _get_channel_response(self, inv: Any, tr) -> Optional[Any]:
+        """匹配通道响应；兼容 mseed 与 StationXML location 码不一致。"""
+        t0 = tr.stats.starttime
+        candidates = [
+            tr.id,
+            f"{tr.stats.network}.{tr.stats.station}.{tr.stats.location or ''}."
+            f"{tr.stats.channel}",
+            f"{tr.stats.network}.{tr.stats.station}..{tr.stats.channel}",
+            f"{tr.stats.network}.{tr.stats.station}.00.{tr.stats.channel}",
+        ]
+        for seed_id in candidates:
+            try:
+                return inv.get_response(seed_id, t0)
+            except Exception:
+                continue
+        # 最后按网台通道在 inventory 内直接查找
         try:
-            if not inventory_file.exists():
-                self.stats['error_types']['no_response_file'] += 1
-                return False, "no_response_file"
-            
-            inv = self.load_inventory(inventory_file)
+            for network in inv:
+                if network.code != tr.stats.network:
+                    continue
+                for station in network:
+                    if station.code != tr.stats.station:
+                        continue
+                    for channel in station:
+                        if channel.code != tr.stats.channel:
+                            continue
+                        if channel.response is not None:
+                            return channel.response
+        except Exception:
+            pass
+        return None
+
+    def rotate_to_zne(self, st: Stream, inv: Any) -> Tuple[Stream, bool]:
+        """
+        使用 StationXML 方位角将分量旋转到 Z/N/E。
+
+        取代仅改通道名的假旋转；要求同台站三分量已在同一 Stream 中。
+        """
+        if not self.config.channel_processing.get('auto_rotate_to_zne', True):
+            return st, False
+        if inv is None or len(st) == 0:
+            return st, False
+
+        comps = {tr.stats.channel[-1].upper() for tr in st}
+        needs_rotate = bool(comps & {'1', '2'}) or (
+            ('N' in comps or 'E' in comps) and 'Z' in comps
+        )
+        # 已是 ZNE 且无 12：仍可用 inventory 校正方位（若有 N/E）
+        try:
+            st_work = st.copy()
+            # 合并同分量碎片，旋转要求对齐
+            try:
+                st_work.merge(method=1, fill_value=0)
+            except Exception:
+                pass
+
+            before_ids = [tr.id for tr in st_work]
+            if needs_rotate or ({'1', '2'} & comps):
+                st_work.rotate(method="->ZNE", inventory=inv)
+                self.stats['component_conversions'] += 1
+                return st_work, True
+
+            # 仅有 Z 时不强制旋转
+            if 'Z' in comps and not ({'N', 'E', '1', '2'} & comps):
+                return st_work, False
+
+            # 已有 NE：用 inventory 再规范化到 ZNE（校正非正交/方位）
+            if {'N', 'E'} <= comps or ({'Z', 'N', 'E'} <= comps):
+                try:
+                    st_work.rotate(method="->ZNE", inventory=inv)
+                    if [tr.id for tr in st_work] != before_ids:
+                        self.stats['component_conversions'] += 1
+                    return st_work, True
+                except Exception:
+                    return st_work, False
+
+            return st_work, False
+        except Exception as e:
+            self.stats['error_types']['rotation_failed'] += 1
+            if self.config.logging.get('show_debug_info'):
+                self.logger.debug(f"旋转失败: {e}")
+            return st, False
+
+    def remove_instrument_response(self, st: Stream, inventory_file: Path,
+                                 event_info: Dict[str, Any],
+                                 inv: Optional[Any] = None) -> Tuple[bool, str]:
+        """去除仪器响应；拒绝不完整响应，默认禁止无 pre_filt 回退。"""
+        try:
+            if inv is None:
+                if not inventory_file.exists():
+                    self.stats['error_types']['no_response_file'] += 1
+                    return False, "no_response_file"
+                inv = self.load_inventory(inventory_file)
             if inv is None:
                 self.stats['error_types']['response_error'] += 1
                 return False, "read_inventory_failed"
-            
+
+            ok_resp, resp_msg = self.validate_response_inventory(inv, st)
+            if not ok_resp:
+                self.stats['incomplete_response_rejected'] += 1
+                self.stats['error_types']['incomplete_response'] += 1
+                return False, f"incomplete_response:{resp_msg}"
+
             resp_params = self.config.response_removal
-            
-            # 基础预处理
+
             if resp_params['remove_mean']:
                 st.detrend(type="demean")
-            
             if resp_params['remove_trend']:
                 st.detrend(type="linear")
-            
             if resp_params['taper_fraction'] > 0:
                 st.taper(max_percentage=resp_params['taper_fraction'])
-            
-            # 🆕 统计响应去除调用次数
+
             self.stats['warning_stats']['total_response_removal_calls'] += 1
-            
-            # 🆕 使用系统级输出抑制
+
             if self.config.performance['suppress_all_warnings']:
                 with SuppressOutput():
                     return self._do_remove_response(st, inv, resp_params)
-            else:
-                return self._do_remove_response(st, inv, resp_params)
-                
+            return self._do_remove_response(st, inv, resp_params)
+
         except FileNotFoundError:
             self.stats['error_types']['no_response_file'] += 1
             return False, "no_response_file"
         except Exception as e:
             self.stats['error_types']['response_removal_failed'] += 1
             return False, f"general_error: {str(e)[:100]}"
-    
+
     def _do_remove_response(self, st: Stream, inv: Any, resp_params: Dict) -> Tuple[bool, str]:
-        """执行响应去除（内部方法）"""
+        """执行响应去除；默认失败时不回退到无 pre_filt。"""
         try:
-            # 尝试标准响应去除
             st.remove_response(
                 inventory=inv,
                 output=resp_params['output_type'],
                 pre_filt=resp_params['pre_filt'],
                 water_level=resp_params['water_level']
             )
-            # 🆕 统计抑制的警告（假设每次都有警告）
             self.stats['warning_stats']['response_warnings_suppressed'] += 1
             return True, "success"
-            
+
         except (AttributeError, TypeError) as e:
-            # 如果出现窗口函数相关错误，尝试不使用 pre_filt 的简化版本
-            if 'hann' in str(e) or 'tukey' in str(e) or 'window' in str(e).lower():
+            err = str(e).lower()
+            allow_simple = self.config.quality_control.get(
+                'allow_simplified_response_removal', False
+            )
+            if allow_simple and ('hann' in err or 'tukey' in err or 'window' in err):
                 try:
-                    # 创建副本进行简化处理
                     st_copy = st.copy()
                     st_copy.remove_response(
                         inventory=inv,
                         output=resp_params['output_type'],
                         water_level=resp_params['water_level']
                     )
-                    # 将结果复制回原始 stream
                     for i, tr in enumerate(st):
                         tr.data = st_copy[i].data
                         tr.stats = st_copy[i].stats
-                    
                     self.stats['simplified_response_removal'] += 1
-                    self.stats['warning_stats']['response_warnings_suppressed'] += 1
                     return True, "success_simplified"
-                    
                 except Exception:
                     self.stats['error_types']['response_error'] += 1
                     return False, "simplified_removal_failed"
-            else:
-                # 其他类型的 AttributeError/TypeError，继续抛出
-                raise e
-                
+            self.stats['error_types']['response_removal_failed'] += 1
+            return False, f"remove_response_failed:{str(e)[:80]}"
+
         except Exception as e:
             error_msg = str(e)
             if "No matching response" in error_msg:
                 self.stats['error_types']['no_matching_response'] += 1
                 return False, "no_matching_response"
-            elif "divide by zero" in error_msg or "invalid value" in error_msg:
+            if "divide by zero" in error_msg or "invalid value" in error_msg:
                 self.stats['error_types']['response_error'] += 1
                 return False, "response_error"
-            else:
-                self.stats['error_types']['response_removal_failed'] += 1
-                return False, f"processing_error: {error_msg[:100]}"
-    
-    def get_station_coordinates(self, inventory_file: Path) -> Tuple[Optional[float], Optional[float], Optional[float]]:
+            self.stats['error_types']['response_removal_failed'] += 1
+            return False, f"processing_error: {error_msg[:100]}"
+
+    def get_station_coordinates(
+        self, inventory_file: Path, inv: Optional[Any] = None
+    ) -> Tuple[Optional[float], Optional[float], Optional[float]]:
         """获取台站坐标信息"""
         try:
-            inv = self.load_inventory(inventory_file)
+            if inv is None:
+                inv = self.load_inventory(inventory_file)
             if inv is None:
                 return None, None, None
-            
             station = inv.networks[0].stations[0]
             return station.latitude, station.longitude, station.elevation
         except Exception:
             return None, None, None
-    
-    def update_sac_headers(self, sac_file: Path, event_info: Dict[str, Any], 
-                          stla: float, stlo: float, stel: float) -> bool:
-        """更新SAC文件头信息"""
+
+    def _channel_orientation(
+        self, inv: Any, tr
+    ) -> Tuple[Optional[float], Optional[float]]:
+        """从 inventory 读取分量方位角/倾角 (cmpaz, cmpinc)。"""
+        try:
+            net = tr.stats.network
+            sta = tr.stats.station
+            loc = tr.stats.location or ''
+            cha = tr.stats.channel
+            for network in inv:
+                if network.code != net:
+                    continue
+                for station in network:
+                    if station.code != sta:
+                        continue
+                    for channel in station:
+                        if channel.code != cha:
+                            continue
+                        if (channel.location_code or '') != loc and loc != '':
+                            continue
+                        az = getattr(channel, 'azimuth', None)
+                        dip = getattr(channel, 'dip', None)
+                        # SAC cmpinc: 0=up, 90=horizontal；ObsPy dip: -90=up, 0=horizontal
+                        cmpinc = None
+                        if dip is not None:
+                            cmpinc = float(dip) + 90.0
+                        return (
+                            float(az) if az is not None else None,
+                            cmpinc,
+                        )
+        except Exception:
+            pass
+        # 按通道尾字符回退
+        comp = tr.stats.channel[-1].upper()
+        if comp == 'Z':
+            return 0.0, 0.0
+        if comp == 'N':
+            return 0.0, 90.0
+        if comp == 'E':
+            return 90.0, 90.0
+        return None, None
+
+    def update_sac_headers(
+        self,
+        sac_file: Path,
+        event_info: Dict[str, Any],
+        stla: float,
+        stlo: float,
+        stel: float,
+        tr_ref=None,
+        inv: Optional[Any] = None,
+    ) -> bool:
+        """用 ObsPy 写入 SAC 头（含 idep/cmpaz/cmpinc）；不依赖外部 sac 命令。"""
         if not self.config.output_format['update_sac_headers']:
             return True
-        
+
         try:
+            st = read(str(sac_file))
+            if len(st) == 0:
+                return False
+            tr = st[0]
             origin_time = event_info['origin_time']
-            evlo = event_info['longitude']
-            evla = event_info['latitude'] 
-            evdp = event_info['depth']
-            hour = event_info['hour']
-            mini = event_info['minute']
-            msec = f"{event_info['second']:.3f}"
-            
-            sac_commands = f"""
-            wild echo off
-            r {sac_file}
-            ch LCALDA True
-            ch evlo {evlo} evla {evla} evdp {evdp}
-            ch stlo {stlo} stla {stla} stel {stel}
-            ch t1 0.0 t2 0.0 t3 0.0 t4 0.0
-            ch o gmt {origin_time.year} {origin_time.julday} {hour} {mini} {msec.split('.')[0]} {msec.split('.')[1]}
-            wh
-            q
-            """
-            
-            result = subprocess.run(
-                ["sac"], 
-                input=sac_commands.encode(), 
-                capture_output=True,
-                timeout=30,
-                stderr=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL
-            )
-            
-            return result.returncode == 0
-            
+            # 确保 sac 头存在
+            if not hasattr(tr.stats, 'sac') or tr.stats.sac is None:
+                tr.stats.sac = {}
+
+            sac = tr.stats.sac
+            sac['evlo'] = float(event_info['longitude'])
+            sac['evla'] = float(event_info['latitude'])
+            sac['evdp'] = float(event_info['depth'])
+            sac['stlo'] = float(stlo)
+            sac['stla'] = float(stla)
+            sac['stel'] = float(stel)
+            sac['lcalda'] = 1
+            # IDEP: 6 = displacement (meters)，与 SPECFEM DISP 一致
+            out_type = self.config.response_removal.get('output_type', 'DISP').upper()
+            if out_type == 'DISP':
+                sac['idep'] = 6
+            elif out_type == 'VEL':
+                sac['idep'] = 7
+            elif out_type == 'ACC':
+                sac['idep'] = 8
+
+            sac['nzyear'] = int(origin_time.year)
+            sac['nzjday'] = int(origin_time.julday)
+            sac['nzhour'] = int(event_info['hour'])
+            sac['nzmin'] = int(event_info['minute'])
+            sec = float(event_info['second'])
+            sac['nzsec'] = int(sec)
+            sac['nzmsec'] = int(round((sec % 1) * 1000))
+            sac['o'] = 0.0
+
+            ref = tr_ref if tr_ref is not None else tr
+            if inv is not None:
+                cmpaz, cmpinc = self._channel_orientation(inv, ref)
+                if cmpaz is not None:
+                    sac['cmpaz'] = float(cmpaz)
+                if cmpinc is not None:
+                    sac['cmpinc'] = float(cmpinc)
+            else:
+                comp = ref.stats.channel[-1].upper()
+                if comp == 'Z':
+                    sac['cmpaz'], sac['cmpinc'] = 0.0, 0.0
+                elif comp == 'N':
+                    sac['cmpaz'], sac['cmpinc'] = 0.0, 90.0
+                elif comp == 'E':
+                    sac['cmpaz'], sac['cmpinc'] = 90.0, 90.0
+
+            tr.write(str(sac_file), format='SAC')
+            return True
         except Exception:
-            return False
-    
-    def save_processed_waveform(self, st: Stream, event_name: str, event_info: Dict[str, Any],
-                              stla: float, stlo: float, stel: float) -> Dict[str, str]:
+            # 回退：尝试外部 sac（可选）
+            try:
+                origin_time = event_info['origin_time']
+                evlo = event_info['longitude']
+                evla = event_info['latitude']
+                evdp = event_info['depth']
+                hour = event_info['hour']
+                mini = event_info['minute']
+                msec = f"{event_info['second']:.3f}"
+                sac_commands = f"""
+                wild echo off
+                r {sac_file}
+                ch LCALDA True
+                ch evlo {evlo} evla {evla} evdp {evdp}
+                ch stlo {stlo} stla {stla} stel {stel}
+                ch idep 6
+                ch o gmt {origin_time.year} {origin_time.julday} {hour} {mini} {msec.split('.')[0]} {msec.split('.')[1]}
+                wh
+                q
+                """
+                result = subprocess.run(
+                    ["sac"],
+                    input=sac_commands.encode(),
+                    capture_output=True,
+                    timeout=30,
+                    stderr=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                )
+                return result.returncode == 0
+            except Exception:
+                return False
+
+    def save_processed_waveform(
+        self,
+        st: Stream,
+        event_name: str,
+        event_info: Dict[str, Any],
+        stla: float,
+        stlo: float,
+        stel: float,
+        inv: Optional[Any] = None,
+    ) -> Dict[str, str]:
         """保存处理后的波形数据"""
         saved_files = {}
-        
+
         if not st or len(st) == 0:
             return saved_files
-        
+
         origin_time = event_info['origin_time']
         hour = event_info['hour']
         mini = event_info['minute']
         msec = f"{event_info['second']:.3f}"
-        
+
         for tr in st:
             network = tr.stats.network
             station = tr.stats.station
             channel = tr.stats.channel
-            
             station_id = f"{network}.{station}"
-            
-            newsacname = f"{origin_time.year}.{origin_time.julday:03d}.{hour}.{mini}.{msec}.{station_id}..{channel}.SAC"
-            
-            single_st = Stream([tr.copy()])
-            
-            output_dir = self.output_dirs['vel_data'] / event_name
+            newsacname = (
+                f"{origin_time.year}.{origin_time.julday:03d}."
+                f"{hour}.{mini}.{msec}.{station_id}..{channel}.SAC"
+            )
+
+            output_dir = self.output_dirs['disp_data'] / event_name
             output_dir.mkdir(parents=True, exist_ok=True)
             output_path = output_dir / newsacname
-            
+
             try:
-                single_st.write(str(output_path), format="SAC")
-                saved_files[f'{channel}'] = str(output_path)
-                
-                self.update_sac_headers(output_path, event_info, stla, stlo, stel)
-                
+                Stream([tr.copy()]).write(str(output_path), format="SAC")
+                saved_files[channel] = str(output_path)
+                self.update_sac_headers(
+                    output_path, event_info, stla, stlo, stel,
+                    tr_ref=tr, inv=inv,
+                )
             except Exception:
                 self.stats['error_types']['saving_failed'] += 1
                 continue
-        
+
         return saved_files
-    
-    def apply_quality_control(self, st: Stream, event_info: Dict[str, Any]) -> Tuple[Stream, bool, str]:
-        """应用数据质量控制"""
+
+    @staticmethod
+    def _component_letters(st: Stream) -> Set[str]:
+        """通道末字符集合（Z/N/E/1/2/...）。"""
+        out: Set[str] = set()
+        for tr in st:
+            chan = (tr.stats.channel or '').upper()
+            if chan:
+                out.add(chan[-1])
+        return out
+
+    def has_complete_zne(self, st: Stream) -> bool:
+        """
+        是否具备可旋转/可评测的完整三分量。
+
+        接受 Z+N+E，或已带 Z+1+2（旋转前）；旋转后应落到 ZNE。
+        """
+        comps = self._component_letters(st)
+        if {'Z', 'N', 'E'} <= comps:
+            return True
+        if {'Z', '1', '2'} <= comps:
+            return True
+        return False
+
+    @staticmethod
+    def _glitch_ratio(data: np.ndarray, threshold: float) -> float:
+        """
+        单点毛刺比例：邻域残差 |x_i - 0.5(x_{i-1}+x_{i+1})| 相对 MAD。
+
+        面波大振幅在邻域上光滑，不会被当成毛刺；真正的单样本尖峰会被抓住。
+        """
+        x = np.asarray(data, dtype=float)
+        x = x[np.isfinite(x)]
+        if x.size < 3:
+            return 0.0
+        resid = np.abs(x[1:-1] - 0.5 * (x[:-2] + x[2:]))
+        med = float(np.median(resid))
+        mad = float(np.median(np.abs(resid - med)))
+        if mad > 0:
+            scale = 1.4826 * mad
+        else:
+            scale = float(np.std(resid))
+        if scale <= 0:
+            return 0.0
+        return float(np.sum(resid > threshold * scale) / resid.size)
+
+    def apply_quality_control(
+        self, st: Stream, event_info: Dict[str, Any],
+        check_spikes: bool = True,
+    ) -> Tuple[Stream, bool, str]:
+        """
+        采样率/长度/毛刺等基础 QC。
+
+        Args:
+            st: 输入数据流
+            event_info: 事件元数据（当前未用于门限，保留接口）
+            check_spikes: True 时做单点毛刺检测（应在去响应前的 counts 上开启）
+
+        Returns:
+            (通过的道, 是否仍有有效道, 说明文字)
+        """
         if not st:
             return st, False, "空数据流"
-        
+
         qc_params = self.config.quality_control
         passed_traces = Stream()
         qc_messages = []
-        
+        spike_thr = float(qc_params.get('spike_threshold', 12.0))
+        spike_max = float(qc_params.get('spike_max_ratio', 0.005))
+
         for tr in st:
-            if not (qc_params['min_sample_rate'] <= tr.stats.sampling_rate <= qc_params['max_sample_rate']):
-                qc_messages.append(f"采样率不符合要求: {tr.stats.sampling_rate}")
+            if not (qc_params['min_sample_rate'] <= tr.stats.sampling_rate
+                    <= qc_params['max_sample_rate']):
+                qc_messages.append(
+                    f"{tr.id}:采样率不符合要求:{tr.stats.sampling_rate}"
+                )
                 continue
-            
-            expected_length = int((tr.stats.endtime - tr.stats.starttime) * tr.stats.sampling_rate)
+
+            expected_length = int(
+                (tr.stats.endtime - tr.stats.starttime) * tr.stats.sampling_rate
+            )
             actual_length = len(tr.data)
             length_ratio = actual_length / expected_length if expected_length > 0 else 0
-            
+
             if length_ratio < qc_params['min_length_ratio']:
-                qc_messages.append(f"数据长度不足: {length_ratio:.2f}")
+                qc_messages.append(f"{tr.id}:数据长度不足:{length_ratio:.2f}")
                 continue
-            
-            if qc_params['spike_detection']:
-                data_std = np.std(tr.data)
-                data_mean = np.mean(tr.data)
-                spike_threshold = qc_params['spike_threshold'] * data_std
-                
-                spikes = np.abs(tr.data - data_mean) > spike_threshold
-                spike_ratio = np.sum(spikes) / len(tr.data)
-                
-                if spike_ratio > 0.01:
-                    qc_messages.append(f"尖峰过多: {spike_ratio:.3f}")
+
+            data = np.asarray(tr.data, dtype=float)
+            finite = data[np.isfinite(data)]
+            if finite.size == 0:
+                qc_messages.append(f"{tr.id}:无有效采样点")
+                continue
+
+            if check_spikes and qc_params.get('spike_detection', True):
+                spike_ratio = self._glitch_ratio(finite, spike_thr)
+                if spike_ratio > spike_max:
+                    qc_messages.append(f"{tr.id}:毛刺过多:{spike_ratio:.4f}")
                     continue
-            
+
             passed_traces += tr
-        
+
         success = len(passed_traces) > 0
         message = "; ".join(qc_messages) if qc_messages else "质控通过"
-        
         if not success:
             self.stats['error_types']['quality_control_failed'] += 1
-        
         return passed_traces, success, message
-    
-    def process_single_waveform(self, waveform_file: Path, response_file: Path,
-                               event_info: Dict[str, Any]
-                               ) -> Tuple[Optional[str], Optional[str], Optional[str]]:
-        """处理单个波形文件"""
+
+    def apply_amplitude_qc(self, st: Stream) -> Tuple[Stream, bool, str]:
+        """去响应后振幅/有限性 QC（针对 DISP，单位 m）。不做尖峰检测。"""
+        if not st:
+            return st, False, "空数据流"
+
+        qc = self.config.quality_control
+        out_type = self.config.response_removal.get('output_type', 'DISP').upper()
+        amp_min = float(qc.get('disp_amp_min_m', 1e-12))
+        amp_max = float(qc.get('disp_amp_max_m', 1e-1))
+        max_nan = float(qc.get('max_nonfinite_ratio', 0.01))
+
+        # VEL/ACC 时放宽量级（仍做有限性检查）
+        if out_type == 'VEL':
+            amp_min, amp_max = 1e-12, 1.0
+        elif out_type == 'ACC':
+            amp_min, amp_max = 1e-12, 10.0
+
+        passed = Stream()
+        messages = []
+        for tr in st:
+            data = np.asarray(tr.data, dtype=float)
+            if data.size == 0:
+                messages.append(f"{tr.id}:empty")
+                continue
+            nonfinite = ~np.isfinite(data)
+            ratio = float(np.sum(nonfinite) / data.size)
+            if ratio > max_nan:
+                messages.append(f"{tr.id}:nonfinite={ratio:.3f}")
+                continue
+            peak = float(np.nanmax(np.abs(data)))
+            if not np.isfinite(peak) or peak < amp_min or peak > amp_max:
+                messages.append(f"{tr.id}:peak={peak:.3e}")
+                continue
+            passed += tr
+
+        ok = len(passed) > 0
+        if not ok:
+            self.stats['amplitude_qc_rejected'] += 1
+            self.stats['error_types']['amplitude_qc_failed'] += 1
+        return passed, ok, ("; ".join(messages) if messages else "amp_ok")
+
+    def _reject_incomplete_zne(
+        self, st: Stream, station_id: str, event_name: str, stage: str,
+    ) -> Optional[Tuple[Optional[str], Optional[str], Optional[str]]]:
+        """
+        若要求完整 ZNE 且当前流不满足，返回失败三元组；否则返回 None 继续。
+        """
+        if not self.config.quality_control.get('require_complete_zne', True):
+            return None
+        if self.has_complete_zne(st):
+            return None
+        comps = sorted(self._component_letters(st))
+        self.stats['incomplete_zne_rejected'] += 1
+        self.stats['error_types']['incomplete_zne'] += 1
+        return (
+            station_id,
+            None,
+            f"{event_name}: {station_id}:incomplete_zne@{stage}:{comps}",
+        )
+
+    def _clear_event_disp_dir(self, event_name: str) -> None:
+        """强制重跑时清空该事件旧 disp SAC，避免残留残缺三分量。"""
+        event_dir = self.output_dirs['disp_data'] / event_name
+        if not event_dir.is_dir():
+            return
+        removed = 0
+        for path in list(event_dir.glob('*.SAC')) + list(event_dir.glob('*.sac')):
+            try:
+                path.unlink()
+                removed += 1
+            except OSError:
+                pass
+        if removed and self.config.logging.get('show_debug_info'):
+            self.logger.debug(f"清空 {event_name} 旧 SAC {removed} 个")
+
+    def process_station(
+        self,
+        station_id: str,
+        waveform_files: List[Path],
+        response_file: Path,
+        event_info: Dict[str, Any],
+    ) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+        """
+        按台站处理：合并三分量 → 真旋转 ZNE → counts QC → 去响应 →
+        振幅 QC → 完整 ZNE 门槛 → 写 SAC。
+
+        Returns:
+            (station_id, no_resp_msg, error_msg)；成功时后两者为 None。
+        """
+        event_name = event_info['name']
         try:
-            st = read(str(waveform_file))
+            st = Stream()
+            for wf in waveform_files:
+                try:
+                    st += read(str(wf))
+                except Exception:
+                    continue
             if len(st) == 0:
-                return None, None, None
-            
-            head = st[0]
-            station_id = f"{head.stats.network}.{head.stats.station}"
-            
-            stla, stlo, stel = self.get_station_coordinates(response_file)
-            if stla is None or stlo is None or stel is None:
+                return station_id, None, f"{event_name}: {station_id}:empty_stream"
+
+            inv = self.load_inventory(response_file)
+            stla, stlo, stel = self.get_station_coordinates(response_file, inv=inv)
+            if stla is None or stlo is None:
                 self.stats['error_types']['file_not_found'] += 1
-                return station_id, f"{event_info['name']}: {station_id}.{head.stats.channel}", None
-            
-            if self.config.channel_processing['auto_rotate_12_to_ne']:
-                st, rotated = self.rotate_12_to_ne(st, response_file)
-            
-            success, error_msg = self.remove_instrument_response(st, response_file, event_info)
+                return station_id, f"{event_name}: {station_id}", None
+
+            # 真旋转（需三分量在同一 Stream）
+            st, _ = self.rotate_to_zne(st, inv)
+
+            # 旋转后仍无完整三分量：整台丢弃（不写残缺 SAC）
+            bad = self._reject_incomplete_zne(st, station_id, event_name, 'after_rotate')
+            if bad is not None:
+                return bad
+
+            # counts 域毛刺/长度 QC（去响应前）
+            st_qc, qc_ok, qc_msg = self.apply_quality_control(
+                st, event_info, check_spikes=True,
+            )
+            if not qc_ok:
+                return station_id, None, f"{event_name}: {station_id}:qc_failed ({qc_msg})"
+            bad = self._reject_incomplete_zne(
+                st_qc, station_id, event_name, 'after_counts_qc',
+            )
+            if bad is not None:
+                return bad
+
+            success, error_msg = self.remove_instrument_response(
+                st_qc, response_file, event_info, inv=inv
+            )
             if not success:
-                if error_msg == "no_response_file":
-                    return station_id, f"{event_info['name']}: {station_id}.{head.stats.channel}", None
-                else:
-                    return station_id, None, f"{event_info['name']}: {station_id}.{head.stats.channel}"
-            
-            st_qc, qc_success, qc_message = self.apply_quality_control(st, event_info)
-            if not qc_success:
-                return station_id, None, f"{event_info['name']}: {station_id}.{head.stats.channel}"
-            
-            saved_files = self.save_processed_waveform(st_qc, event_info['name'], event_info, 
-                                                     stla, stlo, stel)
-            
-            if saved_files:
+                if error_msg.startswith('incomplete_response') or error_msg in (
+                    'no_response_file', 'read_inventory_failed', 'no_matching_response'
+                ):
+                    return station_id, f"{event_name}: {station_id} ({error_msg})", None
+                return station_id, None, f"{event_name}: {station_id} ({error_msg})"
+
+            # 去响应后只做长度/采样率（不再做尖峰）+ 振幅门限
+            st_len, len_ok, len_msg = self.apply_quality_control(
+                st_qc, event_info, check_spikes=False,
+            )
+            if not len_ok:
+                return station_id, None, f"{event_name}: {station_id}:post_qc ({len_msg})"
+
+            st_amp, amp_ok, amp_msg = self.apply_amplitude_qc(st_len)
+            if not amp_ok:
+                return station_id, None, f"{event_name}: {station_id}:amp_qc ({amp_msg})"
+
+            # 任一水平向振幅不合格 → 整台丢弃，禁止只留 Z
+            bad = self._reject_incomplete_zne(
+                st_amp, station_id, event_name, 'after_amp_qc',
+            )
+            if bad is not None:
+                return bad
+
+            saved = self.save_processed_waveform(
+                st_amp, event_name, event_info, stla, stlo, stel or 0.0, inv=inv
+            )
+            if saved:
                 self.stats['successful_stations'] += 1
                 return station_id, None, None
-            else:
-                return station_id, None, f"{event_info['name']}: {station_id}.{head.stats.channel}"
-                
+            return station_id, None, f"{event_name}: {station_id}:save_failed"
+
         except FileNotFoundError:
-            station_id = waveform_file.stem.split('.')[1] if '.' in waveform_file.name else "unknown"
             self.stats['error_types']['file_not_found'] += 1
-            return station_id, f"{event_info['name']}: {station_id}", None
-        except Exception:
-            station_id = waveform_file.stem.split('.')[1] if '.' in waveform_file.name else "unknown"
-            return station_id, None, f"{event_info['name']}: {waveform_file.name}"
-    
+            return station_id, f"{event_name}: {station_id}", None
+        except Exception as e:
+            return station_id, None, f"{event_name}: {station_id}:{str(e)[:80]}"
+
+    def process_single_waveform(
+        self,
+        waveform_file: Path,
+        response_file: Path,
+        event_info: Dict[str, Any],
+    ) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+        """兼容旧接口：单文件视为单台站处理。"""
+        station_id = self._station_key_from_waveform_path(waveform_file) or "unknown"
+        return self.process_station(
+            station_id, [waveform_file], response_file, event_info
+        )
+
     def process_event(self, event_info: Dict[str, Any]) -> Tuple[List[str], List[str]]:
-        """🆕 处理单个事件的所有波形数据"""
+        """按台站合并三分量后处理单个事件的全部波形。"""
         event_name = event_info['name']
-        
-        # 简单检查是否已处理
+
         if self.config.resume['skip_existing'] and self.is_event_processed(event_name):
             self.stats['skipped_events'] += 1
             return [], []
-        
-        # 查找波形和响应文件
+
+        # 强制重跑：先清旧 SAC，避免残缺三分量残留
+        if not self.config.resume['skip_existing']:
+            self._clear_event_disp_dir(event_name)
+
         waveform_files, response_files = self.find_waveform_files(event_name)
-        
+
         if not waveform_files or not response_files:
             if self.config.logging['show_debug_info']:
-                self.logger.warning(f"事件 {event_name}: 波形={len(waveform_files) if waveform_files else 0}, 响应={len(response_files) if response_files else 0}")
+                self.logger.warning(
+                    f"事件 {event_name}: 波形={len(waveform_files) if waveform_files else 0}, "
+                    f"响应={len(response_files) if response_files else 0}"
+                )
             return [], []
-        
-        # 🆕 预先建立响应文件映射表（避免重复O(n)搜索）
+
         response_mapping = self.build_response_mapping(response_files)
-        
-        no_resp_stations = []
-        error_resp_stations = []
-        event_success_count = 0
+        station_groups = self.group_waveforms_by_station(waveform_files)
+
+        no_resp_stations: List[str] = []
+        error_resp_stations: List[str] = []
         match_failures = 0
-        
-        # 处理每个波形文件
-        for waveform_file in waveform_files:
+
+        for station_id, wf_list in station_groups.items():
             self.stats['total_stations'] += 1
-            
-            # 🆕 使用快速匹配（O(1)时间复杂度）
-            response_file = self.match_response_file_fast(waveform_file, response_mapping)
-            
+            response_file = response_mapping.get(station_id)
+
             if not response_file:
-                waveform_name = waveform_file.stem
-                parts = waveform_name.split('__')[0].split('.')
-                if len(parts) >= 2:
-                    station_id = f"{parts[0]}.{parts[1]}"
-                    no_resp_stations.append(f"{event_name}: {station_id} (no matching response)")
-                    self.stats['no_response_stations'].append(f"{event_name}: {station_id}")
+                # 用任一文件再试快速匹配
+                response_file = self.match_response_file_fast(wf_list[0], response_mapping)
+
+            if not response_file:
+                no_resp_stations.append(f"{event_name}: {station_id} (no matching response)")
+                self.stats['no_response_stations'].append(f"{event_name}: {station_id}")
                 match_failures += 1
                 self.stats['failed_stations'] += 1
                 continue
-            
-            station_id, no_resp, error_resp = self.process_single_waveform(
-                waveform_file, response_file, event_info
+
+            sid, no_resp, error_resp = self.process_station(
+                station_id, wf_list, response_file, event_info
             )
-            
+
             if no_resp:
                 no_resp_stations.append(no_resp)
                 self.stats['failed_stations'] += 1
             elif error_resp:
                 error_resp_stations.append(error_resp)
                 self.stats['failed_stations'] += 1
-            else:
-                event_success_count += 1
-        
-        # 内存优化
+
         if self.config.performance['memory_efficient']:
             gc.collect()
-        
-        # 🆕 优化日志输出（只在有问题或debug模式时输出）
+
         if match_failures > 0 and self.config.logging['show_debug_info']:
-            self.logger.warning(f"⚠️  {event_name}: {match_failures} 个波形无匹配响应")
-        
+            self.logger.warning(f"⚠️  {event_name}: {match_failures} 个台站无匹配响应")
+
         return no_resp_stations, error_resp_stations
     
     def save_progress(self, current_index: int):
@@ -1019,7 +1489,8 @@ class WaveformPreprocessor:
             return None
     
     def batch_process(self, catalog_file: Optional[Union[str, Path]] = None, 
-                     max_events: Optional[int] = None) -> Dict[str, Any]:
+                     max_events: Optional[int] = None,
+                     event_names: Optional[List[str]] = None) -> Dict[str, Any]:
         """🆕 批量处理多个事件"""
         self.stats['processing_summary']['start_time'] = datetime.now()
         start_time = self.stats['processing_summary']['start_time']
@@ -1028,14 +1499,21 @@ class WaveformPreprocessor:
         
         try:
             events = self.load_event_catalog(catalog_file)
+
+            if event_names:
+                allow = {n.strip() for n in event_names if n and str(n).strip()}
+                events = [e for e in events if e.get('name') in allow]
+                self.logger.info(f"按 --events 过滤后剩余 {len(events)} 个事件")
             
             if max_events:
                 events = events[:max_events]
             
-            # 加载进度
-            start_idx = self.load_progress() or 0
-            if start_idx > 0:
-                start_idx += 1
+            # 强制重跑或指定事件列表时，不从旧进度续跑
+            start_idx = 0
+            if self.config.resume['skip_existing'] and not event_names:
+                start_idx = self.load_progress() or 0
+                if start_idx > 0:
+                    start_idx += 1
             
             total_events = len(events)
             self.stats['total_events'] = total_events
@@ -1141,7 +1619,10 @@ class WaveformPreprocessor:
                 f.write(f"  跳过事件: {self.stats['skipped_events']:,}\n")
                 f.write(f"  成功台站: {self.stats['successful_stations']:,}\n")
                 f.write(f"  失败台站: {self.stats['failed_stations']:,}\n")
-                f.write(f"  1,2分量转换: {self.stats['component_conversions']:,} 次\n")
+                f.write(f"  ZNE真旋转: {self.stats['component_conversions']:,} 次\n")
+                f.write(f"  拒绝残缺响应: {self.stats.get('incomplete_response_rejected', 0):,}\n")
+                f.write(f"  拒绝异常振幅: {self.stats.get('amplitude_qc_rejected', 0):,}\n")
+                f.write(f"  拒绝残缺ZNE: {self.stats.get('incomplete_zne_rejected', 0):,}\n")
                 f.write(f"  简化响应去除: {self.stats['simplified_response_removal']:,} 次\n")
                 
                 if self.stats['total_stations'] > 0:
@@ -1199,36 +1680,84 @@ class WaveformPreprocessor:
 
 def main():
     """主函数"""
-    print("🔬 EASTASIA-FWI 波形预处理模块 v2.6")
-    print("="*60)
-    
+    parser = argparse.ArgumentParser(
+        description='EASTASIA-FWI 波形预处理（DISP SAC，台站级真旋转+响应QC）'
+    )
+    parser.add_argument(
+        '--session', type=str, default=None,
+        help='下载会话名，如 20260805_download_02（覆盖配置）',
+    )
+    parser.add_argument(
+        '--catalog', type=str, default=None,
+        help='事件目录 .par（默认取最新一个，30 事件请显式指定）',
+    )
+    parser.add_argument(
+        '--force', action='store_true',
+        help='强制重跑（不跳过已有 disp_data）',
+    )
+    parser.add_argument(
+        '--events', type=str, nargs='+', default=None,
+        help='只处理指定事件名（如 20120812.10.47），可多个',
+    )
+    parser.add_argument(
+        '--yes', '-y', action='store_true',
+        help='跳过交互确认',
+    )
+    parser.add_argument(
+        '--max-events', type=int, default=None,
+        help='最多处理事件数（调试用）',
+    )
+    args = parser.parse_args()
+
+    print("🔬 EASTASIA-FWI 波形预处理模块 v2.8")
+    print("=" * 60)
+
     try:
-        preprocessor = WaveformPreprocessor()
-        
-        catalog_files = preprocessor.find_catalog_files()
-        
-        if not catalog_files:
-            print("❌ 未找到事件目录文件")
-            return
-        
-        catalog_file = catalog_files[0]
-        
+        preprocessor = WaveformPreprocessor(
+            download_session=args.session,
+            skip_existing=False if args.force else None,
+        )
+
+        if args.catalog:
+            catalog_file = Path(args.catalog).expanduser()
+            if not catalog_file.is_file():
+                cand = preprocessor.input_dirs['events'] / args.catalog
+                catalog_file = cand if cand.is_file() else catalog_file
+            if not catalog_file.is_file():
+                print(f"❌ 目录文件不存在: {args.catalog}")
+                return
+            catalog_file = catalog_file.resolve()
+        else:
+            catalog_files = preprocessor.find_catalog_files()
+            if not catalog_files:
+                print("❌ 未找到事件目录文件")
+                return
+            catalog_file = catalog_files[0]
+
         print(f"\n📊 输入配置:")
         print(f"  事件目录: {catalog_file}")
         print(f"  波形数据: {preprocessor.input_dirs['waveforms']}")
         print(f"  响应数据: {preprocessor.input_dirs['responses']}")
-        print(f"📁 输出目录: {preprocessor.output_dirs['vel_data']}")
-        
-        print("\n是否开始处理? (y/N): ", end="")
-        response = input().strip().lower()
-        
-        if response != 'y':
-            print("处理已取消")
-            return
-        
+        print(f"📁 输出目录: {preprocessor.output_dirs['disp_data']}")
+        if args.force:
+            print("  模式: --force（不跳过已处理事件，并清空对应事件旧 SAC）")
+        if args.events:
+            print(f"  事件过滤: {', '.join(args.events)}")
+
+        if not args.yes:
+            print("\n是否开始处理? (y/N): ", end="")
+            response = input().strip().lower()
+            if response != 'y':
+                print("处理已取消")
+                return
+
         print("\n开始批量预处理...")
-        results = preprocessor.batch_process(catalog_file, max_events=None)
-        
+        results = preprocessor.batch_process(
+            catalog_file,
+            max_events=args.max_events,
+            event_names=args.events,
+        )
+
         stats = results['stats']
         print(f"\n🎉 波形预处理完成!")
         print(f"📈 处理统计:")
@@ -1237,42 +1766,35 @@ def main():
         print(f"  跳过事件: {stats['skipped_events']}")
         print(f"  成功台站: {stats['successful_stations']:,}")
         print(f"  失败台站: {stats['failed_stations']:,}")
-        print(f"  分量转换: {stats['component_conversions']:,} 次")
+        print(f"  拒绝残缺响应: {stats.get('incomplete_response_rejected', 0):,}")
+        print(f"  拒绝异常振幅: {stats.get('amplitude_qc_rejected', 0):,}")
+        print(f"  拒绝残缺ZNE: {stats.get('incomplete_zne_rejected', 0):,}")
+        print(f"  ZNE旋转: {stats['component_conversions']:,} 次")
         print(f"  简化响应去除: {stats['simplified_response_removal']:,} 次")
-        
-        # 🆕 显示警告抑制统计
+
         if preprocessor.config.performance['suppress_all_warnings']:
-            print(f"  抑制警告: {stats['warning_stats']['response_warnings_suppressed']:,} 次 ✅")
-        
+            print(
+                f"  抑制警告: "
+                f"{stats['warning_stats']['response_warnings_suppressed']:,} 次"
+            )
+
         if stats['total_stations'] > 0:
             success_rate = stats['successful_stations'] / stats['total_stations'] * 100
             print(f"  成功率: {success_rate:.1f}%")
-        
-        if preprocessor.config.performance['cache_inventory']:
-            cache_hits = stats.get('inventory_cache_hits', 0)
-            cache_misses = stats.get('inventory_cache_misses', 0)
-            if cache_hits + cache_misses > 0:
-                cache_hit_rate = cache_hits / (cache_hits + cache_misses) * 100
-                print(f"  Inventory缓存命中率: {cache_hit_rate:.1f}%")
-        
+
         print(f"⏱️ 总耗时: {results['total_time_seconds']/60:.2f} 分钟")
-        
-        if stats['processed_events'] > 0:
-            avg_time = results['total_time_seconds'] / stats['processed_events']
-            print(f"  平均速度: {avg_time:.1f} 秒/事件")
-        
         print(f"📋 详细报告: {results['report_file']}")
-        print(f"📁 输出目录: {preprocessor.output_dirs['vel_data']}")
-        
+        print(f"📁 输出目录: {preprocessor.output_dirs['disp_data']}")
+
     except KeyboardInterrupt:
         print("\n\n⏹️ 用户中断处理")
-        print("💡 提示：下次运行时将自动从中断处继续")
+        print("💡 提示：下次运行时将自动从中断处继续（或加 --force 全量重跑）")
     except Exception as e:
         print(f"\n❌ 处理过程出错: {e}")
         import traceback
         traceback.print_exc()
-    
-    print("="*60)
+
+    print("=" * 60)
 
 
 if __name__ == "__main__":
