@@ -66,8 +66,13 @@ temp/
 # SPECFEM 需要单独下载/编译
 specfem3d_globe/
 specfem3d_globe_new/
-specfem/
 specfem3d_globe-EMC/
+# specfem/ 工作区：忽略网格/编译产物/测试输出，仅追踪根目录工作流脚本
+specfem/**
+!specfem/
+!specfem/*.py
+!specfem/*.sh
+!specfem/*.md
 
 # ============ paper 论文目录 ============
 # 仅追踪文稿源码（.md）与构建脚本（.py），大型二进制不入库

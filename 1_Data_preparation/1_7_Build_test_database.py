@@ -30,6 +30,8 @@ CMT3D 震源参数经过三维结构模型（GLAD-M25）全波形拟合修正，
    - 空间去重: 避免事件过于密集
    - 覆盖不同构造区域（俯冲带、碰撞带、板内）
    - hybrid_30 模式: 与 hybrid_10events 互补的 30 个空间均匀事件（2010+）
+   - eastasia_model_30 模式: 从 EastAsia_model 波形库 Mw≥5.5 候选中
+     选取 30 个空间均匀、远离研究区边界的正演测试事件
 
 4. ✅ 永久台站集成
    - 使用 293 个经筛选的永久台站
@@ -64,9 +66,10 @@ import re
 import sys
 import json
 import math
+import shutil
 import warnings
 from pathlib import Path
-from typing import Dict, List, Optional, Any
+from typing import Any, Dict, List, Optional, Tuple
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -309,6 +312,90 @@ class TestDatabaseConfig:
             'seed_search_radius_deg': 12.0,
         }
 
+        # EastAsia_model 正演测试事件：从已有波形库中采样，避开研究区边缘
+        self.eastasia_model_forward = {
+            'dataset_subdir': 'EastAsia_model',
+            'output_subdir': 'eastasia_model_30events',
+            'root_par_name': 'download_catalog_eastasia_model_30events.par',
+            'id_map_name': 'eastasia_model_30events_id_to_dir.csv',
+            'events_list_name': 'events.list',
+            'target_count': 30,
+            'magnitude_range': [5.5, 7.5],
+            'depth_range': [0, 700],
+            'time_range': [2008, 2025],
+            # 距 base_config 边界的最小距离（度），避免边缘事件
+            'min_interior_margin_deg': 5.0,
+            # 硬排除：南界以南、东缘以远（lat<0° 或 lon>143°）
+            'min_latitude_deg': 0.0,
+            'max_longitude_deg': 143.0,
+            # 大陆内部偏好区（评分加权）
+            'mainland_lat_range': [5.0, 50.0],
+            'mainland_lon_range': [70.0, 130.0],
+            'mainland_weight': 0.30,
+            'require_waveform': True,
+            'depth_quotas': {
+                'shallow': 14,
+                'intermediate': 8,
+                'deep': 8,
+            },
+            'min_event_distance_deg': 3.5,
+            'relax_distance_deg': 2.0,
+            'year_weight': 0.25,
+            'magnitude_weight': 0.20,
+            'coverage_weight': 0.20,
+            # 分时段配额（优先于单一观测窗口）；合计须等于 target_count
+            'temporal_quotas': [
+                {'start_year': 2008, 'end_year': 2013, 'count': 7},
+                {'start_year': 2014, 'end_year': 2018, 'count': 15},
+                {'start_year': 2019, 'end_year': 2025, 'count': 8},
+            ],
+            # 单一观测窗口（temporal_quotas 为空时启用）
+            'use_optimal_observation_window': False,
+            'observation_window_years': 5,
+            'observation_window': None,
+            'seed_points': [
+                (50.0, 80.0),    # 阿尔泰
+                (42.0, 85.0),    # 天山
+                (32.0, 88.0),    # 青藏高原
+                (36.0, 108.0),   # 华北
+                (28.0, 104.0),   # 四川盆地
+                (24.0, 110.0),   # 华南
+                (30.0, 95.0),    # 藏东
+                (38.0, 118.0),   # 华东
+            ],
+            'seed_search_radius_deg': 10.0,
+            'stations_catalog': 'catalog/stations_catalog.csv',
+            'waveform_coverage_csv': 'catalog/event_waveform_coverage.csv',
+        }
+
+        # 论文地球透视图：事件震源球 + 台站小三角（单图叠加）
+        self.eastasia_paper_globe = {
+            'figure_stem': '1-7_eastasia_model_30events_paper_globe',
+            'save_formats': ['jpg', 'pdf'],
+            'dpi': 300,
+            'globe_width': '14c',
+            'altitude': 2.65,
+            'study_region_pen': '2.2p,black',
+            'grid_interval': 45,
+            'station_size': 't0.05c',
+            'station_fill': '180/190/200',
+            'station_pen': '0.04p,120/130/140',
+            'meca_pen': '0.20p,30/30/30',
+            'depth_cmap': 'seis',
+            'depth_range': [0, 700],
+        }
+        # 台站网络详图（单独成图，按台网分色 + 统计图例）
+        self.eastasia_station_detail = {
+            'figure_stem': '1-7_eastasia_model_stations_network',
+            'save_formats': ['jpg', 'pdf'],
+            'dpi': 300,
+            'region': [55.0, 155.0, -12.0, 62.0],
+            'projection_width': '18c',
+            'frame': ['xa20f10', 'ya10f5', 'WSen'],
+            'top_networks': 14,
+            'station_size': 't0.07c',
+        }
+
         # 论文展示图：30 事件 + 1_8 按实测波形筛选的质量台站
         self.paper_map = {
             'region': [65.0, 155.0, -14.0, 58.0],
@@ -399,6 +486,14 @@ class TestDatabaseBuilder:
         self.filtered_events: List[CMT3DEvent] = []
         self.selected_events: List[CMT3DEvent] = []
         self.stations_df: Optional[pd.DataFrame] = None
+        self.waveform_coverage: Optional[Dict[str, int]] = None
+        self.observation_window: Optional[Dict[str, Any]] = None
+
+        # EastAsia_model 数据集路径
+        ea_cfg = self.config.eastasia_model_forward
+        self.eastasia_model_dir = (
+            self.base_config.dirs['events'] / ea_cfg['dataset_subdir']
+        )
 
         self.logger.info("🎯 标准测试数据库构建器初始化完成")
         self._print_config_summary()
@@ -599,11 +694,11 @@ class TestDatabaseBuilder:
     def _parse_pde_line(self, event: CMT3DEvent, pde_line: str):
         """解析 PDE 行中的时间和震级信息"""
         try:
-            parts = pde_line.split()
-            if len(parts) < 11:
+            parts = pde_line.strip().split()
+            if len(parts) < 11 or not parts[0].startswith('PDE'):
                 return
 
-            # PDE YYYY MM DD HH MM SS.SS LAT LON DEP MB MS ...
+            # PDE/PDEW/PDEQ YYYY MM DD HH MM SS.SS LAT LON DEP MB MS ...
             event.pde_year = int(parts[1])
             event.pde_month = int(parts[2])
             event.pde_day = int(parts[3])
@@ -615,7 +710,15 @@ class TestDatabaseBuilder:
             event.pde_depth = float(parts[9])
             event.pde_mb = float(parts[10]) if parts[10] != 'None' else 0.0
             if len(parts) > 11:
-                event.pde_ms = float(parts[11]) if parts[11] != 'None' else 0.0
+                try:
+                    event.pde_ms = float(parts[11])
+                except ValueError:
+                    # SPECFEM CMTSOLUTION: mb 后紧跟震级，再往后是地名
+                    if len(parts) > 12:
+                        try:
+                            event.pde_ms = float(parts[12])
+                        except ValueError:
+                            pass
         except (ValueError, IndexError):
             pass
 
@@ -1186,17 +1289,26 @@ class TestDatabaseBuilder:
         quota: int,
         min_dist_deg: float,
         already_selected: Optional[List[CMT3DEvent]] = None,
+        scoring_cfg: Optional[Dict[str, Any]] = None,
+        coverage_lookup: Optional[Dict[str, int]] = None,
     ) -> List[CMT3DEvent]:
         """
-        最远点采样：优先拉开空间距离，其次偏好较新年份与较大震级。
+        最远点采样：优先拉开空间距离，其次偏好较新年份、较大震级与更高波形覆盖。
         """
-        cfg = self.config.hybrid_forward
-        year_w = float(cfg['year_weight'])
-        mag_w = float(cfg['magnitude_weight'])
-        year0, year1 = cfg['time_range']
-        mag0, mag1 = cfg['magnitude_range']
+        cfg = scoring_cfg or self.config.hybrid_forward
+        year_w = float(cfg.get('year_weight', 0.35))
+        mag_w = float(cfg.get('magnitude_weight', 0.15))
+        cov_w = float(cfg.get('coverage_weight', 0.0))
+        mainland_w = float(cfg.get('mainland_weight', 0.0))
+        time_range = cfg.get('time_range', [2000, 2025])
+        mag_range = cfg.get('magnitude_range', [5.5, 7.5])
+        year0, year1 = time_range
+        mag0, mag1 = mag_range
         year_span = max(1, year1 - year0)
         mag_span = max(0.1, mag1 - mag0)
+        max_coverage = 1
+        if coverage_lookup:
+            max_coverage = max(coverage_lookup.values() or [1])
 
         selected: List[CMT3DEvent] = []
         refs = [
@@ -1222,7 +1334,17 @@ class TestDatabaseBuilder:
                     continue
                 year_s = (ev.pde_year - year0) / year_span
                 mag_s = (ev.best_magnitude - mag0) / mag_span
-                score = min_d + year_w * 8.0 * year_s + mag_w * 4.0 * mag_s
+                cov_s = 0.0
+                if coverage_lookup and ev.event_name in coverage_lookup:
+                    cov_s = coverage_lookup[ev.event_name] / max_coverage
+                mainland_s = self._mainland_interior_score(ev, cfg)
+                score = (
+                    min_d
+                    + year_w * 8.0 * year_s
+                    + mag_w * 4.0 * mag_s
+                    + cov_w * 6.0 * cov_s
+                    + mainland_w * 6.0 * mainland_s
+                )
                 if score > best_score:
                     best_score = score
                     best = ev
@@ -1233,6 +1355,1260 @@ class TestDatabaseBuilder:
             refs.append((best.latitude, best.longitude))
 
         return selected
+
+    # ----------------------------------------------------------------
+    # eastasia_model_30：从已有波形库选取 30 个内部正演测试事件
+    # ----------------------------------------------------------------
+
+    @property
+    def _eastasia_dataset_dir(self) -> Path:
+        return self.eastasia_model_dir
+
+    def parse_eastasia_model_catalog(self) -> List[CMT3DEvent]:
+        """
+        解析 EastAsia_model/src_rec 下全部 CMTSOLUTION 文件。
+
+        Returns:
+            解析成功的事件列表
+        """
+        src_rec = self._eastasia_dataset_dir / 'src_rec'
+        if not src_rec.exists():
+            raise FileNotFoundError(f"EastAsia_model 目录不存在: {src_rec}")
+
+        events: List[CMT3DEvent] = []
+        for cmt_file in sorted(src_rec.glob('CMTSOLUTION_*')):
+            try:
+                lines = cmt_file.read_text(encoding='utf-8', errors='replace').splitlines()
+                event = self._parse_single_cmt3d_event(lines[:13])
+                if event is not None:
+                    events.append(event)
+            except OSError as exc:
+                self.logger.debug(f"读取失败 {cmt_file.name}: {exc}")
+
+        self.all_events = events
+        self.logger.info(f"📖 EastAsia_model 目录解析完成: {len(events)} 个事件")
+        return events
+
+    def load_eastasia_waveform_coverage(self) -> Dict[str, int]:
+        """
+        加载每事件 SAC 覆盖台站数（若 catalog 不存在则现场统计）。
+
+        Returns:
+            Event_ID → N_Stations 字典
+        """
+        cfg = self.config.eastasia_model_forward
+        cov_path = self._eastasia_dataset_dir / cfg['waveform_coverage_csv']
+        coverage: Dict[str, int] = {}
+
+        if cov_path.exists():
+            df = pd.read_csv(cov_path)
+            for _, row in df.iterrows():
+                coverage[str(row['Event_ID'])] = int(row.get('N_Stations', 0))
+            self.logger.info(f"📊 加载波形覆盖统计: {len(coverage)} 个事件")
+        else:
+            data_obs = self._eastasia_dataset_dir / 'data_obs'
+            for ev_dir in sorted(data_obs.iterdir()):
+                if ev_dir.is_dir():
+                    stations = {
+                        p.name.split('.')[0] + '.' + p.name.split('.')[1]
+                        for p in ev_dir.glob('*.sac')
+                        if len(p.stem.split('.')) >= 2
+                    }
+                    coverage[ev_dir.name] = len(stations)
+            self.logger.info(f"📊 现场统计波形覆盖: {len(coverage)} 个事件")
+
+        self.waveform_coverage = coverage
+        return coverage
+
+    def _distance_to_region_boundary(self, latitude: float, longitude: float) -> float:
+        """计算事件到研究区域边界的最小距离（度）。"""
+        region = self.base_config.region
+        dist_lon = min(
+            longitude - region['lon_min'],
+            region['lon_max'] - longitude,
+        )
+        dist_lat = min(
+            latitude - region['lat_min'],
+            region['lat_max'] - latitude,
+        )
+        return min(dist_lon, dist_lat)
+
+    def _is_interior_event(self, ev: CMT3DEvent, min_margin_deg: float) -> bool:
+        """判断事件是否远离研究区边界。"""
+        return self._distance_to_region_boundary(ev.latitude, ev.longitude) >= min_margin_deg
+
+    def _passes_mainland_hard_filter(
+        self,
+        ev: CMT3DEvent,
+        cfg: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        """硬排除 lat<min_latitude 或 lon>max_longitude 的边界事件。"""
+        cfg = cfg or self.config.eastasia_model_forward
+        min_lat = cfg.get('min_latitude_deg')
+        max_lon = cfg.get('max_longitude_deg')
+        if min_lat is not None and ev.latitude < float(min_lat):
+            return False
+        if max_lon is not None and ev.longitude > float(max_lon):
+            return False
+        return True
+
+    @staticmethod
+    def _mainland_interior_score(
+        ev: CMT3DEvent,
+        cfg: Dict[str, Any],
+    ) -> float:
+        """大陆内部偏好评分 [0, 1]：位于 mainland_lat/lon_range 内为 1。"""
+        lat_range = cfg.get('mainland_lat_range', [5.0, 50.0])
+        lon_range = cfg.get('mainland_lon_range', [70.0, 130.0])
+        lat0, lat1 = float(lat_range[0]), float(lat_range[1])
+        lon0, lon1 = float(lon_range[0]), float(lon_range[1])
+        if lat0 <= ev.latitude <= lat1 and lon0 <= ev.longitude <= lon1:
+            return 1.0
+        d_lat = 0.0
+        if ev.latitude < lat0:
+            d_lat = lat0 - ev.latitude
+        elif ev.latitude > lat1:
+            d_lat = ev.latitude - lat1
+        d_lon = 0.0
+        if ev.longitude < lon0:
+            d_lon = lon0 - ev.longitude
+        elif ev.longitude > lon1:
+            d_lon = ev.longitude - lon1
+        penalty = math.sqrt(d_lat ** 2 + d_lon ** 2)
+        return max(0.0, 1.0 - penalty / 20.0)
+
+    def _has_waveform_data(self, event_name: str) -> bool:
+        """检查 data_obs 中是否存在该事件的波形目录。"""
+        return (self._eastasia_dataset_dir / 'data_obs' / event_name).is_dir()
+
+    def load_or_compute_observation_window(self) -> Dict[str, Any]:
+        """
+        加载或计算观测台站数最多的事件时间窗口。
+
+        优先读取 5_11 生成的 catalog/optimal_event_window.json；
+        若不存在则基于波形覆盖统计现场计算。
+
+        Returns:
+            含 start_year/end_year 的窗口字典
+        """
+        cfg = self.config.eastasia_model_forward
+        manual = cfg.get('observation_window')
+        if manual and isinstance(manual, dict):
+            self.observation_window = manual
+            return manual
+
+        window_path = self._eastasia_dataset_dir / 'catalog' / 'optimal_event_window.json'
+        if window_path.exists():
+            with open(window_path, 'r', encoding='utf-8') as f:
+                self.observation_window = json.load(f)
+            self.logger.info(
+                f"📅 加载最优观测窗口: "
+                f"{self.observation_window['start_year']}–"
+                f"{self.observation_window['end_year']}"
+            )
+            return self.observation_window
+
+        if self.waveform_coverage is None:
+            self.load_eastasia_waveform_coverage()
+
+        window_years = int(cfg.get('observation_window_years', 5))
+        min_events = int(cfg.get('target_count', 30))
+        year_stats: Dict[int, Dict[str, float]] = {}
+
+        for ev in self.all_events:
+            if ev.pde_year <= 0:
+                continue
+            n_sta = (self.waveform_coverage or {}).get(ev.event_name, 0)
+            if n_sta <= 0:
+                continue
+            bucket = year_stats.setdefault(ev.pde_year, {'n': 0, 'sum_sta': 0.0, 'max_sta': 0})
+            bucket['n'] += 1
+            bucket['sum_sta'] += n_sta
+            bucket['max_sta'] = max(bucket['max_sta'], n_sta)
+
+        if not year_stats:
+            self.observation_window = {}
+            return {}
+
+        years = sorted(year_stats.keys())
+        best: Optional[Dict[str, Any]] = None
+        for start in range(years[0], years[-1] - window_years + 2):
+            end = start + window_years - 1
+            n_events = sum(year_stats[y]['n'] for y in range(start, end + 1) if y in year_stats)
+            if n_events < min_events:
+                continue
+            sta_vals = [
+                year_stats[y]['sum_sta'] / year_stats[y]['n']
+                for y in range(start, end + 1) if y in year_stats and year_stats[y]['n'] > 0
+            ]
+            if not sta_vals:
+                continue
+            mean_sta = sum(sta_vals) / len(sta_vals)
+            if best is None or mean_sta > best['mean_stations_per_event']:
+                best = {
+                    'start_year': start,
+                    'end_year': end,
+                    'window_years': window_years,
+                    'n_events': n_events,
+                    'mean_stations_per_event': round(mean_sta, 1),
+                    'selection_criterion': 'max_mean_stations_per_event',
+                }
+
+        self.observation_window = best or {}
+        if best:
+            self.logger.info(
+                f"📅 计算最优观测窗口: {best['start_year']}–{best['end_year']} "
+                f"(均值 {best['mean_stations_per_event']:.0f} 台站/事件)"
+            )
+        return self.observation_window
+
+    def filter_eastasia_model_candidates(
+        self,
+        events: Optional[List[CMT3DEvent]] = None,
+    ) -> List[CMT3DEvent]:
+        """
+        筛选 EastAsia_model 正演候选事件池（Mw≥5.5、有波形、远离边界）。
+
+        Args:
+            events: 原始事件列表，默认 self.all_events
+
+        Returns:
+            候选事件列表
+        """
+        if events is None:
+            events = self.all_events
+
+        cfg = self.config.eastasia_model_forward
+        mag_range = cfg['magnitude_range']
+        depth_range = cfg['depth_range']
+        margin = float(cfg['min_interior_margin_deg'])
+        region = self.base_config.region
+
+        if cfg['require_waveform'] and self.waveform_coverage is None:
+            self.load_eastasia_waveform_coverage()
+
+        temporal_quotas = cfg.get('temporal_quotas') or []
+        time_window: Optional[Dict[str, Any]] = None
+        year_min: Optional[int] = None
+        year_max: Optional[int] = None
+
+        if temporal_quotas:
+            year_min = min(int(q['start_year']) for q in temporal_quotas)
+            year_max = max(int(q['end_year']) for q in temporal_quotas)
+        elif cfg.get('use_optimal_observation_window', True):
+            time_window = self.load_or_compute_observation_window()
+            if time_window:
+                year_min = int(time_window['start_year'])
+                year_max = int(time_window['end_year'])
+
+        filtered: List[CMT3DEvent] = []
+        stats = {
+            'region': 0, 'magnitude': 0, 'depth': 0,
+            'edge': 0, 'mainland': 0, 'no_waveform': 0, 'time_window': 0,
+        }
+
+        for ev in events:
+            if not (region['lat_min'] <= ev.latitude <= region['lat_max'] and
+                    region['lon_min'] <= ev.longitude <= region['lon_max']):
+                stats['region'] += 1
+                continue
+            if not (depth_range[0] <= ev.depth <= depth_range[1]):
+                stats['depth'] += 1
+                continue
+            mw = ev.best_magnitude
+            if not (mag_range[0] <= mw <= mag_range[1]):
+                stats['magnitude'] += 1
+                continue
+            if not self._is_interior_event(ev, margin):
+                stats['edge'] += 1
+                continue
+            if not self._passes_mainland_hard_filter(ev, cfg):
+                stats['mainland'] += 1
+                continue
+            if cfg['require_waveform'] and not self._has_waveform_data(ev.event_name):
+                stats['no_waveform'] += 1
+                continue
+            if year_min is not None and year_max is not None and (
+                ev.pde_year < year_min or ev.pde_year > year_max
+            ):
+                stats['time_window'] += 1
+                continue
+            filtered.append(ev)
+
+        self.filtered_events = filtered
+        window_msg = ''
+        if temporal_quotas:
+            parts = [
+                f"{q['start_year']}–{q['end_year']}×{q['count']}"
+                for q in temporal_quotas
+            ]
+            window_msg = f", 时段配额 {' + '.join(parts)}"
+        elif time_window:
+            window_msg = (
+                f", 观测窗口 {time_window['start_year']}–{time_window['end_year']}"
+            )
+        self.logger.info(
+            f"🔍 EastAsia_model 候选池: {len(events)} → {len(filtered)} "
+            f"(边缘排除 {stats['edge']}, 边界 {margin}°{window_msg})"
+        )
+        self.logger.info(
+            f"  区域/深度/震级/边界/大陆硬筛/无波形/时间窗排除: "
+            f"{stats['region']}/{stats['depth']}/{stats['magnitude']}/"
+            f"{stats['edge']}/{stats['mainland']}/{stats['no_waveform']}/"
+            f"{stats['time_window']}"
+        )
+        return filtered
+
+    @staticmethod
+    def _allocate_depth_sub_quotas(
+        bucket_count: int,
+        depth_quotas: Dict[str, int],
+    ) -> Dict[str, int]:
+        """按全局深度配额比例分配单个时段桶内的深度目标数。"""
+        total = sum(depth_quotas.values())
+        if total <= 0 or bucket_count <= 0:
+            return {cat: 0 for cat in depth_quotas}
+
+        raw = {
+            cat: bucket_count * quota / total
+            for cat, quota in depth_quotas.items()
+        }
+        sub = {cat: int(raw[cat]) for cat in depth_quotas}
+        remainder = bucket_count - sum(sub.values())
+        if remainder > 0:
+            order = sorted(depth_quotas, key=lambda c: raw[c] - sub[c], reverse=True)
+            for cat in order:
+                if remainder <= 0:
+                    break
+                sub[cat] += 1
+                remainder -= 1
+        return sub
+
+    def _select_events_in_temporal_bucket(
+        self,
+        bucket_pool: List[CMT3DEvent],
+        bucket_quota: int,
+        depth_sub_quotas: Dict[str, int],
+        already_selected: List[CMT3DEvent],
+        selected_names: set,
+        cfg: Dict[str, Any],
+        coverage: Dict[str, int],
+        min_dist: float,
+        relax_dist: float,
+        bucket_label: str,
+    ) -> List[CMT3DEvent]:
+        """在单个时段桶内做深度分层 + 空间均匀采样。"""
+        selected: List[CMT3DEvent] = []
+
+        def _layer_count(cat: str) -> int:
+            return sum(1 for s in selected if s.depth_category == cat)
+
+        def _too_close(ev: CMT3DEvent, dist_lim: float) -> bool:
+            refs = already_selected + selected
+            return any(
+                self._angular_distance(
+                    ev.latitude, ev.longitude, s.latitude, s.longitude
+                ) < dist_lim
+                for s in refs
+            )
+
+        groups: Dict[str, List[CMT3DEvent]] = {
+            'shallow': [], 'intermediate': [], 'deep': [],
+        }
+        for ev in bucket_pool:
+            groups[ev.depth_category].append(ev)
+
+        seed_radius = float(cfg['seed_search_radius_deg'])
+        for lat0, lon0 in cfg['seed_points']:
+            if len(selected) >= bucket_quota:
+                break
+            eligible: List[CMT3DEvent] = []
+            for cat, quota in depth_sub_quotas.items():
+                if _layer_count(cat) >= quota:
+                    continue
+                for ev in groups[cat]:
+                    if ev.event_name in selected_names or _too_close(ev, min_dist):
+                        continue
+                    if self._angular_distance(
+                        ev.latitude, ev.longitude, lat0, lon0
+                    ) <= seed_radius:
+                        eligible.append(ev)
+            if not eligible:
+                continue
+            eligible.sort(
+                key=lambda e: (
+                    self._mainland_interior_score(e, cfg),
+                    coverage.get(e.event_name, 0),
+                    e.best_magnitude,
+                ),
+                reverse=True,
+            )
+            pick = eligible[0]
+            selected.append(pick)
+            selected_names.add(pick.event_name)
+
+        for cat in ['shallow', 'intermediate', 'deep']:
+            need = depth_sub_quotas[cat] - _layer_count(cat)
+            if need <= 0:
+                continue
+            candidates = [
+                ev for ev in groups[cat]
+                if ev.event_name not in selected_names
+            ]
+            added = self._farthest_point_select(
+                candidates, need, min_dist,
+                already_selected=already_selected + selected,
+                scoring_cfg=cfg,
+                coverage_lookup=coverage,
+            )
+            for ev in added:
+                selected.append(ev)
+                selected_names.add(ev.event_name)
+
+        if len(selected) < bucket_quota:
+            remaining = [
+                ev for ev in bucket_pool
+                if ev.event_name not in selected_names
+            ]
+            deficit = bucket_quota - len(selected)
+            added = self._farthest_point_select(
+                remaining, deficit, relax_dist,
+                already_selected=already_selected + selected,
+                scoring_cfg=cfg,
+                coverage_lookup=coverage,
+            )
+            for ev in added:
+                selected.append(ev)
+                selected_names.add(ev.event_name)
+            if added:
+                self.logger.info(
+                    f"  {bucket_label}: 放宽间距 {relax_dist}° 补入 {len(added)} 个"
+                )
+
+        if len(selected) > bucket_quota:
+            selected.sort(
+                key=lambda e: (
+                    self._mainland_interior_score(e, cfg),
+                    coverage.get(e.event_name, 0),
+                ),
+                reverse=True,
+            )
+            drop = selected[bucket_quota:]
+            for ev in drop:
+                selected_names.discard(ev.event_name)
+            selected = selected[:bucket_quota]
+
+        return selected
+
+    def select_eastasia_model_30_events(
+        self,
+        events: Optional[List[CMT3DEvent]] = None,
+    ) -> List[CMT3DEvent]:
+        """
+        从 EastAsia_model 候选池中采样正演测试事件。
+
+        策略：
+        - 候选池已剔除研究区边缘事件
+        - 按 temporal_quotas 分时段配额（默认 2008–13×5, 2014–18×15, 2019–25×5）
+        - 各时段内深度分层 + 空间均匀采样，评分含波形覆盖台站数
+        - 事件目录名使用 event_name（与 data_obs 一致）
+        """
+        if events is None:
+            events = self.filtered_events
+
+        cfg = self.config.eastasia_model_forward
+        target = int(cfg['target_count'])
+        min_dist = float(cfg['min_event_distance_deg'])
+        relax_dist = float(cfg['relax_distance_deg'])
+        depth_quotas: Dict[str, int] = dict(cfg['depth_quotas'])
+        temporal_quotas = cfg.get('temporal_quotas') or []
+        coverage = self.waveform_coverage or {}
+
+        pool = list(events)
+        self.logger.info(f"🎲 eastasia_model 候选池: {len(pool)} 个事件")
+
+        if temporal_quotas:
+            quota_sum = sum(int(q['count']) for q in temporal_quotas)
+            if quota_sum != target:
+                self.logger.warning(
+                    f"⚠️  temporal_quotas 合计 {quota_sum} ≠ target_count {target}"
+                )
+
+        groups: Dict[str, List[CMT3DEvent]] = {
+            'shallow': [], 'intermediate': [], 'deep': [],
+        }
+        for ev in pool:
+            groups[ev.depth_category].append(ev)
+        for cat, evs in groups.items():
+            self.logger.info(f"  {cat}: {len(evs)} 个候选, 全局配额 {depth_quotas[cat]}")
+
+        selected: List[CMT3DEvent] = []
+        selected_names: set = set()
+
+        if temporal_quotas:
+            for bucket in temporal_quotas:
+                y0 = int(bucket['start_year'])
+                y1 = int(bucket['end_year'])
+                bucket_quota = int(bucket['count'])
+                bucket_label = f"{y0}–{y1}"
+                bucket_pool = [
+                    ev for ev in pool
+                    if y0 <= ev.pde_year <= y1
+                ]
+                depth_sub = self._allocate_depth_sub_quotas(
+                    bucket_quota, depth_quotas
+                )
+                self.logger.info(
+                    f"📅 时段 {bucket_label}: 候选 {len(bucket_pool)}, "
+                    f"目标 {bucket_quota}, 深度 {depth_sub}"
+                )
+                bucket_selected = self._select_events_in_temporal_bucket(
+                    bucket_pool=bucket_pool,
+                    bucket_quota=bucket_quota,
+                    depth_sub_quotas=depth_sub,
+                    already_selected=selected,
+                    selected_names=selected_names,
+                    cfg=cfg,
+                    coverage=coverage,
+                    min_dist=min_dist,
+                    relax_dist=relax_dist,
+                    bucket_label=bucket_label,
+                )
+                for ev in bucket_selected:
+                    margin = self._distance_to_region_boundary(
+                        ev.latitude, ev.longitude
+                    )
+                    self.logger.info(
+                        f"  ✓ {ev.event_name} {ev.pde_year} "
+                        f"Mw{ev.best_magnitude:.2f} {ev.depth_category} "
+                        f"边距{margin:.1f}° sta={coverage.get(ev.event_name, 0)}"
+                    )
+                selected.extend(bucket_selected)
+                self.logger.info(
+                    f"  → {bucket_label} 已选 {len(bucket_selected)}/{bucket_quota}"
+                )
+        else:
+            # 兼容旧逻辑：单一观测窗口 + 全局空间采样
+            def _layer_count(cat: str) -> int:
+                return sum(1 for s in selected if s.depth_category == cat)
+
+            def _too_close(ev: CMT3DEvent, dist_lim: float) -> bool:
+                return any(
+                    self._angular_distance(
+                        ev.latitude, ev.longitude, s.latitude, s.longitude
+                    ) < dist_lim
+                    for s in selected
+                )
+
+            seed_radius = float(cfg['seed_search_radius_deg'])
+            for lat0, lon0 in cfg['seed_points']:
+                if len(selected) >= target:
+                    break
+                eligible: List[CMT3DEvent] = []
+                for cat, quota in depth_quotas.items():
+                    if _layer_count(cat) >= quota:
+                        continue
+                    for ev in groups[cat]:
+                        if ev.event_name in selected_names or _too_close(ev, min_dist):
+                            continue
+                        if self._angular_distance(
+                            ev.latitude, ev.longitude, lat0, lon0
+                        ) <= seed_radius:
+                            eligible.append(ev)
+                if not eligible:
+                    continue
+                eligible.sort(
+                    key=lambda e: (
+                        coverage.get(e.event_name, 0),
+                        e.pde_year,
+                        e.best_magnitude,
+                    ),
+                    reverse=True,
+                )
+                pick = eligible[0]
+                selected.append(pick)
+                selected_names.add(pick.event_name)
+
+            for cat in ['shallow', 'intermediate', 'deep']:
+                need = depth_quotas[cat] - _layer_count(cat)
+                if need <= 0:
+                    continue
+                candidates = [
+                    ev for ev in groups[cat]
+                    if ev.event_name not in selected_names
+                ]
+                added = self._farthest_point_select(
+                    candidates, need, min_dist,
+                    already_selected=selected,
+                    scoring_cfg=cfg,
+                    coverage_lookup=coverage,
+                )
+                for ev in added:
+                    selected.append(ev)
+                    selected_names.add(ev.event_name)
+
+            if len(selected) < target:
+                remaining = [
+                    ev for ev in pool if ev.event_name not in selected_names
+                ]
+                deficit = target - len(selected)
+                added = self._farthest_point_select(
+                    remaining, deficit, relax_dist,
+                    already_selected=selected,
+                    scoring_cfg=cfg,
+                    coverage_lookup=coverage,
+                )
+                selected.extend(added)
+
+        selected.sort(
+            key=lambda e: (
+                e.pde_year, e.pde_month, e.pde_day,
+                e.pde_hour, e.pde_minute,
+            )
+        )
+        if len(selected) > target:
+            selected = selected[:target]
+
+        self.selected_events = selected
+        margins = [
+            self._distance_to_region_boundary(e.latitude, e.longitude)
+            for e in selected
+        ]
+        year_hist: Dict[int, int] = {}
+        for ev in selected:
+            year_hist[ev.pde_year] = year_hist.get(ev.pde_year, 0) + 1
+        self.logger.info(
+            f"✅ eastasia_model 采样完成: {len(selected)} 个事件, "
+            f"边界距离 {min(margins):.1f}°–{max(margins):.1f}°"
+        )
+        if temporal_quotas:
+            for bucket in temporal_quotas:
+                y0, y1 = int(bucket['start_year']), int(bucket['end_year'])
+                n = sum(1 for e in selected if y0 <= e.pde_year <= y1)
+                self.logger.info(
+                    f"  时段 {y0}–{y1}: {n}/{int(bucket['count'])}"
+                )
+        return selected
+
+    def _eastasia_event_dir_name(self, ev: CMT3DEvent) -> str:
+        """EastAsia_model 波形目录名与 event_name 一致。"""
+        return ev.event_name
+
+    def save_eastasia_model_download_catalog(
+        self,
+        events: Optional[List[CMT3DEvent]] = None,
+    ) -> Path:
+        """写出 EastAsia_model 30 事件下载/正演目录 (.par)。"""
+        if events is None:
+            events = self.selected_events
+
+        cfg = self.config.eastasia_model_forward
+        lines = []
+        for ev in events:
+            dt = ev.origin_datetime
+            if dt is None:
+                continue
+            mag = ev.best_magnitude
+            event_dir = self._eastasia_event_dir_name(ev)
+            ymd = dt.strftime('%Y%m%d')
+            hh = dt.strftime('%H')
+            mm = dt.strftime('%M')
+            sec = f"{ev.pde_second:.3f}"
+            line = (
+                f"{event_dir} {ymd} {hh} {mm} {sec} "
+                f"{ev.latitude:.4f} {ev.longitude:.4f} {ev.depth:.1f} "
+                f"8.4 25.6 {float(mag):.1f} Mw"
+            )
+            lines.append(line)
+
+        text = '\n'.join(lines) + '\n'
+        local_par = self.output_dir / 'download_catalog.par'
+        root_par = self.base_config.dirs['events'] / cfg['root_par_name']
+        for path in (local_par, root_par):
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write(text)
+        self.logger.info(
+            f"✅ eastasia_model_30 目录: {root_par} ({len(lines)} 个事件)"
+        )
+        return root_par
+
+    def save_eastasia_model_id_mapping(
+        self,
+        events: Optional[List[CMT3DEvent]] = None,
+    ) -> Path:
+        """写出 event_name ↔ 波形目录对照表。"""
+        if events is None:
+            events = self.selected_events
+
+        cfg = self.config.eastasia_model_forward
+        coverage = self.waveform_coverage or {}
+        records = []
+        for ev in events:
+            dt = ev.origin_datetime
+            margin = self._distance_to_region_boundary(ev.latitude, ev.longitude)
+            records.append({
+                'event': ev.event_name,
+                'dir': self._eastasia_event_dir_name(ev),
+                'origin_pde': dt.isoformat() if dt is not None else '',
+                'lat': round(ev.latitude, 4),
+                'lon': round(ev.longitude, 4),
+                'depth_km': round(ev.depth, 2),
+                'Mw': round(ev.best_magnitude, 2),
+                'depth_category': ev.depth_category,
+                'boundary_margin_deg': round(margin, 2),
+                'n_stations': coverage.get(ev.event_name, 0),
+                'waveform_dir': str(
+                    self._eastasia_dataset_dir / 'data_obs' / ev.event_name
+                ),
+            })
+
+        df = pd.DataFrame(records)
+        local_csv = self.output_dir / cfg['id_map_name']
+        root_csv = self.base_config.dirs['events'] / cfg['id_map_name']
+        for path in (local_csv, root_csv):
+            df.to_csv(path, index=False, encoding='utf-8')
+
+        list_path = self.output_dir / cfg['events_list_name']
+        with open(list_path, 'w', encoding='utf-8') as f:
+            for rec in records:
+                f.write(rec['dir'] + '\n')
+
+        self.logger.info(f"✅ 事件对照表: {root_csv}")
+        return root_csv
+
+    def copy_eastasia_model_cmtsolution_files(
+        self,
+        events: Optional[List[CMT3DEvent]] = None,
+    ) -> Path:
+        """从 EastAsia_model/src_rec 复制原始 CMTSOLUTION 文件。"""
+        if events is None:
+            events = self.selected_events
+
+        src_rec = self._eastasia_dataset_dir / 'src_rec'
+        cmt_dir = self.output_dir / 'CMTSOLUTION'
+        cmt_dir.mkdir(parents=True, exist_ok=True)
+
+        copied = 0
+        for ev in events:
+            src = src_rec / f"CMTSOLUTION_{ev.event_name}"
+            dst = cmt_dir / f"CMTSOLUTION_{ev.event_name}"
+            if src.exists():
+                shutil.copy2(src, dst)
+                copied += 1
+            else:
+                with open(dst, 'w', encoding='utf-8') as f:
+                    f.write(ev.to_cmtsolution())
+
+        self.logger.info(f"✅ CMTSOLUTION 复制完成: {cmt_dir} ({copied}/{len(events)})")
+        return cmt_dir
+
+    def load_eastasia_model_stations(self) -> pd.DataFrame:
+        """
+        加载 EastAsia_model 台站目录（已有波形对应的台站坐标）。
+
+        Returns:
+            台站 DataFrame
+        """
+        cfg = self.config.eastasia_model_forward
+        sta_path = self._eastasia_dataset_dir / cfg['stations_catalog']
+        if not sta_path.exists():
+            raise FileNotFoundError(f"EastAsia_model 台站目录不存在: {sta_path}")
+
+        df = pd.read_csv(sta_path)
+        rename_map = {
+            'Network': 'Network', 'Station': 'Station',
+            'Latitude': 'Latitude', 'Longitude': 'Longitude',
+            'Elevation': 'Elevation',
+        }
+        for col in rename_map:
+            if col not in df.columns:
+                raise ValueError(f"台站目录缺少列: {col}")
+
+        self.stations_df = df[list(rename_map.keys())].copy()
+        self.logger.info(f"✅ 加载 EastAsia_model 台站: {len(df)} 个")
+        return self.stations_df
+
+    def plot_eastasia_model_selection_map(
+        self,
+        events: Optional[List[CMT3DEvent]] = None,
+    ) -> Optional[Path]:
+        """绘制 30 个选定事件与候选池对比分布图。"""
+        if events is None:
+            events = self.selected_events
+        if not events:
+            return None
+
+        import matplotlib.pyplot as plt
+
+        try:
+            import cartopy.crs as ccrs
+            import cartopy.feature as cfeature
+            use_cartopy = True
+        except ImportError:
+            use_cartopy = False
+
+        region = self.base_config.region
+        margin = float(self.config.eastasia_model_forward['min_interior_margin_deg'])
+        lon_min, lon_max = region['lon_min'], region['lon_max']
+        lat_min, lat_max = region['lat_min'], region['lat_max']
+        inner = [
+            lon_min + margin, lon_max - margin,
+            lat_min + margin, lat_max - margin,
+        ]
+        depth_colors = {
+            'shallow': '#d62728',
+            'intermediate': '#ff7f0e',
+            'deep': '#1f77b4',
+        }
+
+        fig_w, fig_h = 12, 8
+        if use_cartopy:
+            proj = ccrs.PlateCarree()
+            fig, ax = plt.subplots(figsize=(fig_w, fig_h), subplot_kw={'projection': proj})
+            ax.set_extent([lon_min, lon_max, lat_min, lat_max], crs=proj)
+            ax.add_feature(cfeature.LAND, facecolor='#f5f5f5', zorder=0)
+            ax.add_feature(cfeature.OCEAN, facecolor='#dbe9f4', zorder=0)
+            ax.add_feature(cfeature.COASTLINE, linewidth=0.6, zorder=1)
+            ax.gridlines(draw_labels=True, linewidth=0.3, color='gray', alpha=0.5)
+            plot_kw = {'transform': proj}
+        else:
+            fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+            ax.set_xlim(lon_min, lon_max)
+            ax.set_ylim(lat_min, lat_max)
+            ax.set_aspect('equal', adjustable='box')
+            ax.grid(True, linewidth=0.3, alpha=0.5)
+            plot_kw = {}
+
+        ax.plot(
+            [inner[0], inner[1], inner[1], inner[0], inner[0]],
+            [inner[2], inner[2], inner[3], inner[3], inner[2]],
+            'k--', linewidth=1.0, alpha=0.6, label=f'Interior zone (margin {margin}°)',
+            **plot_kw,
+        )
+
+        pool = self.filtered_events or []
+        if pool:
+            ax.scatter(
+                [e.longitude for e in pool],
+                [e.latitude for e in pool],
+                s=12, c='0.75', alpha=0.5, marker='.',
+                label=f'Candidates (n={len(pool)})', zorder=3,
+                **plot_kw,
+            )
+
+        for cat, color in depth_colors.items():
+            subset = [e for e in events if e.depth_category == cat]
+            if not subset:
+                continue
+            sizes = [50 + 20 * (e.best_magnitude - 5.5) for e in subset]
+            ax.scatter(
+                [e.longitude for e in subset],
+                [e.latitude for e in subset],
+                s=sizes, c=color, alpha=0.9, edgecolors='k', linewidths=0.5,
+                label=f'Selected {cat} (n={len(subset)})', zorder=5,
+                **plot_kw,
+            )
+
+        ax.set_title('EastAsia_model forward test: 30 selected events')
+        if not use_cartopy:
+            ax.set_xlabel('Longitude')
+            ax.set_ylabel('Latitude')
+        ax.legend(loc='lower left', frameon=True, fontsize=8)
+
+        fig.tight_layout()
+        fig_dir = self.base_config.dirs['figures']
+        fig_dir.mkdir(parents=True, exist_ok=True)
+        stem = '1-7_eastasia_model_30events_distribution'
+        saved = None
+        for ext, dpi in (('jpg', 300), ('pdf', 300)):
+            out = fig_dir / f'{stem}.{ext}'
+            fig.savefig(out, dpi=dpi, bbox_inches='tight')
+            local = self.output_dir / f'{stem}.{ext}'
+            fig.savefig(local, dpi=dpi, bbox_inches='tight')
+            saved = out
+        plt.close(fig)
+        self.logger.info(f"✅ 分布图已保存: {saved}")
+        return saved
+
+    def _load_eastasia_stations_catalog(
+        self,
+        stations_file: Optional[Path] = None,
+    ) -> pd.DataFrame:
+        """加载 EastAsia_model 台站目录并统一列名。"""
+        if stations_file is not None:
+            sta_path = Path(stations_file)
+        else:
+            cfg_ea = self.config.eastasia_model_forward
+            sta_path = self._eastasia_dataset_dir / cfg_ea['stations_catalog']
+
+        if not sta_path.exists():
+            raise FileNotFoundError(f"台站目录不存在: {sta_path}")
+
+        df = pd.read_csv(sta_path)
+        rename = {
+            'Latitude': 'latitude', 'Longitude': 'longitude',
+            'Station': 'station', 'Network': 'network',
+            'Provider': 'provider', 'Elevation': 'elevation',
+        }
+        for old, new in rename.items():
+            if old in df.columns and new not in df.columns:
+                df = df.rename(columns={old: new})
+        return df
+
+    @staticmethod
+    def _build_network_color_map(
+        networks: pd.Series,
+        top_n: int = 14,
+    ) -> Tuple[Dict[str, str], List[str]]:
+        """为台网生成 GMT RGB 配色，小台网合并为 Other。"""
+        import matplotlib
+
+        counts = networks.value_counts()
+        top_nets = counts.head(top_n).index.tolist()
+        cmap = matplotlib.colormaps['tab20']
+        tab20b = matplotlib.colormaps['tab20b']
+        palettes = [cmap(i) for i in range(20)] + [tab20b(i) for i in range(20)]
+
+        color_map: Dict[str, str] = {}
+        for i, net in enumerate(top_nets):
+            rgb = palettes[i % len(palettes)]
+            color_map[str(net)] = (
+                f"{int(rgb[0] * 255)}/{int(rgb[1] * 255)}/{int(rgb[2] * 255)}"
+            )
+        color_map['Other'] = '150/150/150'
+        return color_map, top_nets
+
+    def _save_paper_figure(
+        self,
+        fig: Any,
+        stem: str,
+        cfg: Dict[str, Any],
+    ) -> Path:
+        """保存论文图到 figures/ 与 output_dir。"""
+        fig_dir = self.base_config.dirs['figures']
+        fig_dir.mkdir(parents=True, exist_ok=True)
+        dpi = int(cfg.get('dpi', 300))
+        saved = fig_dir / f'{stem}.jpg'
+        for fmt in cfg.get('save_formats', ['jpg', 'pdf']):
+            out = fig_dir / f'{stem}.{fmt}'
+            fig.savefig(str(out), dpi=dpi)
+            local = self.output_dir / f'{stem}.{fmt}'
+            fig.savefig(str(local), dpi=dpi)
+            self.logger.info(f"  ✅ {out}")
+        return saved
+
+    def plot_eastasia_model_paper_globe(
+        self,
+        events_csv: Optional[Path] = None,
+        stations_file: Optional[Path] = None,
+    ) -> Path:
+        """
+        绘制论文用单幅地球透视图：台站小三角 + 事件震源机制解叠加。
+
+        Args:
+            events_csv: 事件 CSV，默认 output_dir/test_database_events.csv
+            stations_file: 台站文件，默认 EastAsia_model catalog/stations_catalog.csv
+
+        Returns:
+            主输出 jpg 路径
+        """
+        import pygmt
+
+        events_path = Path(events_csv) if events_csv else (
+            self.output_dir / 'test_database_events.csv'
+        )
+        if not events_path.exists():
+            raise FileNotFoundError(f"事件文件不存在: {events_path}")
+
+        events_df = pd.read_csv(events_path)
+        if events_df.empty:
+            raise ValueError("事件 CSV 为空")
+
+        stations_df = self._load_eastasia_stations_catalog(stations_file)
+
+        region = self.base_config.region
+        center_lon = (region['lon_min'] + region['lon_max']) / 2.0
+        center_lat = (region['lat_min'] + region['lat_max']) / 2.0
+        bnd_lon = [
+            region['lon_min'], region['lon_max'],
+            region['lon_max'], region['lon_min'], region['lon_min'],
+        ]
+        bnd_lat = [
+            region['lat_min'], region['lat_min'],
+            region['lat_max'], region['lat_max'], region['lat_min'],
+        ]
+
+        gcfg = self.config.eastasia_paper_globe
+        fig_dir = self.base_config.dirs['figures']
+        fig_dir.mkdir(parents=True, exist_ok=True)
+        tmp_cpt = fig_dir / '_tmp_1-7_globe_depth.cpt'
+        tmp_legend = fig_dir / '_tmp_1-7_globe_legend.txt'
+
+        depth0, depth1 = gcfg['depth_range']
+        pygmt.config(
+            FONT_ANNOT_PRIMARY='7.5p,Helvetica',
+            FONT_LABEL='8.5p,Helvetica',
+            MAP_FRAME_TYPE='plain',
+            MAP_FRAME_PEN='0.6p,50/50/50',
+            MAP_GRID_PEN_PRIMARY='0.12p,210/210/210,-',
+        )
+        pygmt.makecpt(
+            cmap=gcfg['depth_cmap'],
+            series=f'{depth0}/{depth1}',
+            output=str(tmp_cpt),
+        )
+
+        projection = (
+            f"G{center_lon}/{center_lat}/{gcfg['altitude']}/"
+            f"0/0/0/0/0/{gcfg['globe_width']}"
+        )
+        grid = f"g{int(gcfg['grid_interval'])}"
+
+        fig = pygmt.Figure()
+        fig.coast(
+            region='g',
+            projection=projection,
+            frame=grid,
+            land='#CFCFCF',
+            water='white',
+            borders='1/0.15p,180/180/180',
+            resolution='i',
+        )
+        fig.plot(
+            x=bnd_lon, y=bnd_lat,
+            pen=gcfg['study_region_pen'],
+            projection=projection,
+        )
+
+        # 台站（底层，小三角）
+        fig.plot(
+            x=stations_df['longitude'].astype(float).values,
+            y=stations_df['latitude'].astype(float).values,
+            style=gcfg['station_size'],
+            fill=gcfg['station_fill'],
+            pen=gcfg['station_pen'],
+            projection=projection,
+        )
+
+        # 事件震源球（顶层）
+        mt_cols = ['mrr', 'mtt', 'mpp', 'mrt', 'mrp', 'mtp']
+        has_mt = all(c in events_df.columns for c in mt_cols)
+        n_meca = 0
+        for _, ev in events_df.iterrows():
+            lon = float(ev['longitude'])
+            lat = float(ev['latitude'])
+            dep = float(ev['depth'])
+            mag = float(ev['magnitude_mw'])
+            scale = 0.16 + (mag - 5.5) * 0.10
+            scale = max(0.14, min(0.34, scale))
+            try:
+                if not has_mt:
+                    raise ValueError('no mt')
+                comps = [float(ev[c]) for c in mt_cols]
+                max_abs = max(abs(v) for v in comps) or 1.0
+                exp = int(math.floor(math.log10(max_abs)))
+                sf = 10.0 ** exp
+                fig.meca(
+                    spec={
+                        'mrr': comps[0] / sf, 'mtt': comps[1] / sf,
+                        'mff': comps[2] / sf, 'mrt': comps[3] / sf,
+                        'mrf': comps[4] / sf, 'mtf': comps[5] / sf,
+                        'exponent': exp,
+                    },
+                    convention='mt',
+                    scale=f'{scale:.2f}c',
+                    longitude=lon,
+                    latitude=lat,
+                    depth=dep,
+                    cmap=str(tmp_cpt),
+                    pen=gcfg['meca_pen'],
+                )
+                n_meca += 1
+            except Exception:
+                fig.plot(
+                    x=lon, y=lat,
+                    style=f'c{scale:.2f}c',
+                    fill=dep,
+                    cmap=str(tmp_cpt),
+                    pen='0.25p,30/30/30',
+                    projection=projection,
+                )
+
+        n_sh = int((events_df['depth_category'] == 'shallow').sum()) if 'depth_category' in events_df.columns else 0
+        n_in = int((events_df['depth_category'] == 'intermediate').sum()) if 'depth_category' in events_df.columns else 0
+        n_dp = int((events_df['depth_category'] == 'deep').sum()) if 'depth_category' in events_df.columns else 0
+        mw_min = float(events_df['magnitude_mw'].min())
+        mw_max = float(events_df['magnitude_mw'].max())
+
+        fig.colorbar(
+            cmap=str(tmp_cpt),
+            position='JBC+o0c/0.55c+w10c/0.24c+h',
+            frame=['xa100f50+lDepth (km)', 'y'],
+        )
+
+        legend_txt = '\n'.join([
+            'N 1',
+            f'S 0.30c t 0.08c {gcfg["station_fill"]} {gcfg["station_pen"]} 0.55c '
+            f'Stations (N={len(stations_df)})',
+            'G 0.06c',
+            'S 0.30c c 0.18c 200/50/50 0.20p,30/30/30 0.55c '
+            f'Events (N={len(events_df)})',
+            'G 0.06c',
+            'L 7p,Helvetica L Focal mechanisms colored by depth',
+            f'L 7p,Helvetica L Mw {mw_min:.1f}-{mw_max:.1f}; '
+            f'shallow {n_sh}, inter {n_in}, deep {n_dp}',
+        ]) + '\n'
+        tmp_legend.write_text(legend_txt, encoding='ascii')
+        fig.legend(
+            spec=str(tmp_legend),
+            position='JTR+jTR+o0.25c/0.25c',
+            box='+gwhite@15+p0.35p,160/160/160',
+        )
+
+        saved = self._save_paper_figure(fig, gcfg['figure_stem'], gcfg)
+        tmp_cpt.unlink(missing_ok=True)
+        tmp_legend.unlink(missing_ok=True)
+        self.logger.info(
+            f"📄 论文地球透视图: {n_meca}/{len(events_df)} 震源球 + "
+            f"{len(stations_df)} 台站（单图叠加）"
+        )
+        return saved
+
+    def plot_eastasia_model_station_network_detail(
+        self,
+        stations_file: Optional[Path] = None,
+    ) -> Path:
+        """
+        绘制 EastAsia_model 台站网络详图（单独成图）。
+
+        按台网分色、展示主要台网统计与 Provider 信息，供论文补充说明台站覆盖。
+
+        Args:
+            stations_file: 台站 CSV，默认 EastAsia_model catalog/stations_catalog.csv
+
+        Returns:
+            主输出 jpg 路径
+        """
+        import pygmt
+
+        stations_df = self._load_eastasia_stations_catalog(stations_file)
+        scfg = self.config.eastasia_station_detail
+        region = list(scfg['region'])
+        study = self.base_config.region
+        bnd_lon = [
+            study['lon_min'], study['lon_max'],
+            study['lon_max'], study['lon_min'], study['lon_min'],
+        ]
+        bnd_lat = [
+            study['lat_min'], study['lat_min'],
+            study['lat_max'], study['lat_max'], study['lat_min'],
+        ]
+
+        top_n = int(scfg['top_networks'])
+        color_map, top_nets = self._build_network_color_map(
+            stations_df['network'], top_n=top_n,
+        )
+        stations_df = stations_df.copy()
+        stations_df['net_group'] = stations_df['network'].astype(str).where(
+            stations_df['network'].astype(str).isin(top_nets), 'Other'
+        )
+        stations_df['color'] = stations_df['net_group'].map(color_map)
+
+        fig_dir = self.base_config.dirs['figures']
+        fig_dir.mkdir(parents=True, exist_ok=True)
+        tmp_legend = fig_dir / '_tmp_1-7_station_legend.txt'
+
+        pygmt.config(
+            FONT_ANNOT_PRIMARY='8p,Helvetica',
+            FONT_LABEL='9p,Helvetica',
+            MAP_FRAME_TYPE='plain',
+            MAP_FRAME_PEN='0.7p,50/50/50',
+            MAP_GRID_PEN_PRIMARY='0.15p,220/220/220,-',
+        )
+
+        fig = pygmt.Figure()
+        fig.basemap(
+            region=region,
+            projection=f"M{scfg['projection_width']}",
+            frame=scfg['frame'],
+        )
+        fig.coast(
+            land='#F5F2EA',
+            water='#D8E6F0',
+            shorelines='0.35p,100/100/100',
+            borders='1/0.2p,170/170/170',
+            resolution='i',
+        )
+
+        boundaries = (
+            self.base_config.dirs['project_root'] /
+            '5_Visualization' / 'data_EastAsia' / 'tectonics' / 'boundaries.gmt'
+        )
+        if boundaries.exists():
+            fig.plot(data=str(boundaries), pen='0.5p,90/90/90')
+
+        fig.plot(x=bnd_lon, y=bnd_lat, pen='2p,black')
+
+        for color, group in stations_df.groupby('color', sort=False):
+            fig.plot(
+                x=group['longitude'].astype(float).values,
+                y=group['latitude'].astype(float).values,
+                style=scfg['station_size'],
+                fill=color,
+                pen='0.05p,50/50/50',
+            )
+
+        net_counts = stations_df['network'].value_counts()
+        n_networks = stations_df['network'].nunique()
+        n_providers = stations_df['provider'].nunique() if 'provider' in stations_df.columns else 0
+        provider_top = ''
+        if 'provider' in stations_df.columns:
+            prov_counts = stations_df['provider'].value_counts()
+            provider_top = ', '.join(
+                f"{p}({c})" for p, c in prov_counts.head(4).items()
+            )
+
+        legend_lines = ['N 1', 'G 0.04c']
+        for net in top_nets:
+            cnt = int(net_counts.get(net, 0))
+            color = color_map[str(net)]
+            legend_lines.append(
+                f'S 0.26c t 0.07c {color} 0.06p,50/50/50 0.62c {net} ({cnt})'
+            )
+        n_other = int((stations_df['net_group'] == 'Other').sum())
+        if n_other > 0:
+            legend_lines.append(
+                f'S 0.26c t 0.07c {color_map["Other"]} 0.06p,50/50/50 '
+                f'0.62c Other ({n_other})'
+            )
+        legend_lines.extend([
+            'G 0.08c',
+            f'L 7.5p,Helvetica L Total: {len(stations_df)} stations, '
+            f'{n_networks} networks',
+        ])
+        if provider_top:
+            legend_lines.append(
+                f'L 7.5p,Helvetica L Providers: {provider_top}'
+            )
+        legend_lines.append(
+            'L 7.5p,Helvetica L Black box: EASTASIA-FWI study region'
+        )
+
+        tmp_legend.write_text('\n'.join(legend_lines) + '\n', encoding='ascii')
+        fig.legend(
+            spec=str(tmp_legend),
+            position='JBR+jBR+o0.3c/0.3c',
+            box='+gwhite@12+p0.4p,150/150/150',
+        )
+        fig.basemap(map_scale='jBL+w1000k+f+lkm+o0.5c/0.5c')
+
+        saved = self._save_paper_figure(fig, scfg['figure_stem'], scfg)
+        tmp_legend.unlink(missing_ok=True)
+        self.logger.info(
+            f"📡 台站网络详图: {len(stations_df)} 台站, "
+            f"{n_networks} 台网, top {top_n} 分色"
+        )
+        return saved
 
     def save_hybrid_download_catalog(
         self,
@@ -2062,6 +3438,7 @@ class TestDatabaseBuilder:
                 - 'fwea23': 从 FWEA23 原作者 141 事件中筛选，与 CMT3D 匹配（推荐）
                 - 'cmt3d': 直接从 CMT3D 目录全量筛选+采样
                 - 'hybrid_30': 2010+ CMT3D 空间均匀 30 事件，排除既有 hybrid_10events
+                - 'eastasia_model_30': EastAsia_model 波形库 Mw≥5.5 内部 30 事件
 
         Returns:
             构建结果字典
@@ -2070,6 +3447,8 @@ class TestDatabaseBuilder:
             return self._run_fwea23_mode()
         if mode == 'hybrid_30':
             return self._run_hybrid_30_mode()
+        if mode == 'eastasia_model_30':
+            return self._run_eastasia_model_30_mode()
         return self._run_cmt3d_mode()
 
     def _run_fwea23_mode(self) -> Dict[str, Any]:
@@ -2233,6 +3612,97 @@ class TestDatabaseBuilder:
             'elapsed_seconds': elapsed,
         }
 
+    def _run_eastasia_model_30_mode(self) -> Dict[str, Any]:
+        """
+        eastasia_model_30 模式: 从 EastAsia_model 已有波形库中
+        选取 30 个 Mw≥5.5、远离研究区边界的正演测试事件。
+        """
+        cfg = self.config.eastasia_model_forward
+        self.config.event_filters['magnitude_range'] = list(cfg['magnitude_range'])
+        self.config.event_filters['depth_range'] = list(cfg['depth_range'])
+        self.config.event_filters['time_range'] = list(cfg['time_range'])
+        self.config.sampling['target_count'] = int(cfg['target_count'])
+
+        self.logger.info("🚀 开始构建 eastasia_model_30 正演事件目录")
+        start_time = datetime.now()
+
+        print("\n[1/7] 解析 EastAsia_model CMTSOLUTION...")
+        self.parse_eastasia_model_catalog()
+
+        print("[2/7] 加载波形覆盖统计...")
+        self.load_eastasia_waveform_coverage()
+
+        if cfg.get('temporal_quotas'):
+            print("[3/7] 使用分时段配额（跳过单一观测窗口）...")
+        else:
+            print("[3/7] 确定最优观测时间窗口...")
+            self.load_or_compute_observation_window()
+
+        print("[4/7] 筛选候选事件（Mw≥5.5，远离边界，时段范围内）...")
+        self.filter_eastasia_model_candidates()
+
+        print(f"[5/7] 分时段空间均匀采样 {cfg['target_count']} 个事件...")
+        self.select_eastasia_model_30_events()
+
+        print("[6/7] 加载 EastAsia_model 台站...")
+        self.load_eastasia_model_stations()
+
+        print("[7/7] 生成输出文件...")
+        output_files: Dict[str, str] = {}
+        output_files['cmtsolution_dir'] = str(self.copy_eastasia_model_cmtsolution_files())
+        output_files['stations_file'] = str(self.generate_specfem_stations_file())
+        output_files['catalog_csv'] = str(self.save_catalog_csv())
+        output_files['root_par'] = str(self.save_eastasia_model_download_catalog())
+        output_files['id_map'] = str(self.save_eastasia_model_id_mapping())
+        output_files['metadata'] = str(self.save_metadata())
+        output_files['report'] = str(self.generate_report())
+        map_path = self.plot_eastasia_model_selection_map()
+        if map_path is not None:
+            output_files['map'] = str(map_path)
+
+        print("[+] 生成论文地球透视图（事件+台站叠加）...")
+        try:
+            paper_globe = self.plot_eastasia_model_paper_globe()
+            output_files['paper_globe'] = str(paper_globe)
+        except Exception as exc:
+            self.logger.warning(f"⚠️  论文地球透视图生成失败: {exc}")
+
+        print("[+] 生成台站网络详图...")
+        try:
+            station_detail = self.plot_eastasia_model_station_network_detail()
+            output_files['station_detail'] = str(station_detail)
+        except Exception as exc:
+            self.logger.warning(f"⚠️  台站网络详图生成失败: {exc}")
+
+        elapsed = (datetime.now() - start_time).total_seconds()
+        self.print_summary()
+        if cfg.get('temporal_quotas'):
+            parts = [
+                f"{q['start_year']}–{q['end_year']}×{q['count']}"
+                for q in cfg['temporal_quotas']
+            ]
+            print(f"\n📅 时段配额: {' + '.join(parts)}")
+        elif self.observation_window:
+            mean_sta = self.observation_window.get('mean_stations_per_event', 0)
+            print(
+                f"\n📅 观测窗口: {self.observation_window['start_year']}–"
+                f"{self.observation_window['end_year']} "
+                f"(均值 {mean_sta:.0f} 台站/事件)"
+            )
+        print(f"\n⏱️  总耗时: {elapsed:.1f} 秒")
+        self.logger.info(f"🎉 eastasia_model_30 构建完成 (耗时 {elapsed:.1f} 秒)")
+
+        return {
+            'mode': 'eastasia_model_30',
+            'total_events': len(self.all_events),
+            'filtered_events': len(self.filtered_events),
+            'selected_events': len(self.selected_events),
+            'observation_window': self.observation_window,
+            'stations': len(self.stations_df) if self.stations_df is not None else 0,
+            'output_files': output_files,
+            'elapsed_seconds': elapsed,
+        }
+
     def _save_all_outputs(self) -> Dict[str, str]:
         """统一生成所有输出文件"""
         output_files = {}
@@ -2268,14 +3738,15 @@ def main():
     )
     parser.add_argument(
         '--mode',
-        choices=['fwea23', 'cmt3d', 'hybrid_30'],
+        choices=['fwea23', 'cmt3d', 'hybrid_30', 'eastasia_model_30'],
         default='fwea23',
-        help='fwea23: FWEA23×CMT3D; cmt3d: 全量采样; hybrid_30: 30个均匀正演事件',
+        help='fwea23: FWEA23×CMT3D; cmt3d: 全量采样; '
+             'hybrid_30: CMT3D 30事件; eastasia_model_30: 波形库30事件',
     )
     parser.add_argument(
         '--output-dir',
         default=None,
-        help='输出目录（hybrid_30 默认 data/events/hybrid_30events）',
+        help='输出目录（hybrid_30 / eastasia_model_30 有各自默认子目录）',
     )
     parser.add_argument(
         '--plot-paper',
@@ -2288,6 +3759,7 @@ def main():
         'fwea23': 'FWEA23 参考事件 → CMT3D 匹配',
         'cmt3d': 'CMT3D 全量目录 → 筛选采样',
         'hybrid_30': 'CMT3D 2010+ → 排除 hybrid_10events → 空间均匀 30 事件',
+        'eastasia_model_30': 'EastAsia_model 波形库 → Mw≥5.5 内部区 → 30 事件',
     }
 
     print("🎯 EASTASIA-FWI 标准测试数据库构建")
@@ -2298,10 +3770,15 @@ def main():
 
     try:
         output_dir = args.output_dir
-        if output_dir is None and (args.mode == 'hybrid_30' or args.plot_paper):
-            output_dir = str(
-                BaseConfig().dirs['events'] / 'hybrid_30events'
-            )
+        if output_dir is None:
+            if args.mode == 'hybrid_30' or args.plot_paper:
+                output_dir = str(
+                    BaseConfig().dirs['events'] / 'hybrid_30events'
+                )
+            elif args.mode == 'eastasia_model_30':
+                output_dir = str(
+                    BaseConfig().dirs['events'] / 'eastasia_model_30events'
+                )
         builder = TestDatabaseBuilder(output_dir=output_dir)
 
         if args.plot_paper:
@@ -2329,6 +3806,9 @@ def main():
         print("  1. 使用 1_3_Download_waveforms.py 下载波形数据")
         if args.mode == 'hybrid_30':
             print("     - 使用 data/events/download_catalog_hybrid_30events.par")
+        elif args.mode == 'eastasia_model_30':
+            print("     - 使用 data/events/download_catalog_eastasia_model_30events.par")
+            print("     - 波形已在 data/events/EastAsia_model/data_obs/ 中")
         else:
             print("     - 使用 download_catalog.par 作为事件目录")
         print("     - 启用永久台站模式 (use_permanent_only=True)")
