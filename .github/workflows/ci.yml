@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install lightweight test deps
+        # 完整 conda 环境（PyGMT/ObsPy）过重，CI 只装轻量依赖；重型依赖在测试中用 importorskip 保护
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest numpy pyyaml xarray black
+
+      - name: Syntax check all pipeline modules
+        run: python -m compileall -q 1_Data_preparation 2_Model_space_analysis 3_Data_space_simulation 4_Fusion 5_Visualization config scripts tests
+
+      - name: Black (tests/ only)
+        run: black --check --line-length 120 tests
+
+      - name: Pytest
+        run: pytest -q

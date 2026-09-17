@@ -49,11 +49,15 @@ EASTASIA-FWI/
 │   └── utils/                          # 绘图工具
 ├── config/                         # 配置管理
 │   └── base_config.py                  # 全局配置与研究区域定义
+├── tests/                          # pytest 回归测试（合成数据，不依赖 data/）
+├── AGENTS.md                       # AI agent 常驻指令（约定/边界/权威配置源）
+├── .github/                        # instructions / prompts / agents / hooks / workflows
 ├── scripts/                        # 实验与工作流脚本（聚类实验/图表重生成/正演）
 ├── archive/                        # 归档的历史版本（留档，不参与主管线）
 ├── mermaid/                        # 技术流程图（.mmd / .md / .svg）
 ├── web/                            # 纯静态项目展示网站
 ├── paper/                          # 论文文稿源码（仅 .md/.py 入库，二进制不入库）
+├── docs/                           # 设计文档 design/、历史计划 plans/、工作流笔记（PDF 不入库）
 ├── data/                           # 数据目录（不入库）
 ├── results/                        # 结果输出（不入库）
 ├── figures/                        # 图表输出（不入库）
@@ -83,6 +87,26 @@ cd specfem3d_globe && ./configure && make -j
 ```
 
 详见 [docs/SPECFEM3D_globe_GUIDE.md](docs/SPECFEM3D_globe_GUIDE.md)
+
+### 测试
+
+```bash
+pytest -q            # 轻量回归测试，不依赖 data/，重型库自动跳过
+```
+
+## 🤖 AI 协作开发
+
+项目为 VS Code Copilot / 其他支持 `AGENTS.md` 与 `SKILL.md` 标准的 agent 提供了分层上下文：
+
+| 层级 | 位置 | 作用 |
+|---|---|---|
+| 常驻指令 | `AGENTS.md` | 语言、配置权威源、命名、禁改目录 |
+| 文件指令 | `.github/instructions/*.instructions.md` | 编辑匹配文件时自动加载（管线模块 / 可视化 / 测试） |
+| Prompts | `.github/prompts/` | `/add-golden-test` 生成回归测试；`/review-changes` 审查改动；`/sync-docs` 同步文档 |
+| Agents | `.github/agents/` | `reviewer`（只读审查）、`seismo-planner`（先出计划再执行） |
+| Hooks | `.github/hooks/guard.json` | 拒绝 agent 写入 `data/ results/ figures/ output/`；编辑 .py 后自动语法检查 |
+
+推荐工作流：选择 `seismo-planner` 出计划 → 确认后由默认 agent 执行 → `/add-golden-test` 补测试 → `/review-changes` 审查 → 提交。
 
 ## 🌐 Web 展示界面
 
@@ -164,7 +188,8 @@ Collection continuing...
 
 - [ ] 端到端工作流集成
 - [ ] 性能优化与并行化
-- [ ] 单元测试与 CI（环境已含 pytest，测试待补）
+- [x] 单元测试骨架与 CI（tests/ + .github/workflows/ci.yml）
+- [ ] 核心算法 golden-file 回归（2_3 聚类、4_3 SDL）
 
 ## 📋 近期目标
 
@@ -175,4 +200,4 @@ Collection continuing...
 ---
 
 **版本**: v1.0.0
-**最后更新**: 2026年9月9日
+**最后更新**: 2026年9月17日
