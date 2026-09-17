@@ -1,0 +1,32 @@
+{
+    "python-envs.defaultEnvManager": "ms-python.python:conda",
+    "python-envs.defaultPackageManager": "ms-python.python:conda",
+    "git.ignoreLimitWarning": true,
+    "python.testing.pytestEnabled": true,
+    "python.testing.pytestArgs": ["tests"],
+    "python.analysis.exclude": [
+        "**/node_modules",
+        "**/__pycache__",
+        "**/.*",
+        "data/**",
+        "results/**",
+        "figures/**",
+        "logs/**",
+        "output/**",
+        "temp/**",
+        "backup/**",
+        "archive/**",
+        "specfem3d_globe_new/**",
+        "specfem/**",
+        "paper/**",
+        "web/**",
+        "mermaid/**",
+        "docs/**"
+    ],
+    "chat.useAgentsMdFile": true,
+    "chat.promptFilesRecommendations": {
+        "add-golden-test": true,
+        "review-changes": true,
+        "sync-docs": true
+    }
+}

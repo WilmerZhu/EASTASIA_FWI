@@ -24,9 +24,11 @@ wheels/
 .installed.cfg
 *.egg
 
-# ============ cursor ============
+# ============ AI 助手 ============
 .cursor/
-.github/
+.trae/
+# .github/ 入库：instructions / prompts / agents / hooks / workflows 团队共享
+.github/**/*.local.*
 
 # ============ 虚拟环境 ============
 .env
@@ -37,8 +39,9 @@ ENV/
 
 # ============ IDE ============
 .idea/
-.vscode/
-.trae/
+.vscode/*
+!.vscode/settings.json
+!.vscode/mcp.json
 *.swp
 *.swo
 *~
@@ -55,7 +58,11 @@ data/
 results/
 figures/
 article/
-docs/
+# docs/ 仅忽略二进制（PDF/图片），.md 设计文档与计划入库
+docs/**/*.pdf
+docs/**/*.docx
+docs/**/*.png
+docs/**/*.jpg
 backup/
 logs/
 temp/
