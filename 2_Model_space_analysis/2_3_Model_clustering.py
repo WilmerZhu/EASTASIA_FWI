@@ -519,8 +519,8 @@ class ClusteringConfig:
                 'CN-block-L1-deduced.gmt',
                 'CN-block-L1.gmt',
             ],
-            # 与 5_9 / 三模型 original.nc 公共范围一致；None 则运行时求交
-            'overlap_region': [80.0, 150.0, 10.0, 55.0],
+            # 与 5_9 / 三模型 original.nc 公共范围一致；None → 5_10 运行时求交，再退到 BaseConfig 'common'
+            'overlap_region': None,
             'overlay_depths_km': [40.0, 60.0, 80.0],
         },
     })

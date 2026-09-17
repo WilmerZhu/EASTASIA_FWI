@@ -39,7 +39,7 @@ project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
 # 导入基础配置
-from config.base_config import BaseConfig
+from config.base_config import BaseConfig, strip_model_year
 
 
 class StationAnalysisConfig:
@@ -1706,26 +1706,15 @@ G 0.15c
     def export_specfem_stations_per_model(self,
                                            output_dir: Optional[str] = None) -> Dict[str, Path]:
         """
-        为三个速度模型分别生成裁剪后的 STATIONS 文件
-
-        三模型 chunk 近似边界:
-          FWEA23:       lat [-10, 55], lon [50, 165]
-          SinoScope1.0: lat [-10, 55], lon [50, 165]
-          EARA2024:     lat [10, 60],  lon [80, 160]
+        为核心三模型分别生成裁剪后的 STATIONS 文件（边界取 BaseConfig.model_regions），
+        并额外导出三模型交集区（BaseConfig.common_region）的 STATIONS_common。
 
         Returns:
-            {'FWEA23': Path, 'SinoScope1.0': Path, 'EARA2024': Path}
+            {'FWEA23': Path, 'EARA2024': Path, 'SinoScope1.0': Path, 'common': Path}
         """
         models = {
-            'FWEA23': {
-                'lat_min': -10, 'lat_max': 55, 'lon_min': 50, 'lon_max': 165
-            },
-            'SinoScope1.0': {
-                'lat_min': -10, 'lat_max': 55, 'lon_min': 50, 'lon_max': 165
-            },
-            'EARA2024': {
-                'lat_min': 10, 'lat_max': 60, 'lon_min': 80, 'lon_max': 160
-            },
+            strip_model_year(name): self.base_config.get_region_bounds(name)
+            for name in self.base_config.core_models
         }
 
         if output_dir is None:
@@ -1742,9 +1731,7 @@ G 0.15c
             )
 
         # 导出公共台站集（三模型交集区域）
-        common_bounds = {
-            'lat_min': 10, 'lat_max': 55, 'lon_min': 80, 'lon_max': 160
-        }
+        common_bounds = self.base_config.get_region_bounds('common')
         common_file = output_dir / 'STATIONS_common'
         results['common'] = self.export_specfem_stations(
             output_file=common_file,

@@ -128,11 +128,8 @@ class EventSamplingConfig:
             'catalog_file': 'cmt3d.txt',
             'individual_dir': 'finalcatalog',
             'data_dir': 'data/catalogs/CMT3D',
-            # 三模型公共覆盖区（FWEA23 ∩ SinoScope1.0 ∩ EARA2024）
-            'region': {
-                'lat_min': 10.0, 'lat_max': 55.0,
-                'lon_min': 80.0, 'lon_max': 150.0,
-            },
+            # 三模型公共覆盖区（FWEA23 ∩ SinoScope1.0 ∩ EARA2024）；None → BaseConfig.get_region_bounds('common')
+            'region': None,
             'magnitude_range': (5.5, 7.0),
             'depth_range': (10, 600),
             'n_test_events': 5,
@@ -2149,7 +2146,7 @@ Mtp: {mt_components['Mtp']:.{cmt_precision}e}
             筛选后的 DataFrame
         """
         cfg = self.config.cmt3d
-        region = region or cfg['region']
+        region = region or cfg['region'] or self.base_config.get_region_bounds('common')
         mag_range = mag_range or cfg['magnitude_range']
         dep_range = dep_range or cfg['depth_range']
 

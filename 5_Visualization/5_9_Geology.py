@@ -175,13 +175,9 @@ class GeologyConfig:
         # 拼合图范围默认占位；运行时由 BaseConfig.region 覆盖（与 Basemap 一致）
         self.composite_region = [60.0, 150.0, -10.0, 60.0]
 
-        # 与 2_3_Model_clustering 三模型公共范围（由 original.nc 求交）
+        # 与 2_3_Model_clustering 三模型公共范围（由 original.nc 求交）；models=None → BaseConfig.core_models
         self.model_overlap = {
-            'models': [
-                '2022_SinoScope1.0',
-                '2024_EARA2024',
-                '2024_FWEA23',
-            ],
+            'models': None,
             # 相对 base_config.dirs['data']
             'netcdf_pattern': (
                 'models/processed/{model_name}/{model_name}_original.nc'
@@ -1105,7 +1101,7 @@ class EastAsiaGeologyMap:
         lat_mins: List[float] = []
         lat_maxs: List[float] = []
 
-        for model_name in cfg['models']:
+        for model_name in (cfg['models'] or self.base_config.core_models):
             nc_path = data_root / pattern.format(model_name=model_name)
             if not nc_path.exists():
                 raise FileNotFoundError(f'找不到模型 NetCDF: {nc_path}')

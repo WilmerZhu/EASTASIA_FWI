@@ -1567,7 +1567,7 @@ class GeologyConcordanceEvaluator:
                 lat_mins.append(float(lats.min()))
                 lat_maxs.append(float(lats.max()))
         if not lon_mins:
-            return [80.0, 150.0, 10.0, 55.0]
+            return self.base_config.get_gmt_region('common')
         return [max(lon_mins), min(lon_maxs), max(lat_mins), min(lat_maxs)]
 
     @staticmethod

@@ -1513,10 +1513,7 @@ class GCMTPlotter:
             ]
 
             # 三模型 (FWEA23/EARA2024/SinoScope) 共同覆盖区域 (红色虚线框)
-            common_region = {
-                'lon_min': 80.0, 'lon_max': 150.0,
-                'lat_min': 10.0, 'lat_max': 55.0,
-            }
+            common_region = self.base_config.get_region_bounds('common')
             common_lon = [
                 common_region['lon_min'], common_region['lon_max'],
                 common_region['lon_max'], common_region['lon_min'], common_region['lon_min'],
