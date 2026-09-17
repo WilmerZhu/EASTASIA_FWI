@@ -80,6 +80,8 @@ specfem/**
 !specfem/*.py
 !specfem/*.sh
 !specfem/*.md
+# 误命名为 .sh 的 specfem3d_globe_code_new tar 包（216 MB）
+specfem/sem_create.sh
 
 # ============ paper 论文目录 ============
 # 仅追踪文稿源码（.md）与构建脚本（.py），大型二进制不入库
