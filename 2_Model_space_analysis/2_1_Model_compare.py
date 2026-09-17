@@ -18,7 +18,7 @@
 3. ✅ 水平切片对比（绝对速度 / dlnV扰动 / 两者）
 4. ✅ 垂直剖面对比（经度/纬度方向，灵活绘图模式）
 5. ✅ 两两模型差异图（ΔV = V_A - V_B）
-6. ✅ 切片位置示意图（Cartopy地理参考）
+6. ✅ 切片位置示意图（PyGMT 地理参考；出图见 5_12）
 
 使用方法:
 ----------
@@ -40,16 +40,9 @@ comparator.save_results()
 
 输出文件:
 ----------
-- 2-1_velocity_comparison.png: VS+VP 综合对比
-- 2-1_s_wave_anisotropy.png: S波各向异性（VSV vs VSH）
-- 2-1_p_wave_anisotropy.png: P波各向异性（VPV vs VPH）
-- 2-1_profile_{model}.png: 单模型完整剖面（original区域）
-- 2-1_horizontal_slice_vs_{depth}km.png: 水平切片
-- 2-1_vertical_profile_{n}.png: 垂直剖面
-- 2-1_absolute_vs_{depth}km.png: 绝对速度并排对比
-- 2-1_difference_vs_{depth}km.png: 两两模型差异
-- 2-1_slice_locations.png: 切片位置示意图
-- 2-1_comparison_report.json / _summary.txt: 统计报告
+可视化由 `5_Visualization/5_12_Model_compare.py` 承担（地图 PyGMT，1D Matplotlib），
+前缀仍为 `2-1_`，写入 `figures/model_compare`，格式 jpg + pdf（300 dpi）。
+本模块负责加载 NetCDF、统计报告与 Markdown 综述。
 
 科学原理:
 ----------
@@ -65,25 +58,17 @@ comparator.save_results()
 """
 
 import copy
+import importlib.util
 import json
 import sys
 import warnings
 from dataclasses import dataclass
 from datetime import datetime
-from itertools import combinations
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
 
-import cartopy.crs as ccrs
-import cartopy.feature as cfeature
-from cartopy.mpl.geoaxes import GeoAxes
-import matplotlib.pyplot as plt
-from matplotlib.colors import LinearSegmentedColormap
-from matplotlib.figure import Figure
-from matplotlib.gridspec import GridSpec
 import numpy as np
 import xarray as xr
-from matplotlib.patches import Patch, Rectangle
 
 # 添加项目根目录到路径
 project_root = Path(__file__).parent.parent
@@ -288,6 +273,10 @@ class ModelCompareConfig:
             '1d_xlim': (3.0, 7.0),          # VS (km/s)
             '1d_params': ('vs',),           # 同轴绘制的 1D 参数
             'save_formats': ['jpg', 'pdf'], # 论文图：jpg + 矢量 pdf，不用 png
+            # 绝对波速论文图（paper_vs_maps / paper_vp_maps）
+            'abs_cmap': 'seis',             # 与扰动图同一套 GMT seis：红=低速，蓝=高速
+            'abs_vmin_percentile': 2.0,
+            'abs_vmax_percentile': 98.0,
         }
         
         # ============ 输出参数 ============
@@ -648,12 +637,21 @@ class VelocityModelNetCDF:
         }
     
     def close(self):
-        """关闭NetCDF文件"""
-        self.ds.close()
+        """关闭NetCDF文件；解释器退出时 netCDF4 可能已拆掉，忽略即可。"""
+        ds = getattr(self, 'ds', None)
+        if ds is None:
+            return
+        try:
+            ds.close()
+        except Exception:
+            pass
     
     def __del__(self):
         """析构函数"""
-        self.close()
+        try:
+            self.close()
+        except Exception:
+            pass
 
 # ==================== 模型对比分析器类 ====================
 
@@ -677,9 +675,6 @@ class ModelComparator:
         # 初始化模型存储
         self.models: Dict[str, VelocityModelNetCDF] = {}  # 共同区域对比（standardized）
         self.models_individual: Dict[str, VelocityModelNetCDF] = {}  # 单独模型（original，按需加载）
-        
-        # 设置绘图样式
-        self._setup_plotting_style()
         
         # 输出目录
         self.output_dir = self.base_config.dirs['figures'] / 'model_compare'
@@ -718,26 +713,13 @@ class ModelComparator:
         print(f"  7. 切片位置示意图（地理分布）")
         
         print(f"\n🆕 可视化增强:")
+        print(f"  • 出图模块: 5_Visualization/5_12_Model_compare.py（PyGMT）")
         print(f"  • dlnV扰动单位: 百分比 (%)")
         print(f"  • 差异单位: km/s (ΔV = V_A - V_B)")
-        print(f"  • 切片色标: seismic / RdBu_r")
-        print(f"  • 水平切片colorbar: 右侧垂直放置")
+        print(f"  • 地图色标: GMT seis（绝对速度与扰动）；绝对速度取到 0.1 km/s")
         
         print(f"\n输出目录: {self.output_dir}")
         print("-" * 60)
-    
-    def _setup_plotting_style(self):
-        """设置绘图样式"""
-        plt.rcParams['font.sans-serif'] = self.config.plot_params['font_family']
-        plt.rcParams['axes.unicode_minus'] = False
-        plt.rcParams.update({
-            'font.family': 'sans-serif',
-            'font.size': self.config.plot_params['font_sizes']['tick'],
-            'axes.titlesize': self.config.plot_params['font_sizes']['title'],
-            'axes.labelsize': self.config.plot_params['font_sizes']['xlabel'],
-            'legend.fontsize': self.config.plot_params['font_sizes']['legend'],
-            'figure.dpi': self.config.plot_params['dpi']
-        })
     
     def _get_model_path(self, model_key: str, region_type: str = 'standardized') -> Path:
         """
@@ -833,1891 +815,52 @@ class ModelComparator:
         except Exception as e:
             self.logger.error(f"❌ 加载单独模型失败 {model_key}: {e}")
             return self.models.get(model_key)
-    
-    # ==================== 1D速度剖面对比 ====================
-    
-    def plot_1d_velocity_comparison(self) -> Figure:
-        """
-        绘制1D速度剖面对比图（共同区域，使用 standardized 数据）
-        
-        多模型在共同覆盖区域的公平对比，VS和VP用实线、仅颜色区分。
-        
-        Returns:
-            综合速度剖面对比图
-        """
-        self.logger.info("🎨 绘制共同区域1D剖面对比图（standardized，VS + VP）...")
-        
-        fig, ax = plt.subplots(figsize=self.config.plot_params['figsize_1d'])
-        
-        depth_range = self.config.profile_params['depth_range']
-        plotted_models = []
-        
-        vs_annotated = False
-        vp_annotated = False
-        
-        for model_key, model in self.models.items():
-            try:
-                profile = model.calculate_1d_profile(
-                    depth_range=depth_range,
-                    spatial_averaging=True
-                )
-                
-                if 'depth' not in profile or len(profile['depth']) == 0:
-                    continue
-                
-                depths = profile['depth']
-                color = model.metadata.color
-                model_plotted = False
-                
-                for target_param in ['vs', 'vp']:
-                    if target_param in profile:
-                        values = profile[target_param]
-                        valid_mask = ~np.isnan(values['mean'])
-                        
-                        if valid_mask.sum() > 0:
-                            label = model.metadata.full_name if not model_plotted else None
-                            
-                            ax.plot(
-                                values['mean'][valid_mask], depths[valid_mask],
-                                color=color,
-                                linestyle='-',
-                                linewidth=1.5,
-                                label=label,
-                                alpha=0.9,
-                            )
-                            
-                            model_plotted = True
-                            
-                            # 添加参数标注
-                            if target_param == 'vs' and not vs_annotated and valid_mask.sum() > 20:
-                                mid_idx = valid_mask.sum() // 2
-                                valid_indices = np.where(valid_mask)[0]
-                                if len(valid_indices) > mid_idx:
-                                    idx = valid_indices[mid_idx]
-                                    ax.text(
-                                        values['mean'][idx] - 0.3, depths[idx],
-                                        'VS',
-                                        color='darkred',
-                                        fontsize=16,
-                                        va='center',
-                                        fontweight='bold',
-                                        bbox=dict(boxstyle='round,pad=0.5', 
-                                                facecolor='white', 
-                                                edgecolor='darkred',
-                                                alpha=0.9,
-                                                linewidth=2)
-                                    )
-                                    vs_annotated = True
-                            
-                            elif target_param == 'vp' and not vp_annotated and valid_mask.sum() > 20:
-                                mid_idx = valid_mask.sum() // 2
-                                valid_indices = np.where(valid_mask)[0]
-                                if len(valid_indices) > mid_idx:
-                                    idx = valid_indices[mid_idx]
-                                    ax.text(
-                                        values['mean'][idx] + 0.3, depths[idx],
-                                        'VP',
-                                        color='darkblue',
-                                        fontsize=16,
-                                        va='center',
-                                        fontweight='bold',
-                                        bbox=dict(boxstyle='round,pad=0.5', 
-                                                facecolor='white', 
-                                                edgecolor='darkblue',
-                                                alpha=0.9,
-                                                linewidth=2)
-                                    )
-                                    vp_annotated = True
-                            
-                            # 不确定性阴影
-                            if self.config.plot_params['show_uncertainty']:
-                                valid_std_mask = valid_mask & ~np.isnan(values['std'])
-                                if valid_std_mask.sum() > 0:
-                                    multiplier = self.config.plot_params['uncertainty_multiplier']
-                                    ax.fill_betweenx(
-                                        depths[valid_std_mask],
-                                        values['mean'][valid_std_mask] - multiplier * values['std'][valid_std_mask],
-                                        values['mean'][valid_std_mask] + multiplier * values['std'][valid_std_mask],
-                                        color=color,
-                                        alpha=self.config.plot_params['uncertainty_alpha'],
-                                        linewidth=0
-                                    )
-                
-                if model_plotted:
-                    plotted_models.append(model_key)
-                    self.logger.info(f"  ✅ {model.metadata.name} 绘制成功")
-                
-            except Exception as e:
-                self.logger.error(f"绘制失败 {model_key}: {e}")
-        
-        # 设置图形属性
-        ax.invert_yaxis()
-        ax.set_ylim(depth_range[1], 0)
-        ax.set_xlim(1, 13)
-        ax.set_xlabel("Velocity (km/s)", 
-                     fontsize=self.config.plot_params['font_sizes']['xlabel'])
-        ax.set_ylabel("Depth (km)", 
-                     fontsize=self.config.plot_params['font_sizes']['ylabel'])
-        ax.set_title("Velocity Profile Comparison (VS & VP)", 
-                    fontsize=self.config.plot_params['font_sizes']['title'], 
-                    pad=20)
-        
-        # 地质分界面
-        for depth in [60, 410, 660]:
-            if depth <= depth_range[1]:
-                ax.axhline(y=depth, color='gray', linestyle='--', 
-                          linewidth=1.5, alpha=0.5)
-                # ax.text(1.2, depth-10, f'{depth} km', 
-                #        fontsize=9, color='gray', va='top')
-        
-        ax.legend(
-            loc='upper right',
-            bbox_to_anchor=(0.98, 0.98),
-            title='Velocity Models',
-            frameon=True,
-            fontsize=self.config.plot_params['font_sizes']['legend']
-        )
-        
-        ax.grid(True, linestyle=':', alpha=0.3)
-        plt.tight_layout()
-        
-        return fig
-    
-    # ==================== S波各向异性对比图 ====================
-    
-    def plot_s_wave_anisotropy_comparison(self) -> Optional[Figure]:
-        """绘制S波各向异性对比图（VSV实线，VSH虚线）"""
-        self.logger.info("🎨 绘制S波各向异性对比图...")
-        
-        models_with_aniso = [k for k, m in self.models.items() 
-                            if m.has_s_wave_anisotropy()]
-        
-        if len(models_with_aniso) == 0:
-            self.logger.warning("没有模型包含S波各向异性数据")
-            return None
-        
-        fig, ax = plt.subplots(figsize=self.config.plot_params['figsize_1d'])
-        depth_range = self.config.profile_params['depth_range']
-        
-        for model_key in models_with_aniso:
-            model = self.models[model_key]
-            
-            try:
-                profile = model.calculate_1d_profile(depth_range=depth_range)
-                
-                if 'depth' not in profile or len(profile['depth']) == 0:
-                    continue
-                
-                depths = profile['depth']
-                color = model.metadata.color
-                
-                # VSV: 实线
-                if 'vsv' in profile:
-                    vsv = profile['vsv']
-                    valid_mask = ~np.isnan(vsv['mean'])
-                    if valid_mask.sum() > 0:
-                        ax.plot(
-                            vsv['mean'][valid_mask], depths[valid_mask],
-                            color=color,
-                            linestyle='-',
-                            linewidth=1.5,
-                            label=f"{model.metadata.full_name} VSV",
-                            alpha=0.9
-                        )
-                
-                # VSH: 虚线
-                if 'vsh' in profile:
-                    vsh = profile['vsh']
-                    valid_mask = ~np.isnan(vsh['mean'])
-                    if valid_mask.sum() > 0:
-                        ax.plot(
-                            vsh['mean'][valid_mask], depths[valid_mask],
-                            color=color,
-                            linestyle='--',
-                            linewidth=1.5,
-                            label=f"{model.metadata.full_name} VSH",
-                            alpha=0.9
-                        )
-            
-            except Exception as e:
-                self.logger.error(f"绘制S波各向异性失败 {model_key}: {e}")
-        
-        ax.invert_yaxis()
-        ax.set_ylim(depth_range[1], 0)
-        ax.set_xlabel("S-wave Velocity (km/s)", 
-                     fontsize=self.config.plot_params['font_sizes']['xlabel'])
-        ax.set_ylabel("Depth (km)", 
-                     fontsize=self.config.plot_params['font_sizes']['ylabel'])
-        ax.set_title("S-wave Anisotropy Comparison (VSV vs VSH)", 
-                    fontsize=self.config.plot_params['font_sizes']['title'], 
-                    pad=20)
-        
-        for depth in [60, 410, 660]:
-            if depth <= depth_range[1]:
-                ax.axhline(y=depth, color='gray', linestyle='--', 
-                          linewidth=1.5, alpha=0.5)
-        
-        ax.legend(loc='upper right', 
-                 fontsize=self.config.plot_params['font_sizes']['legend']-1,
-                 ncol=1)
-        ax.grid(True, linestyle=':', alpha=0.3)
-        plt.tight_layout()
-        
-        return fig
-    
-    # ==================== P波各向异性对比图 ====================
-    
-    def plot_p_wave_anisotropy_comparison(self) -> Optional[Figure]:
-        """绘制P波各向异性对比图（VPV实线，VPH虚线）"""
-        self.logger.info("🎨 绘制P波各向异性对比图...")
-        
-        models_with_aniso = [k for k, m in self.models.items() 
-                            if m.has_p_wave_anisotropy()]
-        
-        if len(models_with_aniso) == 0:
-            self.logger.warning("没有模型包含P波各向异性数据")
-            return None
-        
-        fig, ax = plt.subplots(figsize=self.config.plot_params['figsize_1d'])
-        depth_range = self.config.profile_params['depth_range']
-        
-        for model_key in models_with_aniso:
-            model = self.models[model_key]
-            
-            try:
-                profile = model.calculate_1d_profile(depth_range=depth_range)
-                
-                if 'depth' not in profile or len(profile['depth']) == 0:
-                    continue
-                
-                depths = profile['depth']
-                color = model.metadata.color
-                
-                # VPV: 实线
-                if 'vpv' in profile:
-                    vpv = profile['vpv']
-                    valid_mask = ~np.isnan(vpv['mean'])
-                    if valid_mask.sum() > 0:
-                        ax.plot(
-                            vpv['mean'][valid_mask], depths[valid_mask],
-                            color=color,
-                            linestyle='-',
-                            linewidth=1.5,
-                            label=f"{model.metadata.full_name} VPV",
-                            alpha=0.9
-                        )
-                
-                # VPH: 虚线
-                if 'vph' in profile:
-                    vph = profile['vph']
-                    valid_mask = ~np.isnan(vph['mean'])
-                    if valid_mask.sum() > 0:
-                        ax.plot(
-                            vph['mean'][valid_mask], depths[valid_mask],
-                            color=color,
-                            linestyle='--',
-                            linewidth=1.5,
-                            label=f"{model.metadata.full_name} VPH",
-                            alpha=0.9
-                        )
-            
-            except Exception as e:
-                self.logger.error(f"绘制P波各向异性失败 {model_key}: {e}")
-        
-        ax.invert_yaxis()
-        ax.set_ylim(depth_range[1], 0)
-        ax.set_xlabel("P-wave Velocity (km/s)", 
-                     fontsize=self.config.plot_params['font_sizes']['xlabel'])
-        ax.set_ylabel("Depth (km)", 
-                     fontsize=self.config.plot_params['font_sizes']['ylabel'])
-        ax.set_title("P-wave Anisotropy Comparison (VPV vs VPH)", 
-                    fontsize=self.config.plot_params['font_sizes']['title'], 
-                    pad=20)
-        
-        for depth in [60, 410, 660]:
-            if depth <= depth_range[1]:
-                ax.axhline(y=depth, color='gray', linestyle='--', 
-                          linewidth=1.5, alpha=0.5)
-        
-        ax.legend(loc='upper right', 
-                 fontsize=self.config.plot_params['font_sizes']['legend']-1,
-                 ncol=1)
-        ax.grid(True, linestyle=':', alpha=0.3)
-        plt.tight_layout()
-        
-        return fig
-    
-    # ==================== 单个模型详细剖面（v2.7 使用 original 数据）====================
-    
-    def plot_individual_model_profile(self, model_key: str, 
-                                      use_original_region: bool = True) -> Optional[Figure]:
-        """
-        绘制单个模型的完整速度剖面（v2.7 对齐1_5：单独模型可视化使用 original 区域）
-        
-        Args:
-            model_key: 模型键名
-            use_original_region: 若 True，使用 *_original.nc（完整模型区域）；
-                               若 False，使用 standardized（共同区域，兼容旧逻辑）
-            
-        Returns:
-            单个模型的完整剖面图
-        """
-        if model_key not in self.models:
-            self.logger.warning(f"模型 {model_key} 不存在")
-            return None
-        
-        # v2.7: 单独模型默认使用 original 数据（完整覆盖范围）
-        if use_original_region and self.config.region_data_source.get('individual') == 'original':
-            model = self._load_model_individual(model_key)
-            region_label = "Original Region"
-        else:
-            model = self.models[model_key]
-            region_label = "Common Region"
-        
-        if model is None:
-            return None
-        
-        self.logger.info(f"🎨 绘制单个模型剖面: {model.metadata.full_name} ({region_label})")
-        
-        fig, ax = plt.subplots(figsize=self.config.plot_params['figsize_1d_individual'])
-        depth_range = self.config.profile_params['depth_range']
-        
-        try:
-            profile = model.calculate_1d_profile(depth_range=depth_range)
-            
-            if 'depth' not in profile or len(profile['depth']) == 0:
-                self.logger.warning(f"模型 {model_key} 无有效数据")
-                return None
-            
-            depths = profile['depth']
-            
-            param_styles = {
-                'vp': {'color': '#E41A1C', 'linestyle': '-', 'linewidth': 3, 'label': 'VP', 'alpha': 1.0},
-                'vs': {'color': '#377EB8', 'linestyle': '-', 'linewidth': 3, 'label': 'VS', 'alpha': 1.0},
-                'vpv': {'color': '#FF7F00', 'linestyle': '-', 'linewidth': 2.5, 'label': 'VPV', 'alpha': 0.8},
-                'vph': {'color': '#FF7F00', 'linestyle': '--', 'linewidth': 2.5, 'label': 'VPH', 'alpha': 0.8},
-                'vsv': {'color': '#4DAF4A', 'linestyle': '-', 'linewidth': 2.5, 'label': 'VSV', 'alpha': 0.8},
-                'vsh': {'color': '#4DAF4A', 'linestyle': '--', 'linewidth': 2.5, 'label': 'VSH', 'alpha': 0.8},
-            }
-            
-            for param, style in param_styles.items():
-                if param in profile:
-                    values = profile[param]
-                    valid_mask = ~np.isnan(values['mean'])
-                    
-                    if valid_mask.sum() > 0:
-                        ax.plot(
-                            values['mean'][valid_mask], depths[valid_mask],
-                            color=style['color'],
-                            linestyle=style['linestyle'],
-                            linewidth=style['linewidth'],
-                            label=style['label'],
-                            alpha=style['alpha']
-                        )
-            
-            ax.invert_yaxis()
-            ax.set_ylim(depth_range[1], 0)
-            ax.set_xlabel("Velocity (km/s)", fontsize=14)
-            ax.set_ylabel("Depth (km)", fontsize=14)
-            region_title = "Original Region" if use_original_region and self.config.region_data_source.get('individual') == 'original' else "Common Region"
-            ax.set_title(f"{model.metadata.full_name}\n1D Velocity Profile ({region_title})", 
-                        fontsize=16, pad=20, fontweight='bold')
-            
-            for depth in [60, 410, 660]:
-                if depth <= depth_range[1]:
-                    ax.axhline(y=depth, color='gray', linestyle='--', 
-                              linewidth=1.5, alpha=0.5)
-                    # ax.text(1.2, depth-10, f'{depth} km', 
-                    #        fontsize=10, color='gray', va='top')
-            
-            handles, labels = ax.get_legend_handles_labels()
-            
-            if len(handles) > 0:
-                iso_handles = [h for h, l in zip(handles, labels) if l in ['VP', 'VS']]
-                iso_labels = [l for l in labels if l in ['VP', 'VS']]
-                
-                if iso_handles:
-                    legend1 = ax.legend(
-                        iso_handles, iso_labels,
-                        loc='upper right',
-                        bbox_to_anchor=(0.98, 0.98),
-                        title='Isotropic',
-                        frameon=True,
-                        fontsize=11
-                    )
-                    ax.add_artist(legend1)
-                
-                aniso_handles = [h for h, l in zip(handles, labels) if l not in ['VP', 'VS']]
-                aniso_labels = [l for l in labels if l not in ['VP', 'VS']]
-                
-                if aniso_handles:
-                    ax.legend(
-                        aniso_handles, aniso_labels,
-                        loc='upper right',
-                        bbox_to_anchor=(0.98, 0.85),
-                        title='Anisotropic',
-                        frameon=True,
-                        fontsize=11
-                    )
-            
-            ax.grid(True, linestyle=':', alpha=0.3)
-            plt.tight_layout()
-            
-            return fig
-            
-        except Exception as e:
-            self.logger.error(f"绘制单个模型剖面失败 {model_key}: {e}")
-            return None
-    
-    # ==================== 切片位置示意图 ====================
-    
-    def plot_slice_location_map(self) -> Figure:
-        """
-        绘制所有切片位置的示意图
-        
-        功能说明：
-        - 显示水平切片的深度信息（文本标注）
-        - 显示经度剖面的位置（红色竖线）
-        - 显示纬度剖面的位置（蓝色横线）
-        - 使用Cartopy添加地理信息和海岸线
-        
-        Returns:
-            切片位置示意图
-        """
-        self.logger.info("🗺️  绘制切片位置示意图...")
-        
-        # 获取任意一个模型的空间范围
-        first_model = next(iter(self.models.values()))
-        spatial_range = first_model.metadata.actual_spatial_range
-        if spatial_range is None:
-            raise ValueError(f"模型 {first_model.metadata.name} 缺少空间范围信息")
-        
-        lon_min, lon_max = spatial_range['lon']
-        lat_min, lat_max = spatial_range['lat']
-        
-        fig = plt.figure(figsize=self.config.plot_params['figsize_location_map'])
-        ax: GeoAxes = fig.add_subplot(1, 1, 1, projection=ccrs.PlateCarree())  # type: ignore[assignment]
-        
-        # 设置地图范围
-        ax.set_extent([lon_min-2, lon_max+2, lat_min-2, lat_max+2], crs=ccrs.PlateCarree())
-        
-        # 添加地理要素
-        ax.add_feature(cfeature.LAND, facecolor='lightgray', alpha=0.3)
-        ax.add_feature(cfeature.OCEAN, facecolor='lightblue', alpha=0.3)
-        ax.add_feature(cfeature.COASTLINE, linewidth=1.0, edgecolor='black')
-        ax.add_feature(cfeature.BORDERS, linewidth=0.5, linestyle=':', edgecolor='gray')
-        
-        # 添加网格线
-        gl = ax.gridlines(draw_labels=True, linewidth=0.5, color='gray', 
-                         alpha=0.5, linestyle='--')
-        gl.top_labels = False
-        gl.right_labels = False
-        
-        # 绘制研究区域边界
-        rect = Rectangle(
-            (lon_min, lat_min), lon_max - lon_min, lat_max - lat_min,
-            linewidth=2, edgecolor='black', facecolor='none',
-            linestyle='--', transform=ccrs.PlateCarree(), zorder=5
-        )
-        ax.add_patch(rect)
-        
-        # 绘制经度剖面位置（红色竖线）
-        lon_profiles = self.config.slice_params['vertical_profiles']['longitude']
-        for lon in lon_profiles:
-            ax.plot([lon, lon], [lat_min, lat_max], 
-                   color='red', linewidth=2, linestyle='-', 
-                   alpha=0.7, transform=ccrs.PlateCarree(), zorder=3)
-            # 添加经度标签
-            ax.text(lon, lat_max + 0.5, f'{lon}°E', 
-                   color='red', fontsize=10, ha='center', va='bottom',
-                   fontweight='bold', transform=ccrs.PlateCarree())
-        
-        # 绘制纬度剖面位置（蓝色横线）
-        lat_profiles = self.config.slice_params['vertical_profiles']['latitude']
-        for lat in lat_profiles:
-            ax.plot([lon_min, lon_max], [lat, lat], 
-                   color='blue', linewidth=2, linestyle='-', 
-                   alpha=0.7, transform=ccrs.PlateCarree(), zorder=3)
-            # 添加纬度标签
-            ax.text(lon_max + 0.5, lat, f'{lat}°N', 
-                   color='blue', fontsize=10, ha='left', va='center',
-                   fontweight='bold', transform=ccrs.PlateCarree())
-        
-        # 添加水平切片深度信息（在地图外显示）
-        depths_str = ', '.join([f'{d}km' for d in self.config.slice_params['horizontal_depths']])
-        ax.text(0.5, -0.08, f'Horizontal Slice Depths: {depths_str}', 
-               transform=ax.transAxes, ha='center', fontsize=10,
-               bbox=dict(boxstyle='round,pad=0.5', facecolor='yellow', alpha=0.3))
-        
-        # 添加图例
-        from matplotlib.lines import Line2D
-        legend_elements = [
-            Line2D([0], [0], color='red', linewidth=2, label='Longitude Profiles'),
-            Line2D([0], [0], color='blue', linewidth=2, label='Latitude Profiles'),
-            Line2D([0], [0], color='black', linewidth=2, linestyle='--', label='Study Region')
-        ]
-        ax.legend(handles=legend_elements, loc='upper left', fontsize=11, frameon=True)
-        
-        # 设置标题
-        ax.set_title('Slice Locations for Model Comparison\n(Horizontal Slices + Vertical Profiles)', 
-                    fontsize=14, fontweight='bold', pad=15)
-        
-        plt.tight_layout()
-        
-        self.logger.info("  ✅ 切片位置示意图绘制完成")
-        return fig
 
-    # ==================== 🆕 独立的绝对速度对比图 ====================
-    
-    def plot_horizontal_slices_absolute_only(self, param: str = 'vs') -> List[Figure]:
-        """
-        🆕 绘制独立的绝对速度对比图（所有模型在同一深度）
-        
-        功能说明：
-        - 每个深度生成一张图
-        - 所有模型并排显示在同一行
-        - 统一的colorbar范围
-        - 添加海岸线
-        - colorbar放置在右侧（垂直方向）
-        
-        Args:
-            param: 要可视化的参数（vs, vp等）
-            
-        Returns:
-            图表列表
-        """
-        self.logger.info(f"🆕 绘制独立绝对速度对比图: {param.upper()}")
-        
-        depths = self.config.slice_params['horizontal_depths']
-        cmap = self.config.slice_params['cmap']
-        
-        figures = []
-        
-        for depth in depths:
-            self.logger.info(f"  生成深度 {depth} km 的绝对速度对比...")
-            
-            n_models = len(self.models)
-            figsize = (5*n_models, 5)
-            
-            fig = plt.figure(figsize=figsize)
-            
-            # ========== 收集所有模型数据，计算统一colorbar范围 ==========
-            all_data = []
-            for model in self.models.values():
-                if model.has_parameter(param):
-                    try:
-                        _, _, data_slice = model.get_horizontal_slice(param, depth)
-                        all_data.append(data_slice[~np.isnan(data_slice)])
-                    except Exception:
-                        pass
-            
-            if len(all_data) == 0:
-                self.logger.warning(f"  深度 {depth} km 无有效数据")
-                plt.close(fig)
-                continue
-            
-            all_data_flat = np.concatenate(all_data)
-            vmin = np.percentile(all_data_flat, self.config.slice_params['vmin_percentile'])
-            vmax = np.percentile(all_data_flat, self.config.slice_params['vmax_percentile'])
-            
-            # ========== 绘制每个模型 ==========
-            for idx, (model_key, model) in enumerate(self.models.items(), 1):
-                if not model.has_parameter(param):
-                    continue
-                
-                try:
-                    lon_grid, lat_grid, data_slice = model.get_horizontal_slice(param, depth)
-                    
-                    ax: GeoAxes = fig.add_subplot(1, n_models, idx, projection=ccrs.PlateCarree())  # type: ignore[assignment]
-                    
-                    ax.set_extent([lon_grid.min(), lon_grid.max(), 
-                                  lat_grid.min(), lat_grid.max()], 
-                                 crs=ccrs.PlateCarree())
-                    
-                    if self.config.slice_params['add_coastlines']:
-                        ax.add_feature(cfeature.COASTLINE, 
-                                      linewidth=self.config.slice_params['coastline_linewidth'],
-                                      edgecolor=self.config.slice_params['coastline_color'],
-                                      zorder=5)
-                        ax.add_feature(cfeature.BORDERS, 
-                                      linewidth=0.3, linestyle=':', 
-                                      edgecolor='gray', alpha=0.5, zorder=4)
-                    
-                    im = ax.pcolormesh(
-                        lon_grid, lat_grid, data_slice,
-                        cmap=cmap,
-                        vmin=vmin,
-                        vmax=vmax,
-                        shading='auto',
-                        transform=ccrs.PlateCarree(),
-                        zorder=1
-                    )
-                    
-                    gl = ax.gridlines(draw_labels=True, linewidth=0.5, 
-                                     color='gray', alpha=0.3, linestyle='--')
-                    gl.top_labels = False
-                    gl.right_labels = False
-                    
-                    cbar = plt.colorbar(
-                        im, 
-                        ax=ax, 
-                        orientation=self.config.slice_params['colorbar_orientation'],
-                        pad=self.config.slice_params['colorbar_pad'], 
-                        shrink=self.config.slice_params['colorbar_shrink']
-                    )
-                    cbar.set_label(f'{param.upper()} (km/s)', 
-                                  fontsize=self.config.plot_params['font_sizes']['colorbar'])
-                    
-                    ax.set_title(f"{model.metadata.full_name}",
-                                fontsize=self.config.plot_params['font_sizes']['title'],
-                                color=model.metadata.color,
-                                fontweight='bold')
-                    
-                except Exception as e:
-                    self.logger.warning(f"  绘制 {model.metadata.name} @ {depth}km 失败: {e}")
-            
-            # 总标题
-            plt.suptitle(f'Absolute Velocity Comparison - {param.upper()} @ {depth} km',
-                        fontsize=self.config.plot_params['font_sizes']['title']+2,
-                        y=0.98,
-                        fontweight='bold')
-            
-            plt.tight_layout(rect=(0, 0, 1, 0.96))
-            figures.append(fig)
-        
-        self.logger.info(f"✅ 成功生成 {len(figures)} 个独立绝对速度对比图")
-        return figures
-    
-    # ==================== 🆕 两两模型差异对比图 ====================
-    
-    def plot_horizontal_slices_model_differences(self, param: str = 'vs') -> List[Figure]:
-        """
-        🆕 绘制两两模型间的速度差异对比图（Model_A - Model_B）
-        
-        功能说明：
-        - 每个深度生成一张图
-        - 显示所有模型对之间的差异（Model_A - Model_B）
-        - 使用RdBu_r色标（红色表示Model_A更快，蓝色表示Model_B更快）
-        - 添加海岸线
-        - colorbar放置在右侧（垂直方向）
-        
-        Args:
-            param: 要可视化的参数（vs, vp等）
-            
-        Returns:
-            图表列表
-        """
-        self.logger.info(f"🆕 绘制两两模型差异对比图: {param.upper()}")
-        
-        depths = self.config.slice_params['horizontal_depths']
-        cmap_diff = self.config.slice_params['cmap_difference']
-        
-        # 获取所有模型键的组合
-        model_keys = list(self.models.keys())
-        model_pairs = list(combinations(model_keys, 2))
-        
-        self.logger.info(f"  模型对数量: {len(model_pairs)}")
-        for pair in model_pairs:
-            m1 = self.models[pair[0]].metadata.full_name
-            m2 = self.models[pair[1]].metadata.full_name
-            self.logger.info(f"    - {m1} vs {m2}")
-        
-        figures = []
-        
-        for depth in depths:
-            self.logger.info(f"  生成深度 {depth} km 的差异对比...")
-            
-            n_pairs = len(model_pairs)
-            ncols = min(3, n_pairs)  # 每行最多3个子图
-            nrows = (n_pairs + ncols - 1) // ncols
-            
-            figsize = (5*ncols, 5*nrows)
-            fig = plt.figure(figsize=figsize)
-            
-            # ========== 收集所有差异数据，计算统一colorbar范围 ==========
-            all_diffs = []
-            
-            for model_key_a, model_key_b in model_pairs:
-                model_a = self.models[model_key_a]
-                model_b = self.models[model_key_b]
-                
-                if not (model_a.has_parameter(param) and model_b.has_parameter(param)):
-                    continue
-                
-                try:
-                    _, _, data_a = model_a.get_horizontal_slice(param, depth)
-                    _, _, data_b = model_b.get_horizontal_slice(param, depth)
-                    
-                    # 计算差异: Model_A - Model_B
-                    diff = data_a - data_b
-                    all_diffs.append(diff[~np.isnan(diff)])
-                except Exception:
-                    pass
-            
-            if len(all_diffs) == 0:
-                self.logger.warning(f"  深度 {depth} km 无有效差异数据")
-                plt.close(fig)
-                continue
-            
-            all_diffs_flat = np.concatenate(all_diffs)
-            diff_max = np.percentile(np.abs(all_diffs_flat), 
-                                    self.config.slice_params['diff_percentile'])
-            vmin_diff = -diff_max
-            vmax_diff = diff_max
-            
-            # ========== 绘制每对模型的差异 ==========
-            for idx, (model_key_a, model_key_b) in enumerate(model_pairs, 1):
-                model_a = self.models[model_key_a]
-                model_b = self.models[model_key_b]
-                
-                if not (model_a.has_parameter(param) and model_b.has_parameter(param)):
-                    continue
-                
-                try:
-                    lon_grid_a, lat_grid_a, data_a = model_a.get_horizontal_slice(param, depth)
-                    lon_grid_b, lat_grid_b, data_b = model_b.get_horizontal_slice(param, depth)
-                    
-                    # 确保网格一致（插值到统一网格）
-                    if not (np.allclose(lon_grid_a, lon_grid_b) and np.allclose(lat_grid_a, lat_grid_b)):
-                        self.logger.warning(f"  模型网格不一致，跳过 {model_a.metadata.name} vs {model_b.metadata.name}")
-                        continue
-                    
-                    # 计算差异: Model_A - Model_B
-                    diff = data_a - data_b
-                    
-                    ax: GeoAxes = fig.add_subplot(nrows, ncols, idx, projection=ccrs.PlateCarree())  # type: ignore[assignment]
-                    
-                    ax.set_extent([lon_grid_a.min(), lon_grid_a.max(), 
-                                  lat_grid_a.min(), lat_grid_a.max()], 
-                                 crs=ccrs.PlateCarree())
-                    
-                    if self.config.slice_params['add_coastlines']:
-                        ax.add_feature(cfeature.COASTLINE, 
-                                      linewidth=self.config.slice_params['coastline_linewidth'],
-                                      edgecolor=self.config.slice_params['coastline_color'],
-                                      zorder=5)
-                        ax.add_feature(cfeature.BORDERS, 
-                                      linewidth=0.3, linestyle=':', 
-                                      edgecolor='gray', alpha=0.5, zorder=4)
-                    
-                    im = ax.pcolormesh(
-                        lon_grid_a, lat_grid_a, diff,
-                        cmap=cmap_diff,
-                        vmin=vmin_diff,
-                        vmax=vmax_diff,
-                        shading='auto',
-                        transform=ccrs.PlateCarree(),
-                        zorder=1
-                    )
-                    
-                    # 添加网格线
-                    gl = ax.gridlines(draw_labels=True, linewidth=0.5, 
-                                     color='gray', alpha=0.3, linestyle='--')
-                    gl.top_labels = False
-                    gl.right_labels = False
-                    
-                    # Colorbar（右侧垂直放置）
-                    cbar = plt.colorbar(
-                        im, 
-                        ax=ax, 
-                        orientation=self.config.slice_params['colorbar_orientation'],
-                        pad=self.config.slice_params['colorbar_pad'], 
-                        shrink=self.config.slice_params['colorbar_shrink']
-                    )
-                    cbar.set_label(f'ΔV (km/s)', 
-                                  fontsize=self.config.plot_params['font_sizes']['colorbar'])
-                    
-                    # 标题（显示模型对）
-                    title_text = f"{model_a.metadata.full_name}\nminus\n{model_b.metadata.full_name}"
-                    ax.set_title(title_text,
-                                fontsize=self.config.plot_params['font_sizes']['title']-1,
-                                fontweight='bold')
-                    
-                    # 统计信息
-                    mean_diff = np.nanmean(diff)
-                    std_diff = np.nanstd(diff)
-                    ax.text(0.02, 0.02, f'Mean: {mean_diff:.3f} km/s\nStd: {std_diff:.3f} km/s',
-                           transform=ax.transAxes,
-                           fontsize=8,
-                           va='bottom',
-                           bbox=dict(boxstyle='round,pad=0.3', 
-                                   facecolor='white', alpha=0.8))
-                    
-                except Exception as e:
-                    self.logger.warning(f"  绘制差异失败 {model_a.metadata.name} vs {model_b.metadata.name}: {e}")
-            
-            # 总标题
-            plt.suptitle(f'Model Difference Comparison - {param.upper()} @ {depth} km\n(Red: Model A faster | Blue: Model B faster)',
-                        fontsize=self.config.plot_params['font_sizes']['title']+2,
-                        y=0.98,
-                        fontweight='bold')
-            
-            plt.tight_layout(rect=(0, 0, 1, 0.96))
-            figures.append(fig)
-        
-        self.logger.info(f"✅ 成功生成 {len(figures)} 个两两模型差异对比图")
-        return figures
-    
-    # ==================== 水平切片对比（灵活绘图模式）====================
-    
-    def plot_horizontal_slices_comparison(self, param: str = 'vs') -> List[Figure]:
-        """
-        绘制水平切片对比图（灵活绘图模式：绝对速度/扰动/两者）
-        
-        功能增强：
-        - 灵活绘图模式：可选择只画绝对速度、只画扰动、或两者都画
-        - dlnV单位：百分比 (%)
-        - 添加海岸线数据
-        - 切片色标：seismic
-        - colorbar放置在右侧（垂直方向）
-        
-        dlnV定义：dlnV = ln(V/V_ref) × 100%
-        
-        Args:
-            param: 要可视化的参数（vs, vp等）
-            
-        Returns:
-            图表列表
-        """
-        mode = self.config.plot_mode['horizontal_slices']
-        self.logger.info(f"🎨 绘制水平切片对比图（模式: {mode}）: {param.upper()}")
-        
-        depths = self.config.slice_params['horizontal_depths']
-        cmap_abs = self.config.slice_params['cmap']
-        cmap_dlnv = self.config.slice_params['cmap_perturbation']
-        
-        figures = []
-        
-        for depth in depths:
-            self.logger.info(f"  生成深度 {depth} km 的水平切片...")
-            
-            n_models = len(self.models)
-            
-            # ========== 根据绘图模式决定子图布局 ==========
-            if mode == 'both':
-                nrows, ncols = 2, n_models
-                figsize = self.config.plot_params['figsize_slice_both']
-            else:
-                nrows, ncols = 1, n_models
-                figsize = self.config.plot_params['figsize_slice_single']
-            
-            fig = plt.figure(figsize=figsize)
-            
-            # ========== 收集数据，计算统一colorbar范围 ==========
-            all_data_abs = []
-            all_data_dlnv = []
-            
-            for model in self.models.values():
-                if model.has_parameter(param):
-                    try:
-                        if mode in ['absolute', 'both']:
-                            _, _, data_slice = model.get_horizontal_slice(param, depth)
-                            all_data_abs.append(data_slice[~np.isnan(data_slice)])
-                        
-                        if mode in ['perturbation', 'both']:
-                            _, _, dlnv_slice = model.get_horizontal_slice_dlnv(param, depth)
-                            all_data_dlnv.append(dlnv_slice[~np.isnan(dlnv_slice)])
-                    except Exception:
-                        pass
-            
-            # 检查是否有有效数据
-            if mode in ['absolute', 'both'] and len(all_data_abs) == 0:
-                self.logger.warning(f"  深度 {depth} km 无绝对速度数据")
-                plt.close(fig)
-                continue
-            
-            if mode in ['perturbation', 'both'] and len(all_data_dlnv) == 0:
-                self.logger.warning(f"  深度 {depth} km 无扰动数据")
-                if mode == 'perturbation':
-                    plt.close(fig)
-                    continue
-            
-            # 计算colorbar范围
-            if mode in ['absolute', 'both'] and len(all_data_abs) > 0:
-                all_data_abs_flat = np.concatenate(all_data_abs)
-                vmin_abs = np.percentile(all_data_abs_flat, self.config.slice_params['vmin_percentile'])
-                vmax_abs = np.percentile(all_data_abs_flat, self.config.slice_params['vmax_percentile'])
-            else:
-                vmin_abs, vmax_abs = None, None
-            
-            if mode in ['perturbation', 'both'] and len(all_data_dlnv) > 0:
-                all_data_dlnv_flat = np.concatenate(all_data_dlnv)
-                dlnv_max = np.percentile(np.abs(all_data_dlnv_flat), 
-                                        self.config.slice_params['dlnv_percentile'])
-                vmin_dlnv, vmax_dlnv = -dlnv_max, dlnv_max
-            else:
-                vmin_dlnv, vmax_dlnv = -10.0, 10.0
-            
-            # ========== 绘制每个模型 ==========
-            for idx, (model_key, model) in enumerate(self.models.items(), 1):
-                if not model.has_parameter(param):
-                    continue
-                
-                try:
-                    # ========== 绘制绝对速度（第一行或唯一行）==========
-                    if mode in ['absolute', 'both']:
-                        lon_grid, lat_grid, data_slice = model.get_horizontal_slice(param, depth)
-                        
-                        ax_abs: GeoAxes = fig.add_subplot(nrows, ncols, idx, projection=ccrs.PlateCarree())  # type: ignore[assignment]
-                        
-                        ax_abs.set_extent([lon_grid.min(), lon_grid.max(), 
-                                          lat_grid.min(), lat_grid.max()], 
-                                         crs=ccrs.PlateCarree())
-                        
-                        if self.config.slice_params['add_coastlines']:
-                            ax_abs.add_feature(cfeature.COASTLINE, 
-                                              linewidth=self.config.slice_params['coastline_linewidth'],
-                                              edgecolor=self.config.slice_params['coastline_color'],
-                                              zorder=5)
-                            ax_abs.add_feature(cfeature.BORDERS, 
-                                              linewidth=0.3, linestyle=':', 
-                                              edgecolor='gray', alpha=0.5, zorder=4)
-                        
-                        im_abs = ax_abs.pcolormesh(
-                            lon_grid, lat_grid, data_slice,
-                            cmap=cmap_abs,
-                            vmin=vmin_abs,
-                            vmax=vmax_abs,
-                            shading='auto',
-                            transform=ccrs.PlateCarree(),
-                            zorder=1
-                        )
-                        
-                        gl_abs = ax_abs.gridlines(draw_labels=True, linewidth=0.5, 
-                                                 color='gray', alpha=0.3, linestyle='--')
-                        gl_abs.top_labels = False
-                        gl_abs.right_labels = False
-                        
-                        cbar_abs = plt.colorbar(
-                            im_abs, 
-                            ax=ax_abs, 
-                            orientation=self.config.slice_params['colorbar_orientation'],
-                            pad=self.config.slice_params['colorbar_pad'], 
-                            shrink=self.config.slice_params['colorbar_shrink']
-                        )
-                        cbar_abs.set_label(f'{param.upper()} (km/s)', 
-                                          fontsize=self.config.plot_params['font_sizes']['colorbar'])
-                        
-                        title_text = f"{model.metadata.full_name}"
-                        if mode == 'both':
-                            title_text += "\nAbsolute Velocity"
-                        ax_abs.set_title(title_text,
-                                        fontsize=self.config.plot_params['font_sizes']['title'],
-                                        color=model.metadata.color,
-                                        fontweight='bold')
-                    
-                    # ========== 绘制dlnV扰动（第二行或唯一行）==========
-                    if mode in ['perturbation', 'both']:
-                        lon_grid, lat_grid, dlnv_slice = model.get_horizontal_slice_dlnv(param, depth)
-                        
-                        if mode == 'both':
-                            subplot_idx = ncols + idx
-                        else:
-                            subplot_idx = idx
-                        
-                        ax_dlnv: GeoAxes = fig.add_subplot(nrows, ncols, subplot_idx, projection=ccrs.PlateCarree())  # type: ignore[assignment]
-                        
-                        ax_dlnv.set_extent([lon_grid.min(), lon_grid.max(), 
-                                           lat_grid.min(), lat_grid.max()], 
-                                          crs=ccrs.PlateCarree())
-                        
-                        if self.config.slice_params['add_coastlines']:
-                            ax_dlnv.add_feature(cfeature.COASTLINE, 
-                                               linewidth=self.config.slice_params['coastline_linewidth'],
-                                               edgecolor=self.config.slice_params['coastline_color'],
-                                               zorder=5)
-                            ax_dlnv.add_feature(cfeature.BORDERS, 
-                                               linewidth=0.3, linestyle=':', 
-                                               edgecolor='gray', alpha=0.5, zorder=4)
-                        
-                        im_dlnv = ax_dlnv.pcolormesh(
-                            lon_grid, lat_grid, dlnv_slice,
-                            cmap=cmap_dlnv,
-                            vmin=vmin_dlnv,
-                            vmax=vmax_dlnv,
-                            shading='auto',
-                            transform=ccrs.PlateCarree(),
-                            zorder=1
-                        )
-                        
-                        gl_dlnv = ax_dlnv.gridlines(draw_labels=True, linewidth=0.5, 
-                                                   color='gray', alpha=0.3, linestyle='--')
-                        gl_dlnv.top_labels = False
-                        gl_dlnv.right_labels = False
-                        
-                        cbar_dlnv = plt.colorbar(
-                            im_dlnv, 
-                            ax=ax_dlnv, 
-                            orientation=self.config.slice_params['colorbar_orientation'],
-                            pad=self.config.slice_params['colorbar_pad'], 
-                            shrink=self.config.slice_params['colorbar_shrink']
-                        )
-                        cbar_dlnv.set_label('dlnV (%)', 
-                                           fontsize=self.config.plot_params['font_sizes']['colorbar'])
-                        
-                        if mode == 'both':
-                            title_text = "Velocity Perturbation\n(relative to 1D average)"
-                        else:
-                            title_text = f"{model.metadata.full_name}\nVelocity Perturbation"
-                        
-                        ax_dlnv.set_title(title_text,
-                                         fontsize=self.config.plot_params['font_sizes']['title'],
-                                         color=model.metadata.color if mode == 'perturbation' else 'black',
-                                         fontweight='bold' if mode == 'perturbation' else 'normal')
-                    
-                except Exception as e:
-                    self.logger.warning(f"  绘制 {model.metadata.name} @ {depth}km 失败: {e}")
-            
-            # ========== 总标题 ==========
-            if mode == 'absolute':
-                suptitle = f'Horizontal Slice Comparison - {param.upper()} @ {depth} km\n(Absolute Velocity)'
-            elif mode == 'perturbation':
-                suptitle = f'Horizontal Slice Comparison - {param.upper()} @ {depth} km\n(dlnV Perturbation in %)'
-            else:
-                suptitle = f'Horizontal Slice Comparison - {param.upper()} @ {depth} km\n(Absolute Velocity + dlnV Perturbation in %)'
-            
-            plt.suptitle(suptitle,
-                        fontsize=self.config.plot_params['font_sizes']['title']+2,
-                        y=0.98,
-                        fontweight='bold')
-            
-            plt.tight_layout(rect=(0, 0, 1, 0.96))
-            
-            figures.append(fig)
-        
-        self.logger.info(f"✅ 成功生成 {len(figures)} 个水平切片对比图（模式: {mode}）")
-        return figures
-    
-    # ==================== 论文主图：1D 剖面 + 三深度 dlnVs ====================
-    
-    def plot_paper_dlnv_maps(self, param: Optional[str] = None) -> Figure:
-        """
-        绘制论文主图：模型（行）× 深度（列）的 dlnVs 水平切片矩阵。
-        
-        默认 3 模型 × 4 深度（100/200/500/800 km）。各模型保持原生网格，
-        SinoScope 的 1° 块状分辨率不加平滑，以便直观看出分辨率差异。
-        色标 GMT seis（红=低速，蓝=高速），范围按 dlnv_limit_mode 逐深度
-        或全图统一。paper_figure['include_1d'] 置 True 可在左侧再加一栏
-        全深度 1D 平均剖面。
-        
-        Args:
-            param: 速度参数，默认 vs
-            
-        Returns:
-            论文主图 Figure
-        """
-        paper_cfg = self.config.paper_figure
-        param_name = param or str(paper_cfg['param'])
-        depths = list(paper_cfg['depths'])
-        cmap_name = str(paper_cfg['cmap'])
-        cmap = self._resolve_paper_cmap(cmap_name)
-        include_1d = bool(paper_cfg.get('include_1d', True))
-        
-        self.logger.info("📄 绘制论文主图: 模型 × 深度 dlnV 切片矩阵")
-        self.logger.info(
-            f"  深度: {depths} km  |  参数: {param_name.upper()}  |  色标: {cmap_name}"
-        )
-        
-        model_items = [
-            (key, model) for key, model in self.models.items()
-            if model.has_parameter(param_name)
-        ]
-        if len(model_items) == 0:
-            raise RuntimeError(f"没有任何模型包含参数 {param_name}")
-        
-        n_rows = len(model_items)
-        n_cols = len(depths)
-        
-        slices: List[List[Tuple[np.ndarray, np.ndarray, np.ndarray]]] = []
-        actual_depths: List[float] = []
-        col_dlnv: List[List[np.ndarray]] = []
-        
-        lon_mins: List[float] = []
-        lon_maxs: List[float] = []
-        lat_mins: List[float] = []
-        lat_maxs: List[float] = []
-        
-        for depth in depths:
-            actual_this_col: List[float] = []
-            col_slices: List[Tuple[np.ndarray, np.ndarray, np.ndarray]] = []
-            this_col_values: List[np.ndarray] = []
-            for _, model in model_items:
-                lon_grid, lat_grid, dlnv = model.get_horizontal_slice_dlnv(param_name, depth)
-                depth_idx = int(np.argmin(np.abs(model._depth - depth)))
-                actual_this_col.append(float(model._depth[depth_idx]))
-                col_slices.append((lon_grid, lat_grid, dlnv))
-                valid = dlnv[np.isfinite(dlnv)]
-                if valid.size > 0:
-                    this_col_values.append(valid)
-                lon_mins.append(float(lon_grid.min()))
-                lon_maxs.append(float(lon_grid.max()))
-                lat_mins.append(float(lat_grid.min()))
-                lat_maxs.append(float(lat_grid.max()))
-            slices.append(col_slices)
-            col_dlnv.append(this_col_values)
-            actual_depths.append(float(np.median(actual_this_col)))
-        
-        slices_rc: List[List[Tuple[np.ndarray, np.ndarray, np.ndarray]]] = [
-            [slices[c][r] for c in range(n_cols)] for r in range(n_rows)
-        ]
-        
-        extent = [max(lon_mins), min(lon_maxs), max(lat_mins), min(lat_maxs)]
-        
-        col_limits = self._resolve_paper_dlnv_limits(col_dlnv)
-        limit_mode = str(paper_cfg.get('dlnv_limit_mode', 'per_depth'))
-        self.logger.info(
-            f"  色标模式: {limit_mode}  |  各列范围: "
-            + ', '.join(f'{d:.0f}km ±{v:.1f}%'
-                        for d, v in zip(actual_depths, col_limits))
-        )
-        self.logger.info(
-            f"  地图范围: {extent[0]:.1f}–{extent[1]:.1f}°E, "
-            f"{extent[2]:.1f}–{extent[3]:.1f}°N"
-        )
-        
-        fig = plt.figure(figsize=tuple(paper_cfg['figsize']))
-        
-        # 底部留一行放 colorbar：逐深度色标时每列一条，共用色标时整行一条
-        if include_1d:
-            outer = GridSpec(
-                1, 2,
-                figure=fig,
-                width_ratios=[1.15, 3.20],
-                wspace=0.18,
-                left=0.055,
-                right=0.94,
-                top=0.96,
-                bottom=0.08,
-            )
-            ax_1d = fig.add_subplot(outer[0, 0])
-            map_gs = outer[0, 1].subgridspec(
-                n_rows + 1, n_cols,
-                height_ratios=[1] * n_rows + [0.05],
-                wspace=0.08,
-                hspace=0.12,
-            )
+    def _get_visualizer(self):
+        """延迟加载 5_12，避免与 5_12.main 循环导入。"""
+        viz_py = project_root / '5_Visualization' / '5_12_Model_compare.py'
+        if not viz_py.exists():
+            raise FileNotFoundError(f'找不到模型对比可视化模块: {viz_py}')
+        mod_name = 'eastasia_model_compare_viz'
+        if mod_name in sys.modules:
+            mod = sys.modules[mod_name]
         else:
-            ax_1d = None
-            map_gs = GridSpec(
-                n_rows + 1, n_cols,
-                figure=fig,
-                height_ratios=[1] * n_rows + [0.05],
-                wspace=0.07,
-                hspace=0.12,
-                left=0.055,
-                right=0.985,
-                top=0.955,
-                bottom=0.085,
-            )
-        
-        letters = 'abcdefghijklmnopqrstuvwxyz'
-        letter_idx = 0
-        
-        if ax_1d is not None:
-            self._draw_paper_1d_profile(
-                ax_1d, model_items, actual_depths
-            )
-            if paper_cfg.get('panel_letters', True):
-                ax_1d.text(
-                    0.04, 0.98, f'({letters[letter_idx]})',
-                    transform=ax_1d.transAxes,
-                    va='top', ha='left',
-                    fontsize=9, fontweight='bold',
-                )
-            letter_idx += 1
-        
-        col_images: List[Any] = [None] * n_cols
-        for row, (_model_key, model) in enumerate(model_items):
-            for col in range(n_cols):
-                lon_grid, lat_grid, dlnv = slices_rc[row][col]
-                vmax = col_limits[col]
-                vmin = -vmax
-                ax: GeoAxes = fig.add_subplot(
-                    map_gs[row, col], projection=ccrs.PlateCarree()
-                )  # type: ignore[assignment]
-                
-                ax.set_extent(extent, crs=ccrs.PlateCarree())
-                
-                if self.config.slice_params['add_coastlines']:
-                    ax.add_feature(
-                        cfeature.COASTLINE,
-                        linewidth=0.4,
-                        edgecolor='k',
-                        zorder=5,
-                    )
-                    ax.add_feature(
-                        cfeature.BORDERS,
-                        linewidth=0.25,
-                        linestyle=':',
-                        edgecolor='0.4',
-                        zorder=4,
-                    )
-                
-                col_images[col] = ax.pcolormesh(
-                    lon_grid, lat_grid, dlnv,
-                    cmap=cmap,
-                    vmin=vmin,
-                    vmax=vmax,
-                    shading='nearest',
-                    transform=ccrs.PlateCarree(),
-                    rasterized=True,
-                    zorder=1,
-                )
-                
-                gl = ax.gridlines(
-                    draw_labels=True,
-                    linewidth=0.35,
-                    color='0.5',
-                    alpha=0.35,
-                    linestyle='--',
-                    x_inline=False,
-                    y_inline=False,
-                )
-                self._configure_map_gridliner(
-                    gl,
-                    left_labels=(col == 0),
-                    bottom_labels=(row == n_rows - 1),
-                )
-                gl.xlabel_style = {'size': 7}
-                gl.ylabel_style = {'size': 7}
-                
-                letter = letters[letter_idx]
-                letter_idx += 1
-                if paper_cfg.get('panel_letters', True):
-                    label = f'({letter})'
-                    if col == 0:
-                        label = f'({letter}) {model.metadata.full_name}'
-                    ax.text(
-                        0.03, 0.96, label,
-                        transform=ax.transAxes,
-                        va='top', ha='left',
-                        fontsize=8, fontweight='bold',
-                        bbox=dict(
-                            boxstyle='square,pad=0.12',
-                            facecolor='white',
-                            edgecolor='none',
-                            alpha=0.85,
-                        ),
-                        zorder=10,
-                    )
-                
-                if row == 0:
-                    ax.set_title(
-                        f'{actual_depths[col]:.0f} km',
-                        fontsize=11,
-                        pad=4,
-                        fontweight='bold',
-                    )
-        
-        self._draw_paper_colorbars(
-            fig, map_gs, col_images, col_limits, n_rows, n_cols, param_name
-        )
-        
-        self.logger.info("  ✅ 论文主图绘制完成")
-        
-        prefix = self.config.output_params['figure_prefix']
-        out_stem = self.output_dir / f"{prefix}paper_dlnv_maps"
-        dpi = int(self.config.output_params['save_dpi'])
-        for fmt in paper_cfg.get('save_formats', ['jpg', 'pdf']):
-            fp = out_stem.with_suffix(f'.{fmt}')
-            save_kw: Dict[str, Any] = {
-                'dpi': dpi,
-                'bbox_inches': 'tight',
-                'facecolor': 'white',
-            }
-            if fmt in ('jpg', 'jpeg'):
-                save_kw['format'] = 'jpeg'
-                save_kw['pil_kwargs'] = {'quality': 95}
-            fig.savefig(fp, **save_kw)
-            self.logger.info(f"  ✅ {fp.name}")
-        
-        return fig
-    
-    def _resolve_paper_dlnv_limits(
-        self, col_dlnv: List[List[np.ndarray]]
-    ) -> List[float]:
-        """
-        给论文主图每一列（每个深度）定对称色标范围。
-        
-        'per_depth' 模式下取该深度所有模型 |dlnV| 的指定分位数并向上取整到
-        0.5% 的整数倍，避免出现 ±3.7% 这种读不出来的刻度。扰动振幅从
-        100 km 到 800 km 衰减约一个量级，共用范围会把深部结构压成一片零色。
-        
-        Args:
-            col_dlnv: 逐列（深度）收集的各模型有效 dlnV 数组
-            
-        Returns:
-            每列的 ±范围（%），长度与 col_dlnv 一致
-        """
-        paper_cfg = self.config.paper_figure
-        mode = str(paper_cfg.get('dlnv_limit_mode', 'per_depth'))
-        fixed = float(paper_cfg.get('dlnv_limit') or 6.0)
-        
-        if mode != 'per_depth':
-            return [fixed] * len(col_dlnv)
-        
-        pct = float(paper_cfg.get('dlnv_percentile', 98.0))
-        limits: List[float] = []
-        for values in col_dlnv:
-            if len(values) == 0:
-                limits.append(fixed)
-                continue
-            p = float(np.percentile(np.abs(np.concatenate(values)), pct))
-            # 向上取整到 0.5 的倍数，最低 1.0%
-            limits.append(max(1.0, float(np.ceil(p * 2.0) / 2.0)))
-        return limits
-    
-    def _draw_paper_colorbars(
-        self,
-        fig: Figure,
-        map_gs: Any,
-        col_images: List[Any],
-        col_limits: List[float],
-        n_rows: int,
-        n_cols: int,
-        param_name: str,
-    ) -> None:
-        """
-        在地图矩阵下方画 colorbar。
-        
-        逐深度色标时每列一条（各列范围不同，必须分开标）；共用色标时整行
-        合成一条。colorbar 横放在底部而非右侧，是为了让 3×4 的地图矩阵占满
-        画幅宽度，右侧竖放会挤掉一列地图的宽度。
-        
-        Args:
-            fig: 目标 Figure
-            map_gs: 地图矩阵所用的 GridSpec（最后一行预留给 colorbar）
-            col_images: 各列的 QuadMesh（取该列最后绘制的一个即可）
-            col_limits: 各列的 ±范围（%）
-            n_rows: 地图行数（模型数）
-            n_cols: 地图列数（深度数）
-            param_name: 速度参数名，用于色标标签
-        """
-        label = rf'$\delta\ln V_{param_name[-1].upper()}$ (%)'
-        per_depth = len({round(v, 6) for v in col_limits}) > 1 or \
-            str(self.config.paper_figure.get('dlnv_limit_mode')) == 'per_depth'
-        
-        def _shrink(cax: Any, frac: float = 0.62) -> None:
-            """居中收窄，满格的细长条会显得比地图还抢眼"""
-            pos = cax.get_position()
-            cax.set_position([
-                pos.x0 + pos.width * (1 - frac) / 2.0,
-                pos.y0, pos.width * frac, pos.height,
-            ])
-        
-        if per_depth:
-            for col in range(n_cols):
-                if col_images[col] is None:
-                    continue
-                cax = fig.add_subplot(map_gs[n_rows, col])
-                _shrink(cax)
-                cbar = fig.colorbar(col_images[col], cax=cax,
-                                    orientation='horizontal')
-                lim = col_limits[col]
-                cbar.set_ticks([-lim, 0.0, lim])
-                cbar.set_ticklabels([f'−{lim:g}', '0', f'+{lim:g}'])
-                cbar.ax.tick_params(labelsize=7.5, length=2, pad=1.5)
-                cbar.outline.set_linewidth(0.5)
-                if col == n_cols - 1:
-                    cbar.set_label(label, fontsize=9, labelpad=2)
-        else:
-            image = next((im for im in col_images if im is not None), None)
-            if image is None:
-                return
-            cax = fig.add_subplot(map_gs[n_rows, :])
-            _shrink(cax, frac=0.45)
-            cbar = fig.colorbar(image, cax=cax, orientation='horizontal')
-            lim = col_limits[0]
-            cbar.set_ticks(np.arange(-lim, lim + 1e-6, 2.0))
-            cbar.ax.tick_params(labelsize=8, length=2, pad=1.5)
-            cbar.outline.set_linewidth(0.5)
-            cbar.set_label(label, fontsize=9, labelpad=2)
-    
-    def _draw_paper_1d_profile(
-        self,
-        ax: Any,
-        model_items: List[Tuple[str, Any]],
-        slice_depths: List[float],
-    ) -> None:
-        """
-        在论文主图左栏绘制三模型全深度 1D VS 平均剖面。
-        
-        切片深度处画实线，与右侧地图对齐；410 / 660 km
-        间断面用虚线。阴影为空间标准差（±N σ），图例放在左下角。
-        """
-        paper_cfg = self.config.paper_figure
-        depth_range = self.config.profile_params['depth_range']
-        sigma = float(paper_cfg.get('1d_sigma', 1.0))
-        xlim = tuple(paper_cfg.get('1d_xlim', (3.0, 7.0)))
-        params = tuple(paper_cfg.get('1d_params', ('vs',)))
-        
-        for _model_key, model in model_items:
-            profile = model.calculate_1d_profile(
-                depth_range=depth_range,
-                spatial_averaging=True,
-            )
-            if 'depth' not in profile or len(profile['depth']) == 0:
-                continue
-            
-            z = profile['depth']
-            color = model.metadata.color
-            model_labeled = False
-            
-            for target_param in params:
-                if target_param not in profile:
-                    continue
-                values = profile[target_param]
-                valid = ~np.isnan(values['mean'])
-                if valid.sum() == 0:
-                    continue
-                
-                ax.plot(
-                    values['mean'][valid], z[valid],
-                    color=color,
-                    linestyle='-',
-                    linewidth=1.6,
-                    label=model.metadata.full_name if not model_labeled else None,
-                    zorder=3,
-                )
-                model_labeled = True
-                
-                std_mask = valid & ~np.isnan(values['std'])
-                if std_mask.sum() > 0:
-                    ax.fill_betweenx(
-                        z[std_mask],
-                        values['mean'][std_mask] - sigma * values['std'][std_mask],
-                        values['mean'][std_mask] + sigma * values['std'][std_mask],
-                        color=color,
-                        alpha=0.15,
-                        linewidth=0,
-                        zorder=2,
-                    )
-        
-        for depth in slice_depths:
-            ax.axhline(y=depth, color='0.25', linestyle='-', linewidth=0.9, alpha=0.7, zorder=1)
-            ax.text(
-                xlim[1] - 0.08, depth,
-                f'{depth:.0f} km',
-                va='bottom', ha='right',
-                fontsize=7, color='0.25',
-                clip_on=True,
-                zorder=5,
-            )
-        
-        for disc in (410.0, 660.0):
-            if depth_range[0] < disc <= depth_range[1]:
-                ax.axhline(y=disc, color='0.55', linestyle='--', linewidth=0.8, alpha=0.7, zorder=1)
-        
-        ax.set_ylim(depth_range[1], depth_range[0])
-        ax.set_xlim(xlim[0], xlim[1])
-        ax.set_xlabel(r'$V_S$ (km/s)', fontsize=9)
-        ax.set_ylabel('Depth (km)', fontsize=9)
-        ax.tick_params(axis='both', labelsize=8)
-        ax.set_title('1-D average', fontsize=11, pad=4, fontweight='bold')
-        ax.grid(True, linestyle=':', alpha=0.35)
-        
-        handles, labels = ax.get_legend_handles_labels()
-        sigma_label = rf'$\pm {sigma:g}\sigma$'
-        handles.append(Patch(facecolor='0.55', alpha=0.35, edgecolor='none', label=sigma_label))
-        labels.append(sigma_label)
-        ax.legend(
-            handles,
-            labels,
-            loc='lower left',
-            fontsize=7,
-            frameon=True,
-            framealpha=0.9,
-            borderpad=0.3,
-            labelspacing=0.25,
-            handlelength=1.4,
-        )
-    
-    def _resolve_paper_cmap(self, name: str) -> Any:
-        """
-        解析论文主图色标。
-        
-        GMT seis（Suzan van der Lee）：红(低速)→橙→黄→绿→青→蓝(高速)。
-        节点取自 GMT share/cpt/gmt/seis.cpt，与 5_8 的 PyGMT seis 一致。
-        """
-        key = name.lower().strip()
-        if key in ('seis', 'gmt_seis'):
-            nodes = [
-                (0.0000, (170 / 255, 0.0, 0.0)),
-                (0.1111, (1.0, 0.0, 0.0)),
-                (0.2222, (1.0, 85 / 255, 0.0)),
-                (0.3333, (1.0, 170 / 255, 0.0)),
-                (0.4444, (1.0, 1.0, 0.0)),
-                (0.5556, (1.0, 1.0, 0.0)),
-                (0.6667, (90 / 255, 1.0, 30 / 255)),
-                (0.7778, (0.0, 240 / 255, 110 / 255)),
-                (0.8889, (0.0, 80 / 255, 1.0)),
-                (1.0000, (0.0, 0.0, 205 / 255)),
-            ]
-            return LinearSegmentedColormap.from_list('gmt_seis', nodes, N=256)
-        return name
-    
-    def _configure_map_gridliner(
-        self,
-        gl: Any,
-        left_labels: bool,
-        bottom_labels: bool,
-    ) -> None:
-        """兼容新旧 Cartopy Gridliner 的刻度标签开关。"""
-        gl.top_labels = False
-        gl.right_labels = False
-        if hasattr(gl, 'left_labels'):
-            gl.left_labels = left_labels
-            gl.bottom_labels = bottom_labels
-        else:
-            gl.ylabels_left = left_labels
-            gl.xlabels_bottom = bottom_labels
-            gl.xlabels_top = False
-            gl.ylabels_right = False
-    
-    # ==================== 垂直剖面对比（保持原有实现）====================
-    
-    def plot_vertical_profiles_comparison(self, param: str = 'vs') -> List[Figure]:
-        """
-        绘制垂直剖面对比图（灵活绘图模式：绝对速度/扰动/两者）
-        
-        功能增强：
-        - 灵活绘图模式：可选择只画绝对速度、只画扰动、或两者都画
-        - dlnV单位：百分比 (%)
-        - 切片色标：seismic
-        
-        dlnV定义：dlnV = ln(V/V_ref) × 100%
-        
-        Args:
-            param: 要可视化的参数（vs, vp等）
-            
-        Returns:
-            图表列表
-        """
-        mode = self.config.plot_mode['vertical_profiles']
-        self.logger.info(f"🎨 绘制垂直剖面对比图（模式: {mode}）: {param.upper()}")
-        
-        figures = []
-        
-        # 1. 经度剖面
-        lon_positions = self.config.slice_params['vertical_profiles']['longitude']
-        for lon in lon_positions:
-            fig = self._plot_single_vertical_profile_flexible(param, 'longitude', lon, mode)
-            if fig:
-                figures.append(fig)
-        
-        # 2. 纬度剖面
-        lat_positions = self.config.slice_params['vertical_profiles']['latitude']
-        for lat in lat_positions:
-            fig = self._plot_single_vertical_profile_flexible(param, 'latitude', lat, mode)
-            if fig:
-                figures.append(fig)
-        
-        self.logger.info(f"✅ 成功生成 {len(figures)} 个垂直剖面对比图（模式: {mode}）")
-        return figures
-    
-    def _plot_single_vertical_profile_flexible(
-        self, param: str, direction: str, position: float, mode: str
-    ) -> Optional[Figure]:
-        """
-        绘制单个垂直剖面对比（灵活绘图模式）
-        
-        Args:
-            param: 参数名称
-            direction: 'longitude' 或 'latitude'
-            position: 位置值
-            mode: 'absolute', 'perturbation', 或 'both'
-            
-        Returns:
-            垂直剖面对比图
-        """
-        
-        n_models = len(self.models)
-        
-        # ========== 根据绘图模式决定子图布局 ==========
-        if mode == 'both':
-            nrows, ncols = 2, n_models
-            figsize = (5*ncols, 8)
-        else:
-            nrows, ncols = 1, n_models
-            figsize = (5*ncols, 4)
-        
-        fig = plt.figure(figsize=figsize)
-        
-        # ========== 收集数据 ==========
-        all_data_abs = []
-        all_data_dlnv = []
-        
-        for model in self.models.values():
-            if model.has_parameter(param):
-                try:
-                    if mode in ['absolute', 'both']:
-                        _, _, data_profile = model.get_vertical_profile(param, direction, position)
-                        all_data_abs.append(data_profile[~np.isnan(data_profile)])
-                    
-                    if mode in ['perturbation', 'both']:
-                        _, _, dlnv_profile = model.get_vertical_profile_dlnv(param, direction, position)
-                        all_data_dlnv.append(dlnv_profile[~np.isnan(dlnv_profile)])
-                except Exception:
-                    pass
-        
-        # 检查是否有有效数据
-        if mode in ['absolute', 'both'] and len(all_data_abs) == 0:
-            pos_label = f"Lon={position}°" if direction == 'longitude' else f"Lat={position}°"
-            self.logger.warning(f"  {pos_label} 无绝对速度数据")
-            plt.close(fig)
-            return None
-        
-        # 计算统一的colorbar范围
-        if mode in ['absolute', 'both'] and len(all_data_abs) > 0:
-            all_data_abs_flat = np.concatenate(all_data_abs)
-            vmin_abs = np.percentile(all_data_abs_flat, self.config.slice_params['vmin_percentile'])
-            vmax_abs = np.percentile(all_data_abs_flat, self.config.slice_params['vmax_percentile'])
-        else:
-            vmin_abs, vmax_abs = None, None
-        
-        if mode in ['perturbation', 'both'] and len(all_data_dlnv) > 0:
-            all_data_dlnv_flat = np.concatenate(all_data_dlnv)
-            dlnv_max = np.percentile(np.abs(all_data_dlnv_flat), 
-                                    self.config.slice_params['dlnv_percentile'])
-            vmin_dlnv, vmax_dlnv = -dlnv_max, dlnv_max
-        else:
-            vmin_dlnv, vmax_dlnv = -10.0, 10.0
-        
-        # ========== 绘制每个模型 ==========
-        for idx, (model_key, model) in enumerate(self.models.items(), 1):
-            if not model.has_parameter(param):
-                continue
-            
-            try:
-                pos_label = f"Lon={position}°" if direction == 'longitude' else f"Lat={position}°"
-                
-                # ========== 绝对速度（第一行或唯一行）==========
-                if mode in ['absolute', 'both']:
-                    horiz_grid, depth_grid, data_profile = model.get_vertical_profile(
-                        param, direction, position
-                    )
-                    
-                    ax_abs = fig.add_subplot(nrows, ncols, idx)
-                    
-                    im_abs = ax_abs.pcolormesh(
-                        horiz_grid, depth_grid, data_profile,
-                        cmap=self.config.slice_params['cmap'],
-                        vmin=vmin_abs,
-                        vmax=vmax_abs,
-                        shading='auto'
-                    )
-                    
-                    cbar_abs = plt.colorbar(im_abs, ax=ax_abs)
-                    cbar_abs.set_label(f'{param.upper()} (km/s)', 
-                                      fontsize=self.config.plot_params['font_sizes']['colorbar'])
-                    
-                    title_text = f"{model.metadata.full_name}\n{pos_label}"
-                    if mode == 'absolute':
-                        title_text = f"{model.metadata.full_name}\n{pos_label}"
-                    
-                    ax_abs.set_title(title_text,
-                                    fontsize=self.config.plot_params['font_sizes']['title'],
-                                    color=model.metadata.color,
-                                    fontweight='bold')
-                    
-                    if direction == 'longitude':
-                        ax_abs.set_xlabel('Latitude (°)', 
-                                         fontsize=self.config.plot_params['font_sizes']['xlabel'])
-                    else:
-                        ax_abs.set_xlabel('Longitude (°)', 
-                                         fontsize=self.config.plot_params['font_sizes']['xlabel'])
-                    
-                    ax_abs.set_ylabel('Depth (km)', 
-                                     fontsize=self.config.plot_params['font_sizes']['ylabel'])
-                    ax_abs.invert_yaxis()
-                    
-                    for boundary_depth in [60, 410, 660]:
-                        if boundary_depth <= depth_grid.max():
-                            ax_abs.axhline(y=boundary_depth, color='white', 
-                                          linestyle='--', linewidth=1, alpha=0.7)
-                
-                # ========== dlnV扰动（第二行或唯一行）==========
-                if mode in ['perturbation', 'both']:
-                    horiz_grid, depth_grid, dlnv_profile = model.get_vertical_profile_dlnv(
-                        param, direction, position
-                    )
-                    
-                    if mode == 'both':
-                        subplot_idx = ncols + idx
-                    else:
-                        subplot_idx = idx
-                    
-                    ax_dlnv = fig.add_subplot(nrows, ncols, subplot_idx)
-                    
-                    im_dlnv = ax_dlnv.pcolormesh(
-                        horiz_grid, depth_grid, dlnv_profile,
-                        cmap=self.config.slice_params['cmap_perturbation'],
-                        vmin=vmin_dlnv,
-                        vmax=vmax_dlnv,
-                        shading='auto'
-                    )
-                    
-                    cbar_dlnv = plt.colorbar(im_dlnv, ax=ax_dlnv)
-                    cbar_dlnv.set_label('dlnV (%)',
-                                       fontsize=self.config.plot_params['font_sizes']['colorbar'])
-                    
-                    if mode == 'both':
-                        title_text = "Velocity Perturbation"
-                    else:
-                        title_text = f"{model.metadata.full_name}\n{pos_label}\nVelocity Perturbation"
-                    
-                    ax_dlnv.set_title(title_text,
-                                     fontsize=self.config.plot_params['font_sizes']['title'],
-                                     color=model.metadata.color if mode == 'perturbation' else 'black',
-                                     fontweight='bold' if mode == 'perturbation' else 'normal')
-                    
-                    if direction == 'longitude':
-                        ax_dlnv.set_xlabel('Latitude (°)', 
-                                          fontsize=self.config.plot_params['font_sizes']['xlabel'])
-                    else:
-                        ax_dlnv.set_xlabel('Longitude (°)', 
-                                          fontsize=self.config.plot_params['font_sizes']['xlabel'])
-                    
-                    ax_dlnv.set_ylabel('Depth (km)', 
-                                      fontsize=self.config.plot_params['font_sizes']['ylabel'])
-                    ax_dlnv.invert_yaxis()
-                    
-                    for boundary_depth in [60, 410, 660]:
-                        if boundary_depth <= depth_grid.max():
-                            ax_dlnv.axhline(y=boundary_depth, color='white', 
-                                           linestyle='--', linewidth=1, alpha=0.7)
-                
-            except Exception as e:
-                self.logger.warning(f"  绘制 {model.metadata.name} 剖面失败: {e}")
-        
-        # ========== 总标题 ==========
-        if mode == 'absolute':
-            suptitle = f'Vertical Profile Comparison - {param.upper()} @ {pos_label}\n(Absolute Velocity)'
-        elif mode == 'perturbation':
-            suptitle = f'Vertical Profile Comparison - {param.upper()} @ {pos_label}\n(dlnV Perturbation in %)'
-        else:
-            suptitle = f'Vertical Profile Comparison - {param.upper()} @ {pos_label}\n(Absolute Velocity + dlnV Perturbation in %)'
-        
-        plt.suptitle(suptitle,
-                    fontsize=self.config.plot_params['font_sizes']['title']+2,
-                    y=0.98,
-                    fontweight='bold')
-        
-        plt.tight_layout(rect=(0, 0, 1, 0.96))
-        
-        return fig
-    
-    # ==================== 保存结果 ====================
-    
+            spec = importlib.util.spec_from_file_location(mod_name, viz_py)
+            if spec is None or spec.loader is None:
+                raise ImportError(f'无法加载可视化模块: {viz_py}')
+            mod = importlib.util.module_from_spec(spec)
+            sys.modules[mod_name] = mod
+            spec.loader.exec_module(mod)
+        return mod.ModelCompareVisualizer(self)
+
     def save_results(self):
-        """保存所有分析结果"""
-        self.logger.info("\n" + "="*80)
-        self.logger.info("💾 保存分析结果...")
-        self.logger.info("="*80)
-        
+        """保存全部分析结果：出图交给 5_12，本模块只写统计报告。"""
+        self.logger.info("\n" + "=" * 80)
+        self.logger.info("💾 保存分析结果（可视化 → 5_12 / PyGMT）...")
+        self.logger.info("=" * 80)
+
         prefix = self.config.output_params['figure_prefix']
-        
         try:
-            # 1. 速度剖面对比（VS + VP）
-            self.logger.info("\n📊 1. 综合速度剖面对比（VS + VP）...")
-            fig1 = self.plot_1d_velocity_comparison()
-            self._save_figure(fig1, self.output_dir / f"{prefix}velocity_comparison")
-            plt.close(fig1)
-            
-            # 2. S波各向异性对比
-            self.logger.info("\n📊 2. S波各向异性对比（VSV实线 vs VSH虚线）...")
-            fig2 = self.plot_s_wave_anisotropy_comparison()
-            if fig2:
-                self._save_figure(fig2, self.output_dir / f"{prefix}s_wave_anisotropy")
-                plt.close(fig2)
-            
-            # 3. P波各向异性对比
-            self.logger.info("\n📊 3. P波各向异性对比（VPV实线 vs VPH虚线）...")
-            fig3 = self.plot_p_wave_anisotropy_comparison()
-            if fig3:
-                self._save_figure(fig3, self.output_dir / f"{prefix}p_wave_anisotropy")
-                plt.close(fig3)
-            
-            # 4. 单个模型详细剖面（v2.7 使用 original 数据，展示完整模型区域）
-            self.logger.info("\n📊 4. 单个模型详细剖面（original 区域）...")
-            for model_key, model in self.models.items():
-                fig = self.plot_individual_model_profile(model_key)
-                if fig:
-                    safe_name = model.metadata.name.replace(' ', '_').replace('.', '_')
-                    self._save_figure(fig, 
-                                    self.output_dir / f"{prefix}profile_{safe_name}")
-                    plt.close(fig)
-            
-            # 5. 切片位置示意图
-            self.logger.info("\n🗺️  5. 切片位置示意图...")
-            fig_loc = self.plot_slice_location_map()
-            self._save_figure(fig_loc, self.output_dir / f"{prefix}slice_locations")
-            plt.close(fig_loc)
-            
-            # 6. 🆕 独立绝对速度对比图
-            if self.config.plot_mode['enable_absolute_only']:
-                self.logger.info(f"\n🆕 6. 独立绝对速度对比图（VS）...")
-                abs_figs = self.plot_horizontal_slices_absolute_only('vs')
-                for i, fig in enumerate(abs_figs):
-                    depth = self.config.slice_params['horizontal_depths'][i]
-                    self._save_figure(fig, 
-                                    self.output_dir / f"{prefix}absolute_vs_{depth}km")
-                    plt.close(fig)
-            
-            # 7. 🆕 两两模型差异对比图
-            if self.config.plot_mode['enable_model_differences']:
-                self.logger.info(f"\n🆕 7. 两两模型差异对比图（VS）...")
-                diff_figs = self.plot_horizontal_slices_model_differences('vs')
-                for i, fig in enumerate(diff_figs):
-                    depth = self.config.slice_params['horizontal_depths'][i]
-                    self._save_figure(fig, 
-                                    self.output_dir / f"{prefix}difference_vs_{depth}km")
-                    plt.close(fig)
-            
-            # 8. 水平切片对比图（灵活模式）
-            h_mode = self.config.plot_mode['horizontal_slices']
-            self.logger.info(f"\n🗺️  8. 水平切片对比（VS，模式: {h_mode}）...")
-            slice_figs_vs = self.plot_horizontal_slices_comparison('vs')
-            for i, fig in enumerate(slice_figs_vs):
-                depth = self.config.slice_params['horizontal_depths'][i]
-                self._save_figure(fig, 
-                                self.output_dir / f"{prefix}horizontal_slice_vs_{depth}km")
-                plt.close(fig)
-            
-            # 9. 垂直剖面对比图（灵活模式）
-            v_mode = self.config.plot_mode['vertical_profiles']
-            self.logger.info(f"\n📐 9. 垂直剖面对比（VS，模式: {v_mode}）...")
-            profile_figs = self.plot_vertical_profiles_comparison('vs')
-            for i, fig in enumerate(profile_figs):
-                self._save_figure(fig, 
-                                self.output_dir / f"{prefix}vertical_profile_{i+1}")
-                plt.close(fig)
-            
-            # 10. 论文主图（模型 × 深度 的 dlnV 切片矩阵，自带 jpg + pdf 保存）
-            paper_depths = self.config.paper_figure['depths']
-            self.logger.info(f"\n📄 10. 论文主图（深度 {paper_depths} km）...")
-            fig_paper = self.plot_paper_dlnv_maps()
-            plt.close(fig_paper)
-            
-            # 11. 生成统计报告
-            self.logger.info("\n📋 11. 生成统计报告...")
+            visualizer = self._get_visualizer()
+            visualizer.plot_all()
+
+            self.logger.info("\n📋 生成统计报告...")
             report = self.generate_comparison_report()
-            
+
             report_file = self.output_dir / f"{prefix}comparison_report.json"
             with open(report_file, 'w', encoding='utf-8') as f:
                 json.dump(report, f, indent=2, ensure_ascii=False, default=str)
-            
+
             self._save_text_report(report, self.output_dir / f"{prefix}comparison_summary.txt")
             self._save_markdown_report(report, self.output_dir / f"{prefix}model_comparison.md")
-            
-            self.logger.info("\n" + "="*80)
+
+            self.logger.info("\n" + "=" * 80)
             self.logger.info(f"✅ 所有结果已保存到: {self.output_dir}")
-            self.logger.info("="*80)
-            
+            self.logger.info("=" * 80)
         except Exception as e:
             self.logger.error(f"保存结果失败: {e}")
             raise
-    
+
     def generate_comparison_report(self) -> Dict[str, Any]:
         """生成详细的对比分析报告"""
         self.logger.info("  生成对比分析报告...")
@@ -2786,17 +929,6 @@ class ModelComparator:
             }
         
         return report
-    
-    def _save_figure(self, fig: Figure, filepath: Path):
-        """保存图表"""
-        for fmt in self.config.output_params['save_formats']:
-            output_file = filepath.with_suffix(f'.{fmt}')
-            fig.savefig(
-                output_file,
-                dpi=self.config.output_params['save_dpi'],
-                bbox_inches=self.config.output_params['save_bbox']
-            )
-        self.logger.info(f"  ✅ {filepath.name}")
     
     def _save_text_report(self, report: Dict[str, Any], filepath: Path):
         """保存文本格式报告"""
@@ -3074,6 +1206,24 @@ class ModelComparator:
             pdf = fig_dir / f'{prefix}paper_dlnv_maps.pdf'
             if pdf.exists():
                 lines += [f'矢量版本: [{pdf.name}]({pdf.name})', '']
+
+        for abs_param, abs_title, sec in (('vs', 'VS', '4b'), ('vp', 'VP', '4c')):
+            abs_block = embed(
+                f'{prefix}paper_{abs_param}_maps',
+                f'Paper figure: {abs_title} at {depth_str} km '
+                f'({len(model_items)} models × {len(paper_depths)} depths)'
+            )
+            if abs_block:
+                lines += [
+                    f'## {sec}. 论文图：绝对 {abs_title} 深度切片矩阵',
+                    '',
+                    f'版式与 dlnV 主图相同；色标为绝对 {abs_title}（km/s），'
+                    '每列按该深度所有模型的 2–98 分位数定范围，列内三模型可直接比较快慢。',
+                    '',
+                ] + abs_block
+                abs_pdf = fig_dir / f'{prefix}paper_{abs_param}_maps.pdf'
+                if abs_pdf.exists():
+                    lines += [f'矢量版本: [{abs_pdf.name}]({abs_pdf.name})', '']
         
         # ---------- 5. 1D 剖面与各向异性 ----------
         block: List[str] = []
@@ -3190,10 +1340,9 @@ def main():
     print("  • 灵活绘图模式：'absolute', 'perturbation', 'both'")
     print("  • dlnV扰动单位: 百分比 (%)")
     print("  • 模型差异单位: km/s (ΔV = V_A - V_B)")
-    print("  • 切片色标: seismic / RdBu_r")
-    print("  • 水平切片colorbar: 右侧垂直放置")
-    print("  • 水平切片: 添加海岸线数据")
-    print("  • 新增位置示意图: 显示所有切片位置")
+    print("  • 出图: 5_Visualization/5_12_Model_compare.py（地图 PyGMT）")
+    print("  • 切片色标: GMT seis（绝对速度与扰动）；绝对速度取到 0.1 km/s")
+    print("  • 输出: jpg + pdf，300 dpi")
     print("\n🔬 地震学标准:")
     print("  • dlnV扰动定义: dlnV = ln(V/V_ref) × 100%")
     print("  • 小扰动近似: dlnV ≈ (V - V_ref)/V_ref × 100% = dV/V × 100%")
@@ -3225,48 +1374,45 @@ def main():
         print(f"📁 结果保存在: {comparator.output_dir}")
         print("\n📊 生成的文件:")
         print("\n  综合对比图:")
-        print("    - 2-1_velocity_comparison.png (VS+VP，实线)")
-        print("    - 2-1_s_wave_anisotropy.png (VSV实线 vs VSH虚线)")
-        print("    - 2-1_p_wave_anisotropy.png (VPV实线 vs VPH虚线)")
+        print("    - 2-1_velocity_comparison.jpg / .pdf (VS+VP，实线)")
+        print("    - 2-1_s_wave_anisotropy.jpg / .pdf (VSV实线 vs VSH虚线)")
+        print("    - 2-1_p_wave_anisotropy.jpg / .pdf (VPV实线 vs VPH虚线)")
         print("\n  单个模型详细图:")
         for model_key, model in comparator.models.items():
             safe_name = model.metadata.name.replace(' ', '_').replace('.', '_')
-            print(f"    - 2-1_profile_{safe_name}.png")
+            print(f"    - 2-1_profile_{safe_name}.jpg / .pdf")
         print("\n  切片位置示意图:")
-        print("    - 2-1_slice_locations.png（显示所有剖面位置）")
+        print("    - 2-1_slice_locations.jpg / .pdf")
         
         if comparator.config.plot_mode['enable_absolute_only']:
-            print(f"\n  🆕 独立绝对速度对比图:")
+            print(f"\n  独立绝对速度对比图:")
             for depth in comparator.config.slice_params['horizontal_depths']:
-                print(f"    - 2-1_absolute_vs_{depth}km.png")
+                print(f"    - 2-1_absolute_vs_{depth}km.jpg / .pdf")
         
         if comparator.config.plot_mode['enable_model_differences']:
-            print(f"\n  🆕 两两模型差异对比图:")
+            print(f"\n  两两模型差异对比图:")
             for depth in comparator.config.slice_params['horizontal_depths']:
-                print(f"    - 2-1_difference_vs_{depth}km.png")
+                print(f"    - 2-1_difference_vs_{depth}km.jpg / .pdf")
         
         print(f"\n  水平切片（模式: {comparator.config.plot_mode['horizontal_slices']}）:")
         for depth in comparator.config.slice_params['horizontal_depths']:
-            print(f"    - 2-1_horizontal_slice_vs_{depth}km.png")
+            print(f"    - 2-1_horizontal_slice_vs_{depth}km.jpg / .pdf")
         print(f"\n  垂直剖面（模式: {comparator.config.plot_mode['vertical_profiles']}）:")
-        print("    - 2-1_vertical_profile_*.png")
+        print("    - 2-1_vertical_profile_*.jpg / .pdf")
         paper_depths = comparator.config.paper_figure['depths']
         print(f"\n  论文主图（{len(comparator.models)}模型 × {len(paper_depths)}深度）:")
         print(f"    - 2-1_paper_dlnv_maps.jpg / .pdf  ({paper_depths} km)")
+        print(f"    - 2-1_paper_vs_maps.jpg / .pdf  ({paper_depths} km)")
+        print(f"    - 2-1_paper_vp_maps.jpg / .pdf  ({paper_depths} km)")
         print("\n  报告:")
         print("    - 2-1_model_comparison.md  ← 直观对比（含图表，可直接浏览）")
         print("    - 2-1_comparison_report.json")
         print("    - 2-1_comparison_summary.txt")
         
-        print("\n🆕 新增功能说明:")
-        print("    - 独立绝对速度图: 所有模型在同一深度的并排对比")
-        print("    - 两两模型差异图: 显示Model_A - Model_B (km/s)")
-        print("      • 红色: Model_A更快（高速）")
-        print("      • 蓝色: Model_B更快（低速）")
+        print("\n说明:")
+        print("    - 可视化已拆至 5_12_Model_compare.py，地图用 PyGMT")
         print("    - dlnV = ln(V/V_ref) × 100%: 对数速度扰动（百分比）")
         print("    - ΔV = V_A - V_B: 绝对速度差异（km/s）")
-        print("    - 海岸线: 使用Cartopy添加地理参考")
-        print("    - colorbar: 右侧垂直放置")
         print("="*80 + "\n")
         
     except Exception as e:

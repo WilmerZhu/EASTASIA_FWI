@@ -2367,6 +2367,74 @@ class VelocityModelSimilarity:
 
         self.logger.info("✅ 所有结果已保存")
 
+    def load_saved_results(self) -> None:
+        """
+        从已保存的 CSV 恢复 results 与 profiles，只重绘论文图、不重算 SSIM。
+
+        模型对象只保留绘图所需的 name / color / 原生分辨率，不打开 NetCDF。
+        """
+        native_res = {
+            '2022_SinoScope1.0': {'lon': 1.0, 'lat': 1.0},
+            '2024_EARA2024': {'lon': 0.25, 'lat': 0.25},
+            '2024_FWEA23': {'lon': 0.25, 'lat': 0.25},
+        }
+
+        class _PlotStub:
+            """仅供论文图取色与分辨率标注"""
+
+            def __init__(self, key: str, info: Dict[str, Any], res: Dict[str, float]):
+                self.model_key = key
+                self.name = info['name']
+                self.color = info['color']
+                self._res = res
+
+            def estimate_resolution(self) -> Dict[str, float]:
+                return self._res
+
+            def close(self) -> None:
+                return None
+
+        self.models = {
+            key: _PlotStub(key, info, native_res.get(key, {'lon': 1.0, 'lat': 1.0}))
+            for key, info in self.config.models.items()
+        }
+
+        self.results = {}
+        self.profiles = {}
+        for feature in self.config.analysis['target_features']:
+            feat_dir = self.output_dir / feature
+            if not feat_dir.is_dir():
+                continue
+            for csv in sorted(feat_dir.glob(f'*_{feature}_depth.csv')):
+                self.results[csv.stem] = pd.read_csv(csv)
+            prof_file = feat_dir / f'1d_profiles_{feature}.csv'
+            if not prof_file.exists():
+                continue
+            df = pd.read_csv(prof_file)
+            if 'model_key' not in df.columns or feature not in df.columns:
+                continue
+            self.profiles[feature] = {}
+            std_col = f'{feature}_std'
+            for key, grp in df.groupby('model_key'):
+                std = (grp[std_col].to_numpy(dtype=float)
+                       if std_col in grp.columns
+                       else np.full(len(grp), np.nan))
+                self.profiles[feature][str(key)] = {
+                    'depth': grp['depth_km'].to_numpy(dtype=float),
+                    'value': grp[feature].to_numpy(dtype=float),
+                    'std': std,
+                }
+
+        n_depth = sum(1 for k in self.results if k.endswith('_depth'))
+        n_prof = sum(len(v) for v in self.profiles.values())
+        if n_depth == 0:
+            raise FileNotFoundError(
+                f"未找到已保存的深度曲线 CSV: {self.output_dir}"
+            )
+        self.logger.info(
+            f"✅ 已从 CSV 恢复 {n_depth} 条深度曲线、{n_prof} 条 1D 剖面"
+        )
+
 
 class SimilarityVisualization:
     """
@@ -2476,12 +2544,12 @@ class SimilarityVisualization:
         return out
 
     def _pair_label(self, pair_name: str) -> str:
-        """将 '{m1_key}_vs_{m2_key}' 转为 'Name1 vs Name2' 可读标签"""
+        """将 '{m1_key}_vs_{m2_key}' 转为 'Name1-Name2' 可读标签"""
         parts = pair_name.split('_vs_')
         if len(parts) == 2:
             n1 = self.analyzer.models.get(parts[0])
             n2 = self.analyzer.models.get(parts[1])
-            return f"{n1.name if n1 else parts[0]} vs {n2.name if n2 else parts[1]}"
+            return f"{n1.name if n1 else parts[0]}-{n2.name if n2 else parts[1]}"
         return pair_name
 
     def _parse_pair_indices(
@@ -2505,7 +2573,7 @@ class SimilarityVisualization:
                 float(max(m1.lat.min(), m2.lat.min())),
                 float(min(m1.lat.max(), m2.lat.max())),
             )
-        return (80.0, 150.0, 10.0, 55.0)
+        return tuple(self.analyzer.base_config.get_gmt_region('common'))
 
     def _save_figure(self, fig: plt.Figure, name: str):
         """保存图表（多格式）"""
@@ -2718,7 +2786,7 @@ class SimilarityVisualization:
         ax.set_xlabel(rf'$V_{sub}$ (km/s)', fontsize=12)
         ax.set_ylabel('Depth (km)', fontsize=12)
         self._decorate_depth_axis(ax)
-        ax.legend(fontsize=9.5, loc='lower left', handlelength=1.6)
+        ax.legend(fontsize=8.0, loc='lower left', handlelength=1.6)
         return n_plotted
 
     def _draw_ssim_curves(self, ax, feature: str) -> int:
@@ -2772,15 +2840,11 @@ class SimilarityVisualization:
                     markersize=2.8, color=color, markeredgecolor='white',
                     markeredgewidth=0.35, zorder=5)
 
-            agg = self.analyzer._depth_average(df, 'ssim')
             handles.append(Line2D(
                 [], [], color=color, linewidth=1.4, marker=marker,
                 markersize=4.0, markeredgecolor='white', markeredgewidth=0.4,
             ))
-            labels.append(
-                f'{self._pair_label(pair)}'
-                + (f'  ({agg:.2f})' if np.isfinite(agg) else '')
-            )
+            labels.append(self._pair_label(pair))
             v_max = max(v_max, float(np.nanmax(s_raw)))
             if show_null and 'ssim_null' in df.columns:
                 null_depth.append(z)
@@ -2806,23 +2870,22 @@ class SimilarityVisualization:
             handles.append(Patch(facecolor='#B0B0B0', alpha=0.35))
             labels.append('Null (phase-randomized)')
 
-        # 不写成 "Depth-wise SSIM"：1D 剖面 SSIM 恰恰是沿深度方向算的，
-        # 只说 depth-wise 会与它混淆，保留 2D 才点明每个测量做在一张水平切片上
         ax.set_xlabel(
-            f'Depth-wise 2D SSIM  ({self._feat_math(feature)})',
+            f'Depth-wise SSIM  ({self._feat_math(feature)})',
             fontsize=12,
         )
         self._decorate_depth_axis(ax)
 
-        # 括号内是层厚加权深度平均值，平滑尺度见 ssim_smooth_km——两者都由
-        # 图注说明，图内不再放标题文字
+        # 图例放右下角，字号比轴标签小一号。
         leg = ax.legend(
-            handles=handles, labels=labels, fontsize=9.5, loc='lower right',
-            handlelength=2.2, handletextpad=0.7,
+            handles=handles, labels=labels, fontsize=8.0,
+            loc='lower right',
+            handlelength=1.6, handletextpad=0.45, labelspacing=0.28,
+            borderpad=0.30, borderaxespad=0.35,
         )
         leg.set_frame_on(True)
         leg.get_frame().set_facecolor('white')
-        leg.get_frame().set_alpha(0.82)
+        leg.get_frame().set_alpha(0.88)
         leg.get_frame().set_linewidth(0)
         return n_plotted
 
@@ -2831,7 +2894,7 @@ class SimilarityVisualization:
         论文用单幅图，两个面板共享深度轴：
 
         (a) 共同区域 1D 平均剖面 V(z) 与 ±1σ 横向变化带
-        (b) 2D SSIM(z)——逐深度横向结构相似性，图例括号内为深度平均值
+        (b) 2D SSIM(z)——逐深度横向结构相似性
 
         整体 1D SSIM 只进 similarity_summary_{feature}.csv，不进图：3 个模型
         只有 3 个数，与 (a) 的"剖面几乎重合"是同一件事的两种表述，画成矩阵
@@ -2948,7 +3011,7 @@ class SimilarityVisualization:
                    linewidth=1.2, label=self._model_label(k))
             for k in self.analyzer.models
         ]
-        ax.legend(handles=handles, fontsize=9.5, loc='lower left',
+        ax.legend(handles=handles, fontsize=8.0, loc='lower left',
                   handlelength=1.6)
         return n_plotted
 
