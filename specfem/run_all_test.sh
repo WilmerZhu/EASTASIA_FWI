@@ -3,8 +3,8 @@
 # EASTASIA-FWI  多震源多模型正演测试（全流程服务器端）
 # ============================================================================
 #
-# 五个模型组 × 30 个震源（EastAsia_model 标准测试库），外加一个单事件参照组。
-# 后四个模型组共用同一套 CRUST1.0
+# 六个模型组 × 30 个震源（EastAsia_model 标准测试库），外加一个单事件参照组。
+# 后五个模型组共用同一套 CRUST1.0
 # 地壳，只在 Moho 以下的地幔不同，因此组间差异可以干净地归因到地幔模型：
 #
 #   BASE          原作者 model_updated 原样使用，零改动
@@ -13,7 +13,8 @@
 #                 → 共用地壳下的空对照，衡量区域地幔模型到底带来多少改进
 #   FWEA23_c1     CRUST1.0 地壳 + FWEA23 地幔
 #   EARA2024_c1   CRUST1.0 地壳 + EARA2024 地幔
-#   SinoScope_c1  CRUST1.0 地壳 + SinoScope1.0 地幔
+#   SinoScope_c1  CRUST1.0 地壳 + SinoScope1.0 地幔（公开 1° HDF5）
+#   SinoScope_sem_c1  CRUST1.0 地壳 + SinoScope 作者 Salvus mesh.h5
 #   S362ANI_ref   原生 s362ani，复用 mesh0 网格，只跑 1 个事件
 #                 → 与 S362ANI_c1 同事件对比，量化 GLL 往返的代价
 #

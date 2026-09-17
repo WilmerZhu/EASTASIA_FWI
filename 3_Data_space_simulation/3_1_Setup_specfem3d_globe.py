@@ -114,9 +114,9 @@ class SPECFEM3DSetup:
             # === 数值参数 ===
             'ANGULAR_WIDTH_ETA_IN_DEGREES_HALFSPACE': 0.0,  # 半空间宽度
             'USE_ONE_LAYER_SB': '.false.',            # 使用单层边界
-            'THICKNESS_OF_X_PML': 12.7d0,             # PML厚度X
-            'THICKNESS_OF_Y_PML': 12.7d0,             # PML厚度Y
-            'THICKNESS_OF_Z_PML': 12.7d0,             # PML厚度Z
+            'THICKNESS_OF_X_PML': '12.7d0',           # PML厚度X（Fortran 双精度字面量，按字符串写入 Par_file）
+            'THICKNESS_OF_Y_PML': '12.7d0',           # PML厚度Y
+            'THICKNESS_OF_Z_PML': '12.7d0',           # PML厚度Z
             
             # === 高级选项 ===
             'USE_LDDRK': '.false.',                   # 低存储Runge-Kutta
